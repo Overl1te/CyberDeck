@@ -83,12 +83,17 @@ source venv/bin/activate
 **Установите необходимые библиотеки для работы сервера, захвата экрана и управления вводом:**
 
 ``` Bash
-pip install fastapi uvicorn pyautogui psutil mss pillow numpy
+pip install -r requirements.txt
 ```
 ### Шаг 3: Запуск сервера
 ```Bash
 # Запуск сервера на всех сетевых интерфейсах
 uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### Cборка
+```Bash
+pyinstaller --noconsole --onefile --icon=icon.png --name="CyberDeck" --add-data "static;static" --hidden-import=uvicorn --hidden-import=fastapi --hidden-import=engineio --hidden-import=socketio launcher.py
 ```
 
 ## <div id="Использование">🎮 Использование</div>
@@ -159,9 +164,9 @@ def do_something():
 
 - [ ] Авторизация по паролю/PIN
 
-- [x] Поддержка скролла двумя пальцами
+- [ ] Создание приложения для Android
 
-- [x] Потоковое видео (MJPEG)
+- [x] Сборка под Windows
 
 - [ ] Макросы и запуск приложений
 

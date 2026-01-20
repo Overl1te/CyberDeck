@@ -1,10 +1,12 @@
-pyautogui
-fastapi
-pillow
-mss
+fastapi # Основной бек
+pystray # Трей
+pyinstaller
 
 # Веб сервер
 uvicorn
 uvicorn[standard]
 
-psutil
+pillow # Для курсора
+mss # Захват экрана
+pyautogui # Взаимодействие с системой
+psutil # Взаимодействие с системой

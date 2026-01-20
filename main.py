@@ -6,70 +6,64 @@ from fastapi import WebSocket
 import pyautogui
 import io
 import os
+import sys
 import webbrowser
 import psutil
 from PIL import Image, ImageDraw
 from mss import mss
 
+# Отключаем задержку pyautogui
+pyautogui.PAUSE = 0
+
 app = FastAPI(title="PC Remote Control")
 
+# --- ФУНКЦИЯ ПОИСКА ПУТЕЙ ---
+def get_resource_path(relative_path):
+    """ Получает абсолютный путь к ресурсу, работает и для dev, и для PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+# --- ВИДЕО ПОТОК ---
 def generate_video_stream():
-    # mss - самая быстрая библиотека для захвата
     with mss() as sct:
-        # Берем первый монитор. Если у тебя их два и курсор на втором - может быть смещение.
         # Обычно monitors[1] - это основной.
         monitor = sct.monitors[1]
-        
         while True:
-            # 1. Захват экрана
             sct_img = sct.grab(monitor)
-            
-            # 2. Превращаем в картинку, на которой можно рисовать
             img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
             
-            # 3. Узнаем, где сейчас мышка
             mouse_x, mouse_y = pyautogui.position()
             
-            # 4. Рисуем курсор (Красный прицел)
             draw = ImageDraw.Draw(img)
-            
-            # Размер перекрестия
             r = 10 
-            # Рисуем линии (Красный цвет #FF0000, толщина 3px)
-            # Горизонтальная
             draw.line((mouse_x - r, mouse_y, mouse_x + r, mouse_y), fill="red", width=3)
-            # Вертикальная
             draw.line((mouse_x, mouse_y - r, mouse_x, mouse_y + r), fill="red", width=3)
 
-            # 5. Сохраняем в JPEG
             img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='JPEG', quality=45) # Качество 45 для скорости
+            img.save(img_byte_arr, format='JPEG', quality=45)
             img_bytes = img_byte_arr.getvalue()
 
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + img_bytes + b'\r\n')
-            
-# 1. Получить скриншот экрана в реальном времени
+
+# --- ЭНДПОИНТЫ ---            
 @app.get("/screenshot")
 def get_screenshot():
-    # Делаем скрин
     screenshot = pyautogui.screenshot()
-    
-    # Сохраняем его в оперативную память
     img_byte_arr = io.BytesIO()
     screenshot.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
-    
-    # Отдаем как картинку
     return StreamingResponse(img_byte_arr, media_type="image/png")
 
-# 2. Открыть любую ссылку
 @app.post("/open-url")
 def open_url(url: str):
     webbrowser.open(url)
     return {"status": "opened", "url": url}
 
-# 3. Управление громкостью
 @app.post("/volume/{action}")
 def volume_control(action: str):
     if action == "up":
@@ -82,20 +76,17 @@ def volume_control(action: str):
         return {"error": "unknown action"}
     return {"status": "success", "action": action}
 
-# 4. Выключить комп
 @app.post("/system/shutdown")
 def shutdown_pc():
     os.system("shutdown /s /t 1")
     return {"status": "Bye bye"}
 
-# 5. Получить статистику по компу 
 @app.get("/api/stats")
 async def get_system_stats():
     cpu = psutil.cpu_percent(interval=None)
     ram = psutil.virtual_memory().percent
     return {"cpu": cpu, "ram": ram}
 
-# 6. Управление курсором
 @app.websocket("/ws/mouse")
 async def websocket_mouse(websocket: WebSocket):
     await websocket.accept()
@@ -105,8 +96,6 @@ async def websocket_mouse(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            
-            # --- КОМАНДЫ (КЛИКИ И СКРОЛЛ) ---
             if "type" in data:
                 if data["type"] == "click":
                     pyautogui.click()
@@ -114,16 +103,9 @@ async def websocket_mouse(websocket: WebSocket):
                     pyautogui.rightClick()
                 elif data["type"] == "double_click":
                     pyautogui.doubleClick()
-                
-                # ЛОГИКА СКРОЛЛА
                 elif data["type"] == "scroll":
-                    # Получаем смещение по вертикали
                     dy = data.get("dy", 0)
-                    # pyautogui.scroll: Положительное число = вверх, Отрицательное = вниз.
-                    # Умножаем на scroll_speed, чтобы крутилось бодрее.
                     pyautogui.scroll(int(dy * scroll_speed))
-
-            # --- ОБЫЧНОЕ ДВИЖЕНИЕ КУРСОРА ---
             else:
                 dx = data.get('dx', 0) * sensitivity
                 dy = data.get('dy', 0) * sensitivity
@@ -141,8 +123,14 @@ def video_feed():
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+static_path = get_resource_path("static")
+
+if not os.path.exists(static_path):
+    static_path = "static" 
+
+app.mount("/static", StaticFiles(directory=static_path), name="static")
 
 @app.get("/")
 async def read_index():
-    return FileResponse('static/index.html')
+    return FileResponse(os.path.join(static_path, 'index.html'))
