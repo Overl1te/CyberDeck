@@ -1,0 +1,10 @@
+pyautogui
+fastapi
+pillow
+mss
+
+# Веб сервер
+uvicorn
+uvicorn[standard]
+
+psutil

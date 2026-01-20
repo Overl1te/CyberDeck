@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CyberDeck Stream</title>
+    <style>
+        body {
+            background-color: #0d0d0d;
+            color: #00ff9d;
+            font-family: 'Courier New', Courier, monospace;
+            text-align: center;
+            margin: 0;
+            padding: 15px;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+            overflow-x: hidden;
+        }
+
+        h1 { margin: 10px 0; font-size: 24px; text-transform: uppercase; letter-spacing: 2px; text-shadow: 0 0 10px #00ff9d; }
+        hr { border: 0; border-bottom: 1px dashed #00ff9d40; margin: 20px 0; }
+
+        /* --- СТАТИСТИКА --- */
+        .stats-box {
+            background: #1a1a1a;
+            border: 1px solid #00ff9d40;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 12px;
+        }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .bar-bg { width: 100%; height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
+        .bar-fill { height: 100%; background: #00ff9d; width: 0%; transition: width 0.5s; }
+
+        /* --- ЭКРАН / СТРИМ --- */
+        .screen-container {
+            margin: 20px auto; 
+            max-width: 100%;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background: #000;
+            overflow: hidden;
+        }
+        #stream-view {
+            width: 100%; 
+            display: block; 
+            min-height: 200px;
+            object-fit: contain;
+        }
+        .stream-controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 10px;
+        }
+
+        /* --- ТАЧПАД --- */
+        #touchpad {
+            width: 100%;
+            height: 250px;
+            background: radial-gradient(circle, #1a1a1a 0%, #0d0d0d 100%);
+            border: 2px solid #00ff9d;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-size: 14px;
+            color: #00ff9d80;
+            box-shadow: 0 0 20px #00ff9d20;
+            touch-action: none; 
+            position: relative;
+            margin-top: 20px;
+        }
+        #touchpad:active { border-color: #fff; box-shadow: 0 0 30px #00ff9d40; }
+        .status-led { width: 10px; height: 10px; border-radius: 50%; background: red; position: absolute; top: 10px; right: 10px; box-shadow: 0 0 5px red;}
+        .online { background: #00ff9d; box-shadow: 0 0 5px #00ff9d; }
+
+        /* --- КНОПКИ --- */
+        .grid-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 400px; margin: 15px auto; }
+        button {
+            background: #1a1a1a;
+            color: #00ff9d;
+            border: 1px solid #00ff9d;
+            padding: 12px 0;
+            font-size: 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: 0.1s;
+        }
+        button:active { background: #00ff9d; color: #000; transform: translateY(2px); }
+        .btn-red { border-color: #ff3333; color: #ff3333; }
+        .btn-red:active { background: #ff3333; color: #fff; }
+        .btn-stream { width: 48%; }
+    </style>
+</head>
+<body>
+
+    <h1>CyberDeck <span style="font-size:12px; opacity:0.5">PRO</span></h1>
+
+    <div class="stats-box">
+        <div class="stat-row"><span>CPU</span><span id="cpu-val">0%</span></div>
+        <div class="bar-bg"><div id="cpu-bar" class="bar-fill"></div></div>
+        <br>
+        <div class="stat-row"><span>RAM</span><span id="ram-val">0%</span></div>
+        <div class="bar-bg"><div id="ram-bar" class="bar-fill"></div></div>
+    </div>
+
+    <div class="screen-container">
+        <img id="stream-view" src="" alt="STREAM OFFLINE">
+    </div>
+    
+    <div class="stream-controls">
+        <button class="btn-stream" onclick="toggleStream(true)">▶ LIVE</button>
+        <button class="btn-stream btn-red" onclick="toggleStream(false)">⏹ STOP</button>
+    </div>
+    <div class="stream-controls">
+        <button style="width: 100%; opacity: 0.7;" onclick="refreshSingleFrame()">📷 SNAPSHOT (Low Traffic)</button>
+    </div>
+
+    <div class="grid-controls">
+        <button onclick="post('/volume/up')">Vol +</button>
+        <button onclick="post('/volume/mute')">Mute</button>
+        <button onclick="post('/volume/down')">Vol -</button>
+        
+        <button onclick="openLink('https://youtube.com')">YouTube</button>
+        <button onclick="openLink('https://google.com')">Google</button>
+        <button class="btn-red" onclick="post('/system/shutdown')">OFF</button>
+    </div>
+
+    <div id="touchpad">
+        <div id="status-led" class="status-led"></div>
+        <span id="tp-msg">CONNECTING...</span>
+        <div style="font-size: 10px; margin-top: 10px; opacity: 0.5;">
+            1 Finger: Move / Click<br>
+            2 Fingers: Scroll / Right Click
+        </div>
+    </div>
+
+    <script>
+        // --- 1. УТИЛИТЫ ---
+        async function post(url) {
+            try { await fetch(url, { method: 'POST' }); } catch(e) {}
+        }
+        async function openLink(url) {
+            post('/open-url?url=' + encodeURIComponent(url));
+        }
+
+        // --- 2. ЛОГИКА СТРИМА ---
+        function toggleStream(enable) {
+            const img = document.getElementById('stream-view');
+            if (enable) {
+                // video_feed - это эндпоинт, который мы сделали на бэке
+                // Date.now() нужен, чтобы браузер не брал картинку из кэша
+                img.src = "/video_feed?t=" + Date.now();
+                img.style.opacity = "1";
+            } else {
+                img.src = ""; // Останавливаем загрузку
+                img.style.opacity = "0.3";
+            }
+        }
+
+        function refreshSingleFrame() {
+            // Делает один кадр через старый эндпоинт скриншота
+            const img = document.getElementById('stream-view');
+            img.src = "/screenshot?t=" + Date.now();
+            img.style.opacity = "1";
+        }
+
+        // --- 3. СТАТИСТИКА ---
+        async function updateStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                document.getElementById('cpu-val').innerText = data.cpu + '%';
+                document.getElementById('cpu-bar').style.width = data.cpu + '%';
+                document.getElementById('ram-val').innerText = data.ram + '%';
+                document.getElementById('ram-bar').style.width = data.ram + '%';
+            } catch(e) {}
+        }
+        setInterval(updateStats, 1000);
+
+        // --- 4. ТАЧПАД ---
+        const tp = document.getElementById('touchpad');
+        const msg = document.getElementById('tp-msg');
+        const led = document.getElementById('status-led');
+        let ws;
+
+        function connectWS() {
+            ws = new WebSocket("ws://" + location.host + "/ws/mouse");
+            
+            ws.onopen = () => {
+                led.classList.add('online');
+                msg.innerText = "::: TOUCHPAD ACTIVE :::";
+                msg.style.color = "#00ff9d";
+            };
+            
+            ws.onclose = () => {
+                led.classList.remove('online');
+                msg.innerText = "DISCONNECTED. RETRYING...";
+                msg.style.color = "red";
+                setTimeout(connectWS, 2000);
+            };
+        }
+        connectWS();
+
+        // Переменные жестов
+        let lastX = 0, lastY = 0;
+        let isActive = false;
+        let touchStartTs = 0;
+        let hasMoved = false;
+        let maxFingers = 0;
+        let lastScrollTime = 0;
+
+        tp.addEventListener('touchstart', (e) => {
+            isActive = true;
+            hasMoved = false;
+            touchStartTs = Date.now();
+            maxFingers = e.touches.length;
+            lastX = e.touches[0].clientX;
+            lastY = e.touches[0].clientY;
+        }, { passive: false });
+
+        tp.addEventListener('touchmove', (e) => {
+            if (!isActive) return;
+            e.preventDefault(); 
+
+            const cx = e.touches[0].clientX;
+            const cy = e.touches[0].clientY;
+            const now = Date.now();
+
+            // 1 Палец: Курсор
+            if (e.touches.length === 1) {
+                const diffX = Math.abs(cx - lastX);
+                const diffY = Math.abs(cy - lastY);
+                
+                if (diffX > 3 || diffY > 3) {
+                    hasMoved = true;
+                    if (ws.readyState === 1) {
+                        ws.send(JSON.stringify({ 
+                            dx: cx - lastX, 
+                            dy: cy - lastY 
+                        }));
+                    }
+                    lastX = cx; lastY = cy;
+                }
+            }
+            // 2 Пальца: Скролл
+            else if (e.touches.length === 2) {
+                hasMoved = true;
+                const dy = cy - lastY;
+                
+                // Троттлинг: шлем скролл не чаще раза в 50мс
+                if (now - lastScrollTime > 50) { 
+                    if (Math.abs(dy) > 2) {
+                        if (ws.readyState === 1) {
+                            ws.send(JSON.stringify({ 
+                                type: "scroll", 
+                                dy: dy 
+                            }));
+                        }
+                        lastScrollTime = now;
+                        lastY = cy; 
+                    }
+                }
+            }
+        }, { passive: false });
+
+        tp.addEventListener('touchend', (e) => {
+            isActive = false;
+            const duration = Date.now() - touchStartTs;
+
+            if (!hasMoved && duration < 250) {
+                if (maxFingers === 1) {
+                    ws.send(JSON.stringify({ type: "click" }));
+                    pulseInfo("#00ff9d");
+                } else if (maxFingers === 2) {
+                    ws.send(JSON.stringify({ type: "right_click" }));
+                    pulseInfo("#ff0055");
+                }
+            }
+        });
+
+        function pulseInfo(color) {
+            tp.style.background = color;
+            setTimeout(() => {
+                tp.style.background = "radial-gradient(circle, #1a1a1a 0%, #0d0d0d 100%)";
+            }, 100);
+        }
+
+    </script>
+</body>
+</html>
