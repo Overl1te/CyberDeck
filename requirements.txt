@@ -1,7 +1,6 @@
 fastapi # Основной бек
 pystray # Трей
 pyinstaller
-pyperclip
 
 # Веб сервер
 uvicorn

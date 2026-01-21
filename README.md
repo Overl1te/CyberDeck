@@ -50,11 +50,11 @@ Coming soon...
 
 - **Backend:** FastAPI, Uvicorn
 
-- **Automation:** PyAutoGUI, MSS
+- **Automation:** PyAutoGUI, MSS, Pydantic
 
 - **Frontend:** HTML5, CSS3, Vanilla JS (WebSocket API)
 
-- **System:** Psutil
+- **System:** Psutil, Ctypes
 
 ## <div id="Установка">🚀 Установка</div>
 ### Системные требования
@@ -99,7 +99,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ### Cборка
 ```Bash
-pyinstaller --noconsole --onefile --uac-admin --name="CyberDeck" --icon=icon.png --add-data "static;static" --add-data "icon.png;." --hidden-import=uvicorn --hidden-import=fastapi --hidden-import=engineio --hidden-import=socketio --hidden-import=mss --hidden-import=pyperclip launcher.py
+pyinstaller --noconfirm --uac-admin --onefile --noconsole --name "CyberDeck" --icon=icon.png --add-data "static;static" --add-data "icon.png;." --hidden-import "uvicorn.logging" --hidden-import "uvicorn.loops" --hidden-import "uvicorn.loops.auto" --hidden-import "uvicorn.protocols" --hidden-import "uvicorn.protocols.http" --hidden-import "uvicorn.protocols.http.auto" --hidden-import "uvicorn.protocols.websockets" --hidden-import "uvicorn.protocols.websockets.auto" --hidden-import "uvicorn.lifespan.on" launcher.py
 ```
 
 ---
