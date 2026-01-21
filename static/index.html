@@ -3,230 +3,291 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CyberDeck Control</title>
+    <title>CyberDeck v1.1.0</title>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
     <style>
-        /* BASE */
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #050505; overflow: hidden; font-family: 'Segoe UI', monospace; color: #00ff9d; user-select: none; touch-action: none; }
-
-        /* VIDEO */
-        #video-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; background: #000; display: flex; justify-content: center; align-items: center; overflow: hidden; }
-        #stream-view { 
-            max-width: 100%; max-height: 100%; 
-            transition: transform 0.3s ease; 
-        }
-
-        /* UI LAYERS */
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #050505; font-family: 'Rajdhani', sans-serif; color: #e0e0e0; overflow: hidden; user-select: none; touch-action: none; }
+        #video-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; background: #000; display: flex; justify-content: center; align-items: center; }
+        #stream-view { max-width: 100%; max-height: 100%; transition: transform 0.2s ease; will-change: transform; }
         #touch-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; }
         #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 20; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; }
-
-        /* PANELS */
-        .hud-panel { pointer-events: auto; padding: 10px; display: flex; gap: 10px; }
-        .top-panel { justify-content: space-between; background: linear-gradient(180deg, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0) 100%); padding: 15px; }
-        .side-panel { position: absolute; right: 0; top: 50%; transform: translateY(-50%); flex-direction: column; padding-right: 10px; pointer-events: auto; }
-
-        /* KEYBOARD DRAWER */
-        .bottom-trigger { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); pointer-events: auto; z-index: 30; }
-        #keyboard-drawer { position: absolute; bottom: -300px; left: 0; width: 100%; height: 280px; background: rgba(10, 15, 10, 0.95); border-top: 2px solid #00ff9d; border-radius: 20px 20px 0 0; z-index: 40; pointer-events: auto; transition: bottom 0.3s ease-out; display: flex; flex-direction: column; padding: 15px; box-sizing: border-box; backdrop-filter: blur(10px); }
-        #keyboard-drawer.open { bottom: 0; }
-
-        /* BUTTONS */
-        .btn { background: rgba(0, 30, 20, 0.6); border: 1px solid rgba(0, 255, 157, 0.5); color: #00ff9d; border-radius: 8px; width: 50px; height: 50px; font-size: 14px; font-weight: bold; display: flex; justify-content: center; align-items: center; backdrop-filter: blur(4px); transition: 0.1s; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+        #virtual-cursor { position: absolute; width: 20px; height: 20px; border: 2px solid #ff0055; border-radius: 50%;  background: rgba(255, 0, 85, 0.2); z-index: 15; pointer-events: none; display: none; transform: translate(-50%, -50%); box-shadow: 0 0 10px #ff0055; }
+        .glass-panel { background: rgba(18, 18, 18, 0.85); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); pointer-events: auto; border-radius: 12px; padding: 8px; margin: 10px; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; height: 40px; }
+        .side-bar { position: absolute; right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 10px; }
+        .btn { background: #1e1e1e; border: 1px solid #333; color: #00ff9d; border-radius: 8px; width: 45px; height: 45px; font-weight: bold; font-size: 18px; display: flex; justify-content: center; align-items: center; transition: all 0.1s; }
         .btn:active { background: #00ff9d; color: #000; transform: scale(0.95); }
-        .btn-red { border-color: #ff3333; color: #ff3333; }
-        .btn-red:active { background: #ff3333; }
-        .btn-rot { border-color: #ffff00; color: #ffff00; font-size: 20px; }
-
-        /* KEYBOARD SPECIFIC */
-        .kb-row { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-        .kb-btn { flex: 1; height: 40px; font-size: 12px; border-radius: 6px; }
-        .kb-input-row { display: flex; gap: 10px; margin-bottom: 15px; }
-        input[type="text"] { flex: 1; background: rgba(0,0,0,0.5); border: 1px solid #00ff9d; color: #fff; padding: 10px; border-radius: 6px; outline: none; font-family: monospace; }
-
-        .info-group { display: flex; flex-direction: column; font-size: 10px; text-align: right; }
-        .status-dot { width: 8px; height: 8px; background: red; border-radius: 50%; display: inline-block; margin-right: 5px; }
-        .online { background: #00ff9d; box-shadow: 0 0 5px #00ff9d; }
-        #drag-overlay { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(255, 255, 0, 0.2); border: 1px solid yellow; color: yellow; padding: 5px 15px; border-radius: 20px; font-size: 12px; display: none; pointer-events: none; }
+        .btn-red { border-color: #ff4444; color: #ff4444; }
+        .drawer-trigger { pointer-events: auto; align-self: center; background: rgba(20,20,20,0.9); color: #aaa; border: 1px solid #333; border-bottom: none; padding: 8px 40px; border-radius: 12px 12px 0 0; font-family: inherit; font-weight: bold; letter-spacing: 1px; }
+        #keyboard-drawer { position: absolute; bottom: -400px; left: 0; width: 100%; background: #0a0a0a; border-top: 1px solid #333; border-radius: 20px 20px 0 0; z-index: 50; pointer-events: auto; transition: bottom 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 -5px 20px rgba(0,0,0,0.5); }
+        #keyboard-drawer.open { bottom: 0; }
+        .kb-input-row { display: flex; gap: 10px; }
+        .kb-input { flex: 1; background: #1a1a1a; border: 1px solid #333; color: #fff; padding: 15px; border-radius: 8px; font-size: 16px; outline: none; }
+        .kb-input:focus { border-color: #00ff9d; }
+        .kb-send-btn { background: #00ff9d; color: #000; border: none; border-radius: 8px; padding: 0 25px; font-weight: bold; }
+        .kb-row { display: flex; gap: 8px; justify-content: space-between; }
+        .kb-btn { flex: 1; height: 48px; background: #222; border: 1px solid #333; color: #ccc; border-radius: 6px; font-size: 14px; font-weight: 600; }
+        .kb-btn:active { background: #444; }
     </style>
 </head>
 <body>
-
-    <div id="video-layer">
-        <img id="stream-view" src="" alt="NO SIGNAL">
-    </div>
-    
+    <div id="video-container"><img id="stream-view" src="" alt="NO SIGNAL"></div>
     <div id="touch-layer"></div>
+    <div id="virtual-cursor"></div>
 
     <div id="ui-layer">
-        <div class="hud-panel top-panel">
-            <button class="btn btn-red" onclick="post('/system/shutdown')">OFF</button>
-            <button class="btn btn-rot" onclick="rotateScreen()">↻</button>
-            <div id="drag-overlay">DRAGGING</div>
-            <div class="info-group">
-                <div><span id="status-dot" class="status-dot"></span><span id="status-text">OFFLINE</span></div>
-                <div style="margin-top:2px;">CPU: <span id="cpu">0%</span> | RAM: <span id="ram">0%</span></div>
+        <div class="glass-panel top-bar">
+            <button class="btn btn-red" onclick="post('/system/shutdown')">⏻</button>
+            <div style="text-align: right; font-size: 11px; line-height: 1.2;">
+                <div id="conn-text" style="color: #555; font-weight: bold;">CONNECTING...</div>
+                <div style="font-family: monospace; color: #888;">CPU <span id="cpu">0%</span></div>
             </div>
+            <button class="btn" style="color:gold; border-color:rgba(255, 215, 0, 0.3)" onclick="rotateScreen()">↻</button>
         </div>
 
-        <div class="hud-panel side-panel">
+        <div class="side-bar glass-panel" style="border-radius: 12px 0 0 12px; margin-right: 0;">
             <button class="btn" onclick="post('/volume/up')">+</button>
-            <button class="btn" style="margin: 10px 0;" onclick="post('/volume/mute')">🔇</button>
+            <button class="btn" onclick="post('/volume/mute')">x</button>
             <button class="btn" onclick="post('/volume/down')">-</button>
         </div>
-        
-        <div class="bottom-trigger">
-            <button class="btn" onclick="toggleDrawer()" style="width: 60px; height: 40px; border-bottom: 0; border-radius: 10px 10px 0 0;">▲</button>
-        </div>
+        <button class="drawer-trigger" onclick="toggleDrawer()">KEYBOARD</button>
     </div>
 
     <div id="keyboard-drawer">
         <div class="kb-input-row">
-            <input type="text" id="text-input" placeholder="Type here..." onkeydown="checkEnter(event)">
-            <button class="btn kb-btn" style="flex:0 0 50px" onclick="sendText()">SEND</button>
+            <input type="text" id="text-input" class="kb-input" placeholder="Type message..." autocomplete="off">
+            <button class="kb-send-btn" onclick="sendText()">SEND</button>
         </div>
         <div class="kb-row">
-            <button class="btn kb-btn" onclick="key('backspace')">⌫ BKSP</button>
-            <button class="btn kb-btn" onclick="key('space')">SPACE</button>
-            <button class="btn kb-btn" onclick="key('enter')">ENTER ↵</button>
+            <button class="kb-btn" onclick="key('backspace')">⌫</button>
+            <button class="kb-btn" onclick="key('space')">SPACE</button>
+            <button class="kb-btn" onclick="key('enter')">ENTER</button>
         </div>
         <div class="kb-row">
-            <button class="btn kb-btn" onclick="shortcut('copy')">COPY</button>
-            <button class="btn kb-btn" onclick="shortcut('paste')">PASTE</button>
-            <button class="btn kb-btn" onclick="shortcut('alt_tab')">ALT+TAB</button>
+            <button class="kb-btn" onclick="shortcut('copy')">COPY</button>
+            <button class="kb-btn" onclick="shortcut('paste')">PASTE</button>
+            <button class="kb-btn" onclick="shortcut('alt_tab')">TAB</button>
+            <button class="kb-btn" onclick="key('win')">WIN</button>
         </div>
-        <div class="kb-row">
-            <button class="btn kb-btn" style="border-color: #00aaff; color:#00aaff" onclick="key('win')">WIN ⊞</button>
-            <button class="btn kb-btn" onclick="shortcut('win_d')">DESKTOP</button>
-            <button class="btn kb-btn btn-red" onclick="toggleDrawer()">▼ CLOSE</button>
-        </div>
+        <button class="kb-btn" style="background:#200; color:#f55; border-color:#522; margin-top:5px" onclick="toggleDrawer()">▼ CLOSE</button>
     </div>
 
     <script>
-        const post = (url) => fetch(url, {method: 'POST'}).catch(()=>{});
-        const postJson = (url, data) => fetch(url, {
-            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
-        }).catch(()=>{});
-
-        // --- ROTATION ---
-        let rotation = 0;
+        const DOUBLE_TAP_MS = 200
+        const TAP_DIST_THRESHOLD = 40
+        const MOVE_DEADZONE = 3
+        const DRAG_START_THRESHOLD = 10
+        
+        const post = (url) => fetch(url, {method: 'POST'}).catch(console.error)
+        const postJson = (url, d) => fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(d)}).catch(console.error)
+        
+        let rot = 0
         function rotateScreen() {
-            rotation = (rotation + 90) % 360;
-            const img = document.getElementById('stream-view');
-            
-            // Крутим картинку CSS
-            img.style.transform = `rotate(${rotation}deg)`;
-            
-            // Если 90 или 270 - меняем размеры, чтобы заполнить экран
-            if (rotation % 180 !== 0) {
-                img.style.width = "auto"; img.style.height = "100vw"; 
-                img.style.maxHeight = "none"; img.style.maxWidth = "none";
-            } else {
-                img.style.width = "100%"; img.style.height = "100%";
-                img.style.maxHeight = "100%"; img.style.maxWidth = "100%";
-            }
+            rot = (rot + 90) % 360
+            const img = document.getElementById('stream-view')
+            img.style.transform = `rotate(${rot}deg)`
         }
 
-        // --- STREAM & AUTO RECONNECT ---
+        const img = document.getElementById('stream-view')
         function startStream() {
-            const img = document.getElementById('stream-view');
-            img.src = "/video_feed?t=" + Date.now();
-            img.onerror = () => { setTimeout(() => { img.src = "/video_feed?t=" + Date.now(); }, 1000); };
+            img.src = "/video_feed?t=" + Date.now()
+            img.onerror = () => setTimeout(() => img.src = "/video_feed?t=" + Date.now(), 1000)
         }
-        window.onload = startStream;
+        window.onload = startStream
 
-        // --- KEYBOARD ---
-        function toggleDrawer() { document.getElementById('keyboard-drawer').classList.toggle('open'); }
-        function sendText() {
-            const input = document.getElementById('text-input');
-            if (input.value) { postJson('/keyboard/type', {text: input.value}); input.value = ""; }
-        }
-        function checkEnter(e) { if (e.key === 'Enter') sendText(); }
-        function key(k) { post('/keyboard/key/' + k); }
-        function shortcut(s) { post('/keyboard/shortcut/' + s); }
-
-        // --- STATS ---
         setInterval(async () => {
-            try {
-                const res = await fetch('/api/stats');
-                const d = await res.json();
-                document.getElementById('cpu').innerText = d.cpu + '%';
-                document.getElementById('ram').innerText = d.ram + '%';
-            } catch(e){}
-        }, 2000);
+            try { document.getElementById('cpu').innerText = (await (await fetch('/api/stats')).json()).cpu + '%' } catch(e){}
+        }, 3000)
 
-        // --- WEBSOCKET ---
-        const ws = new WebSocket("ws://" + location.host + "/ws/mouse");
-        const statusText = document.getElementById('status-text');
-        const statusDot = document.getElementById('status-dot');
-        const dragLabel = document.getElementById('drag-overlay');
+        const drawer = document.getElementById('keyboard-drawer')
+        const textInput = document.getElementById('text-input')
 
-        ws.onopen = () => { statusText.innerText = "CONNECTED"; statusDot.classList.add('online'); };
-        ws.onclose = () => { statusText.innerText = "RETRY..."; statusDot.classList.remove('online'); setTimeout(()=>location.reload(), 2000); };
+        function toggleDrawer() { 
+            drawer.classList.toggle('open')
+            if(drawer.classList.contains('open')) setTimeout(() => textInput.focus(), 150)
+            else textInput.blur()
+        }
 
-        let lastX = 0, lastY = 0;
-        let lastTouchEnd = 0;
-        let isDragging = false;
-        let maxFingers = 0;
-        const tp = document.getElementById('touch-layer');
+        function sendText() { 
+            const val = textInput.value
+            if(val){ 
+                postJson('/keyboard/type', {text: val})
+                textInput.value=''
+            } 
+        }
 
-        tp.addEventListener('touchstart', (e) => {
-            if(document.getElementById('keyboard-drawer').classList.contains('open')) toggleDrawer();
-            e.preventDefault();
-            const t = e.touches[0];
-            maxFingers = e.touches.length; 
-            lastX = t.clientX; lastY = t.clientY;
-            
-            if (maxFingers === 1 && (Date.now() - lastTouchEnd < 250)) {
-                isDragging = true; dragLabel.style.display = "block";
-                ws.send(JSON.stringify({ type: "drag_start" }));
+        function key(k) { post('/keyboard/key/'+k) }
+        function shortcut(s) { post('/keyboard/shortcut/'+s) }
+        
+        textInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.keyCode === 13) {
+                e.preventDefault()
+                sendText()
+                key('enter')
             }
-        }, {passive: false});
+        })
 
-        tp.addEventListener('touchmove', (e) => {
-            if (e.touches.length > 2) return;
-            e.preventDefault();
-            const t = e.touches[0];
-            const rawDx = t.clientX - lastX; 
-            const rawDy = t.clientY - lastY;
-            
-            let dx = rawDx;
-            let dy = rawDy;
+        const ws = new WebSocket("ws://" + location.host + "/ws/mouse")
+        const txt = document.getElementById('conn-text')
+        const vCursor = document.getElementById('virtual-cursor')
 
-            // --- МАТЕМАТИКА ПОВОРОТА (Коррекция движения мыши) ---
-            if (rotation === 90) {
-                // 90° по часовой: Вверх -> Влево
-                dx = rawDy; dy = -rawDx;  
-            } else if (rotation === 180) {
-                // 180°: Вверх -> Вниз
-                dx = -rawDx; dy = -rawDy;
-            } else if (rotation === 270) {
-                // 270°: Вверх -> Вправо
-                dx = -rawDy; dy = rawDx;
-            }
+        ws.onopen = () => { txt.innerText = "ONLINE"; txt.style.color="#00ff9d" }
+        ws.onclose = () => { txt.innerText = "OFFLINE"; txt.style.color="red"; setTimeout(()=>location.reload(), 2000) }
 
-            if (Math.abs(rawDx) >= 1 || Math.abs(rawDy) >= 1) {
-                if (e.touches.length === 1) {
-                    ws.send(JSON.stringify({ dx: Math.round(dx), dy: Math.round(dy) }));
-                } 
-                else if (e.touches.length === 2) {
-                    let scrollDy = dy; 
-                    ws.send(JSON.stringify({ type: "scroll", dy: Math.round(scrollDy) }));
+        let startX=0, startY=0
+        let lastX=0, lastY=0
+        
+        let lastTapTime = 0
+        let lastTapX = 0
+        let lastTapY = 0
+        
+        let isDragging = false
+        let isPotentialDrag = false
+        let maxTouches = 0 
+        let hasMoved = false
+
+        let pendingDx = 0
+        let pendingDy = 0
+        let pendingScrollDy = 0
+
+        const tp = document.getElementById('touch-layer')
+
+        function sendLoop() {
+            if (ws.readyState === WebSocket.OPEN) {
+                if (pendingDx !== 0 || pendingDy !== 0) {
+                    ws.send(JSON.stringify({dx: Math.round(pendingDx), dy: Math.round(pendingDy)}))
+                    pendingDx = 0; pendingDy = 0
                 }
-                lastX = t.clientX; lastY = t.clientY;
+                if (pendingScrollDy !== 0) {
+                    ws.send(JSON.stringify({type: "scroll", dy: Math.round(pendingScrollDy)}))
+                    pendingScrollDy = 0
+                }
             }
-        }, {passive: false});
+            requestAnimationFrame(sendLoop)
+        }
+        requestAnimationFrame(sendLoop)
 
-        tp.addEventListener('touchend', (e) => {
-            lastTouchEnd = Date.now();
-            if (isDragging) {
-                isDragging = false; dragLabel.style.display = "none";
-                ws.send(JSON.stringify({ type: "drag_end" }));
-                return;
+        tp.addEventListener('touchstart', e => {
+            if(drawer.classList.contains('open') && e.target.closest('#touch-layer')) toggleDrawer()
+            e.preventDefault()
+            
+            const t = e.touches[0]
+            startX = t.clientX; startY = t.clientY
+            lastX = t.clientX; lastY = t.clientY
+            
+            pendingDx = 0; pendingDy = 0; pendingScrollDy = 0
+            hasMoved = false
+            maxTouches = e.touches.length
+
+            const now = Date.now()
+            const timeDiff = now - lastTapTime
+            const distDiff = Math.hypot(t.clientX - lastTapX, t.clientY - lastTapY)
+
+            if (timeDiff < DOUBLE_TAP_MS && distDiff < TAP_DIST_THRESHOLD && e.touches.length === 1) {
+                isPotentialDrag = true
+            } else {
+                isPotentialDrag = false
             }
-            if (!hasMoved) {
-                if (maxFingers === 1) ws.send(JSON.stringify({ type: "click" }));
-                if (maxFingers === 2) ws.send(JSON.stringify({ type: "right_click" }));
+
+            vCursor.style.display = 'block'
+            vCursor.style.left = startX + 'px'
+            vCursor.style.top = startY + 'px'
+        }, {passive:false})
+
+        tp.addEventListener('touchmove', e => {
+            e.preventDefault()
+            maxTouches = Math.max(maxTouches, e.touches.length)
+            
+            const t = e.touches[0]
+            const dist = Math.hypot(t.clientX - startX, t.clientY - startY)
+
+            vCursor.style.left = t.clientX + 'px'
+            vCursor.style.top = t.clientY + 'px'
+
+            if (dist > MOVE_DEADZONE) {
+                hasMoved = true
+                
+                const rawDx = t.clientX - lastX
+                const rawDy = t.clientY - lastY
+                let dx = rawDx, dy = rawDy
+
+                if (rot === 90) { dx = rawDy; dy = -rawDx }
+                else if (rot === 180) { dx = -rawDx; dy = -rawDy }
+                else if (rot === 270) { dx = -rawDy; dy = rawDx }
+
+                if (maxTouches === 2) {
+                    pendingScrollDy += dy
+                }
+                else if (isPotentialDrag && !isDragging) {
+                    if (dist > DRAG_START_THRESHOLD) {
+                        isDragging = true
+                        ws.send(JSON.stringify({type: "drag_start"}))
+                        showRipple(startX, startY, "#ffff00")
+                    }
+                }
+
+                if (!isDragging || (isDragging && isPotentialDrag)) {
+                    if (!isPotentialDrag || isDragging) {
+                         pendingDx += dx
+                         pendingDy += dy
+                    }
+                }
+
+                lastX = t.clientX
+                lastY = t.clientY
             }
-        });
+        }, {passive:false})
+
+        tp.addEventListener('touchend', e => {
+            vCursor.style.display = 'none'
+            const now = Date.now()
+            const t = e.changedTouches[0]
+
+            if (e.touches.length === 0) {
+                
+                if (isDragging) {
+                    ws.send(JSON.stringify({type: "drag_end"}))
+                    isDragging = false
+                    isPotentialDrag = false
+                }
+                else if (!hasMoved) {
+                    
+                    if (maxTouches === 2) {
+                        ws.send(JSON.stringify({type: "right_click"}))
+                        showRipple(startX, startY, "#ff0055")
+                    }
+                    else if (maxTouches === 1) {
+                        if (isPotentialDrag) {
+                            ws.send(JSON.stringify({type: "double_click"}))
+                            showRipple(startX, startY, "#ff00ff")
+                            isPotentialDrag = false
+                        } else {
+                            ws.send(JSON.stringify({type: "click"}))
+                            showRipple(startX, startY, "#00ff9d")
+                        }
+                    }
+                }
+                
+                lastTapTime = now
+                lastTapX = t.clientX
+                lastTapY = t.clientY
+                maxTouches = 0 
+            }
+        })
+
+        function showRipple(x, y, color) {
+            const ripple = document.createElement("div")
+            Object.assign(ripple.style, {
+                position: "absolute", left: x + "px", top: y + "px",
+                width: "40px", height: "40px", border: `2px solid ${color}`,
+                borderRadius: "50%", transform: "translate(-50%, -50%)",
+                pointerEvents: "none", zIndex: 100
+            })
+            document.body.appendChild(ripple)
+            ripple.animate([{transform: 'translate(-50%, -50%) scale(0.5)', opacity: 1}, 
+                            {transform: 'translate(-50%, -50%) scale(2)', opacity: 0}], 
+                            {duration: 300}).onfinish = () => ripple.remove()
+        }
     </script>
 </body>
 </html>
