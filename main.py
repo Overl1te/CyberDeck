@@ -1,5 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import random as rnd_module
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import pyautogui
@@ -16,10 +18,38 @@ import time
 import ctypes
 import threading 
 
+# --- НАСТРОЙКИ ---
+
 pyautogui.PAUSE = 0
 pyautogui.FAILSAFE = False 
 
 app = FastAPI(title="CyberDeck v1.0.3")
+
+
+# 1. Разрешаем cors
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 2. Генерируем код
+SESSION_CODE = str(rnd_module.randint(1000, 9999))
+print(f" --- PAIRING CODE: {SESSION_CODE} --- ")
+
+# Модель для приема кода
+class HandshakeRequest(BaseModel):
+    code: str
+
+# 3. Проверка кода на вшивость)
+@app.post("/api/handshake")
+def handshake(req: HandshakeRequest):
+    if req.code == SESSION_CODE:
+        return {"status": "ok", "device": os.environ.get('COMPUTERNAME', 'Unknown PC')}
+    else:
+        raise HTTPException(status_code=403, detail="Invalid Code")
 
 PERMISSIONS = {
     "mouse_move": True, "mouse_click": True, "keyboard": True,
@@ -226,7 +256,7 @@ def hotkey(name: str):
 async def websocket_mouse(websocket: WebSocket):
     await websocket.accept()
     sensitivity = 1.8  
-    scroll_speed = 5
+    scroll_speed = 3
     debug_log("MOUSE", "Client Connected")
 
     try:

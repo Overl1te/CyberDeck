@@ -78,6 +78,13 @@ def open_settings_window():
     tk.Label(root, text="SERVER CONTROL", bg=COLORS["bg"], fg=COLORS["fg"], 
              font=("Courier New", 16, "bold")).pack(pady=20)
     
+    code_frame = tk.Frame(root, bg="#1a1a1a", pady=10)
+    code_frame.pack(fill="x", padx=40, pady=5)
+    
+    tk.Label(code_frame, text="PAIRING CODE:", bg="#1a1a1a", fg="#888", font=("Consolas", 10)).pack()
+
+    tk.Label(code_frame, text=main.SESSION_CODE, bg="#1a1a1a", fg="#00ff9d", font=("Courier New", 24, "bold")).pack()
+    
     ip = get_local_ip()
     link = f"http://{ip}:{PORT}"
     tk.Label(root, text=f"Connect via: {link}", bg=COLORS["bg"], fg="#fff", font=("Consolas", 10)).pack(pady=5)
