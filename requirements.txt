@@ -1,6 +1,9 @@
 fastapi # Основной бек
 pystray # Трей
 pyinstaller
+customtkinter
+packaging
+python-multipart
 
 # Веб сервер
 uvicorn

@@ -1,308 +1,286 @@
-import random as rnd_module
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import os
+import uuid
+import json
+import time
+import shutil
+import threading
+import mss
+import pyautogui
+import psutil
+import uvicorn
+import socket
+import ctypes
+import asyncio
+import sys
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import pyautogui
-import io
-import os
-import sys
-import webbrowser
-import psutil
-from mss import mss
-from PIL import Image
-import base64
-import subprocess
-import time
-import ctypes
-import threading 
+from typing import Dict, Optional
+from io import BytesIO
+from PIL import Image, ImageDraw
 
-# --- НАСТРОЙКИ ---
+VERSION = "v1.1.1"
+HOST = "0.0.0.0"
+PORT = 8080
+UDP_PORT = 5555
+DEBUG = True 
 
+running_loop = None 
+
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+FILES_DIR = os.path.join(BASE_DIR, "CyberDeck_Files")
+SESSION_FILE = os.path.join(BASE_DIR, "cyberdeck_sessions.json")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
+
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
-pyautogui.FAILSAFE = False 
 
-app = FastAPI(title="CyberDeck v1.0.3")
+PAIRING_CODE = str(uuid.uuid4().int)[:4]
+SERVER_ID = str(uuid.uuid4())[:8]
+HOSTNAME = os.environ.get('COMPUTERNAME', 'CyberDeck PC')
 
-
-# 1. Разрешаем cors
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 2. Генерируем код
-SESSION_CODE = str(rnd_module.randint(1000, 9999))
-print(f" --- PAIRING CODE: {SESSION_CODE} --- ")
-
-# Модель для приема кода
-class HandshakeRequest(BaseModel):
-    code: str
-
-# 3. Проверка кода на вшивость)
-@app.post("/api/handshake")
-def handshake(req: HandshakeRequest):
-    if req.code == SESSION_CODE:
-        return {"status": "ok", "device": os.environ.get('COMPUTERNAME', 'Unknown PC')}
-    else:
-        raise HTTPException(status_code=403, detail="Invalid Code")
-
-PERMISSIONS = {
-    "mouse_move": True, "mouse_click": True, "keyboard": True,
-    "screen": True, "system": True, "web": True
-}
-
-DEBUG_MODE = False
-INPUT_LOCK = threading.Lock() 
-
-def debug_log(category: str, message: str):
-    if DEBUG_MODE:
-        print(f"[{category.upper()}] {message}")
-
-def get_resource_path(relative_path):
-    try: base_path = sys._MEIPASS
-    except: base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
-
-def send_ctrl_v_robust():
+def udp_discovery_service():
     try:
-        user32 = ctypes.windll.user32
-        user32.keybd_event(0x11, 0, 0, 0) 
-        time.sleep(0.05)
-        user32.keybd_event(0x56, 0, 0, 0) 
-        time.sleep(0.05)
-        user32.keybd_event(0x56, 0, 2, 0) 
-        user32.keybd_event(0x11, 0, 2, 0) 
-    except Exception as e:
-        debug_log("INPUT", f"Native input failed: {e}")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', UDP_PORT))
+        while True:
+            try:
+                data, addr = sock.recvfrom(1024)
+                if b"CYBERDECK_DISCOVER" in data:
+                    resp = json.dumps({"id": SERVER_ID, "name": HOSTNAME, "port": PORT, "version": VERSION})
+                    sock.sendto(resp.encode('utf-8'), addr)
+            except: pass
+    except: pass
 
-def set_clipboard(text):
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+threading.Thread(target=udp_discovery_service, daemon=True).start()
 
-    kernel32.GlobalAlloc.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+class DeviceSession:
+    def __init__(self, device_id, device_name, ip, token=None):
+        self.device_id = device_id
+        self.device_name = device_name
+        self.ip = ip
+        self.token = token if token else str(uuid.uuid4())
+        self.websocket: Optional[WebSocket] = None
 
-    try:
-        try: user32.CloseClipboard()
+class DeviceManager:
+    def __init__(self): self.sessions: Dict[str, DeviceSession] = {} 
+    
+    def authorize(self, device_id, name, ip):
+        for t, s in self.sessions.items():
+            if s.device_id == device_id:
+                s.ip = ip
+                s.device_name = name
+                self.save_sessions()
+                return t
+        s = DeviceSession(device_id, name, ip)
+        self.sessions[s.token] = s
+        self.save_sessions()
+        return s.token
+
+    def save_sessions(self):
+        try:
+            data = {t: {'device_id': s.device_id, 'device_name': s.device_name, 'ip': s.ip} for t, s in self.sessions.items()}
+            with open(SESSION_FILE, 'w') as f: json.dump(data, f)
         except: pass
 
-        success = False
-        for _ in range(5):
-            if user32.OpenClipboard(None):
-                user32.EmptyClipboard()
-                text_bytes = text.encode('utf-16le') + b'\x00\x00'
-                h_mem = kernel32.GlobalAlloc(0x0002, len(text_bytes))
-                
-                if h_mem:
-                    p_mem = kernel32.GlobalLock(h_mem)
-                    if p_mem:
-                        ctypes.memmove(p_mem, text_bytes, len(text_bytes))
-                        kernel32.GlobalUnlock(h_mem)
-                        if user32.SetClipboardData(13, h_mem):
-                            success = True
-                user32.CloseClipboard()
-                if success: return True
-                break
-            time.sleep(0.05)
-    except Exception as e:
-        debug_log("CLIPBOARD", f"Ctypes Crash: {e}")
-
-    debug_log("CLIPBOARD", "Using PowerShell fallback...")
-    try:
-        b64_text = base64.b64encode(text.encode('utf-16le')).decode()
-        ps_cmd = f"$t = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('{b64_text}')); Set-Clipboard -Value $t"
-        
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-            timeout=5, startupinfo=startupinfo, creationflags=0x08000000
-        )
-        time.sleep(0.5) 
-        return True
-    except Exception as e:
-        debug_log("CLIPBOARD", f"PowerShell failed: {e}")
-        return False
-
-
-def generate_video_stream():
-    if not PERMISSIONS["screen"]:
-        yield (b'--frame\r\nContent-Type: text/plain\r\n\r\nACCESS DENIED\r\n')
-        return
-
-    while True:
+    def load_sessions(self):
         try:
-            with mss() as sct:
-                monitor = sct.monitors[1]
-                
-                while True:
-                    if not PERMISSIONS["screen"]: 
-                        time.sleep(1)
-                        continue
+            if os.path.exists(SESSION_FILE):
+                with open(SESSION_FILE, 'r') as f:
+                    data = json.load(f)
+                    for t, i in data.items():
+                        self.sessions[t] = DeviceSession(i['device_id'], i['device_name'], i['ip'], token=t)
+        except: pass
 
-                    sct_img = sct.grab(monitor)
-                    
-                    img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                    
-                    img.thumbnail((1280, 720), Image.Resampling.NEAREST) 
+    def get_session(self, token: str): return self.sessions.get(token)
+    def register_socket(self, token: str, ws: WebSocket):
+        if token in self.sessions: self.sessions[token].websocket = ws
+    def get_all_devices(self):
+        return [{"name": s.device_name, "ip": s.ip, "token": t} for t, s in self.sessions.items()]
 
-                    img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format='JPEG', quality=25, optimize=True) 
-                    
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + img_byte_arr.getvalue() + b'\r\n')
-                    
-        except GeneratorExit:
-            debug_log("STREAM", "Client disconnected")
-            break
-        except Exception as e:
-            debug_log("STREAM_ERR", f"MSS Crash: {e} -> Reinitializing...")
-            time.sleep(0.5)
-            
-@app.post("/open-url")
-def open_url(url: str):
-    debug_log("WEB", f"Opening URL: {url}")
-    if PERMISSIONS["web"]: webbrowser.open(url)
+device_manager = DeviceManager()
+device_manager.load_sessions()
 
-@app.post("/volume/{action}")
-def volume_control(action: str):
-    debug_log("SYSTEM", f"Volume: {action}")
-    if not PERMISSIONS["system"]: return
-    
-    with INPUT_LOCK:
-        keys = {"up": "volumeup", "down": "volumedown", "mute": "volumemute"}
-        if action in keys: pyautogui.press(keys[action])
+app = FastAPI(title=f"CyberDeck {VERSION}")
 
-@app.post("/system/shutdown")
-def shutdown_pc():
-    debug_log("SYSTEM", "Shutdown initiated")
-    if PERMISSIONS["system"]: os.system("shutdown /s /t 1")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-@app.get("/api/stats")
-async def get_system_stats():
+@app.on_event("startup")
+async def startup_event():
+    """Захватываем цикл событий при старте сервера"""
+    global running_loop
+    running_loop = asyncio.get_running_loop()
+    if DEBUG: print(f"Server Event Loop Captured: {running_loop}")
+
+async def get_token(request: Request, token: Optional[str] = Query(None)):
+    if token and device_manager.get_session(token): return token
+    auth = request.headers.get("Authorization")
+    if auth:
+        t = auth.replace("Bearer ", "")
+        if device_manager.get_session(t): return t
+    ws_token = request.query_params.get("token")
+    if ws_token and device_manager.get_session(ws_token): return ws_token
+    raise HTTPException(403, detail="Unauthorized")
+
+class HandshakeRequest(BaseModel):
+    code: str
+    device_id: str
+    device_name: str
+
+@app.post("/api/handshake")
+def handshake(req: HandshakeRequest, request: Request):
+    if req.code != PAIRING_CODE: raise HTTPException(403, detail="Invalid Code")
+    token = device_manager.authorize(req.device_id, req.device_name, request.client.host)
+    return {"status": "ok", "token": token, "server_name": HOSTNAME}
+
+@app.get("/api/stats") 
+def get_stats(token: str = Depends(get_token)):
     return {"cpu": psutil.cpu_percent(interval=None), "ram": psutil.virtual_memory().percent}
 
-class TextInput(BaseModel):
-    text: str
+@app.post("/api/file/upload")
+async def upload_file(file: UploadFile = File(...), token: str = Depends(get_token)):
+    try:
+        file_path = os.path.join(FILES_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk: break
+                buffer.write(chunk)
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Upload Error: {e}")
+        return {"status": "error", "detail": str(e)}
 
-@app.post("/keyboard/type")
-def type_text(payload: TextInput):
-    if not PERMISSIONS["keyboard"]: return {"status": "denied"}
+@app.get("/api/file/download/{filename}")
+def download_file(filename: str, token: str = Depends(get_token)):
+    path = os.path.join(FILES_DIR, filename)
+    if os.path.exists(path):
+        return FileResponse(path, filename=filename)
+    raise HTTPException(404, "File not found")
+
+def trigger_file_send(device_token: str, file_path: str):
+    global running_loop
+    session = device_manager.get_session(device_token)
     
-    content = payload.text
-    debug_log("KEYBOARD", f"Received: '{content}'")
-    if not content: return {"status": "empty"}
-
-    with INPUT_LOCK:
-        if set_clipboard(content):
-            debug_log("KEYBOARD", "Clipboard SET. Pasting...")
-            time.sleep(0.3) 
-            send_ctrl_v_robust()
-            debug_log("KEYBOARD", "Paste command sent.")
-            return {"status": "pasted", "length": len(content)}
+    if not session or not session.websocket: 
+        return False, "Device offline"
+    
+    try:
+        filename = os.path.basename(file_path)
+        dest_path = os.path.join(FILES_DIR, filename)
+        if file_path != dest_path:
+            shutil.copy2(file_path, dest_path)
         
-    debug_log("KEYBOARD", "FAIL: Clipboard could not be set")
-    return {"status": "clipboard_error"}
+        msg = {
+            "type": "file_transfer", 
+            "filename": filename,
+            "url": f"/api/file/download/{filename}?token={device_token}",
+            "size": os.path.getsize(file_path)
+        }
 
-@app.post("/keyboard/key/{key_name}")
-def press_key(key_name: str):
-    if not PERMISSIONS["keyboard"]: return {"status": "denied"}
-    debug_log("KEYBOARD", f"Pressing Key: {key_name}")
-    
-    valid = ['enter', 'backspace', 'esc', 'space', 'tab', 'win', 'up', 'down', 'left', 'right']
-    
-    if key_name in valid:
-        with INPUT_LOCK: 
-            pyautogui.keyDown(key_name)
-            time.sleep(0.05)
-            pyautogui.keyUp(key_name)
-        return {"status": "pressed", "key": key_name}
-        
-    return {"status": "invalid_key"}
+        if running_loop and running_loop.is_running():
+            running_loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(session.websocket.send_json(msg))
+            )
+            return True, "Transfer init"
+        else:
+            return False, "Server loop not ready"
+            
+    except Exception as e: 
+        return False, str(e)
 
-@app.post("/keyboard/shortcut/{name}")
-def hotkey(name: str):
-    if not PERMISSIONS["keyboard"]: return {"status": "denied"}
-    debug_log("SHORTCUT", f"Action: {name}")
-    
-    with INPUT_LOCK: 
-        time.sleep(0.05)
-        if name == "alt_tab": pyautogui.hotkey('alt', 'tab')
-        elif name == "win_d": pyautogui.hotkey('win', 'd')
-        elif name == "copy": 
-            ctypes.windll.user32.keybd_event(0x11, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(0x43, 0, 0, 0)
-            time.sleep(0.05)
-            ctypes.windll.user32.keybd_event(0x43, 0, 2, 0)
-            ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
-        elif name == "paste": 
-            send_ctrl_v_robust()
-        elif name == "task_manager": pyautogui.hotkey('ctrl', 'shift', 'esc')
-        else: return {"status": "unknown"}
-        
-    return {"status": "executed", "action": name}
+@app.post("/system/shutdown")
+def system_shutdown(token: str = Depends(get_token)):
+    os.system("shutdown /s /t 1")
+    return {"status": "shutdown"}
+
+@app.post("/system/lock")
+def system_lock(token: str = Depends(get_token)):
+    ctypes.windll.user32.LockWorkStation()
+    return {"status": "locked"}
+
+@app.post("/volume/{action}")
+def volume_control(action: str, token: str = Depends(get_token)):
+    keys = {"up": "volumeup", "down": "volumedown", "mute": "volumemute"}
+    if action in keys: pyautogui.press(keys[action])
+    return {"status": "ok"}
+
+def generate_video_stream():
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        while True:
+            try:
+                sct_img = sct.grab(monitor)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                
+                cx, cy = pyautogui.position()
+                rx, ry = cx - monitor["left"], cy - monitor["top"]
+                draw = ImageDraw.Draw(img)
+                draw.ellipse((rx-6, ry-6, rx+6, ry+6), fill="#00FF9D", outline="black")
+
+                if img.width > 1280: img.thumbnail((1280, 720), Image.Resampling.NEAREST)
+                
+                buf = BytesIO()
+                img.save(buf, format='JPEG', quality=30, optimize=False) 
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.getvalue() + b'\r\n')
+                
+                time.sleep(0.03)
+            except: pass
+
+@app.get("/video_feed")
+def video_feed(token: str = Depends(get_token)):
+    return StreamingResponse(generate_video_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.websocket("/ws/mouse")
-async def websocket_mouse(websocket: WebSocket):
+async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
+    if not device_manager.get_session(token):
+        await websocket.close(code=4003); return
     await websocket.accept()
-    sensitivity = 1.8  
-    scroll_speed = 3
-    debug_log("MOUSE", "Client Connected")
-
+    device_manager.register_socket(token, websocket)
     try:
         while True:
             data = await websocket.receive_json()
-            
-            if not PERMISSIONS["mouse_move"] and "dx" in data: continue
-            if not PERMISSIONS["mouse_click"] and "type" in data: continue
-
             t = data.get("type")
-            
-            if t in ["click", "right_click", "double_click", "drag_start", "drag_end", "scroll"]:
-                with INPUT_LOCK:
-                    if t == "click": 
-                        pyautogui.mouseDown()
-                        time.sleep(0.02)
-                        pyautogui.mouseUp()
-                    elif t == "right_click": 
-                        pyautogui.mouseDown(button='right')
-                        time.sleep(0.02)
-                        pyautogui.mouseUp(button='right')
-                    elif t == "double_click": 
-                        pyautogui.doubleClick()
-                    elif t == "drag_start": pyautogui.mouseDown()
-                    elif t == "drag_end": pyautogui.mouseUp()
-                    elif t == "scroll": pyautogui.scroll(int(data.get("dy", 0) * scroll_speed))
-            
-            elif "dx" in data:
-                dx = int(data.get('dx', 0) * sensitivity)
-                dy = int(data.get('dy', 0) * sensitivity)
-                if dx != 0 or dy != 0: pyautogui.moveRel(dx, dy, _pause=False)
-            
-    except WebSocketDisconnect: debug_log("MOUSE", "Client Disconnected")
 
-@app.get("/video_feed")
-def video_feed():
-    return StreamingResponse(
-        generate_video_stream(), 
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"} 
-    )
+            if t == "move": pyautogui.moveRel(int(data['dx']), int(data['dy']), _pause=False)
+            elif t == "click": pyautogui.click()
+            elif t == "rclick": pyautogui.click(button='right')
+            elif t == "dclick": pyautogui.doubleClick()
+            elif t == "scroll": pyautogui.scroll(int(data['dy']))
+            elif t == "drag_s": pyautogui.mouseDown()
+            elif t == "drag_e": pyautogui.mouseUp()
+            elif t == "text":
+                text_to_send = data.get('text', '')
+                if text_to_send:
+                    hwnd = ctypes.windll.user32.GetForegroundWindow()
+                    if hwnd:
+                        for char in text_to_send:
+                            ctypes.windll.user32.SendMessageW(hwnd, 0x0102, ord(char), 0)
+            elif t == "key":
+                key_map = {
+                    "enter": 0x0D, "backspace": 0x08, "tab": 0x09, 
+                    "esc": 0x1B, "space": 0x20, "win": 0x5B
+                }
+                val = data.get('key', '').lower()
+                vk = key_map.get(val)
+                if vk:
+                    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+                    ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+                
+    except WebSocketDisconnect: pass
 
-static_path = get_resource_path("static")
-if not os.path.exists(static_path): static_path = "static" 
-app.mount("/static", StaticFiles(directory=static_path), name="static")
+if os.path.exists(STATIC_DIR):
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
-@app.get("/")
-async def read_index():
-    return FileResponse(os.path.join(static_path, 'index.html'))
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
