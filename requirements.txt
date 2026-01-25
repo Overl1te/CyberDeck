@@ -4,6 +4,8 @@ pyinstaller
 customtkinter
 packaging
 python-multipart
+aiofiles
+requests
 
 # Веб сервер
 uvicorn

@@ -6,23 +6,20 @@ import socket
 import ctypes
 import subprocess
 import pystray
-import asyncio
 import psutil
+import time
+import requests
 from PIL import Image
 from tkinter import filedialog
-import main
 
-main.DEBUG = True
+# --- КОНФИГ ---
+SERVER_SCRIPT_NAME = "main.py"
+PORT = 8080
+API_URL = f"http://127.0.0.1:{PORT}/api/local"
 
-SHOW_CONSOLE = "-c" in sys.argv
-if sys.platform == "win32" and not SHOW_CONSOLE:
-    try:
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        hwnd = kernel32.GetConsoleWindow()
-        if hwnd:
-            user32.ShowWindow(hwnd, 0)
-    except: pass
+# --- GUI СТИЛЬ ---
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("dark-blue")
 
 COLOR_BG = "#050505"
 COLOR_PANEL = "#111111"
@@ -33,123 +30,166 @@ FONT_MAIN = ("Consolas", 14)
 FONT_BOLD = ("Consolas", 14, "bold")
 FONT_HEADER = ("Consolas", 24, "bold")
 
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("dark-blue")
-
-def is_admin():
-    try: return ctypes.windll.shell32.IsUserAnAdmin()
-    except: return False
-
-def run_as_admin():
-    if getattr(sys, 'frozen', False): executable = sys.executable; args = ""
-    else: executable = sys.executable; args = f'"{__file__}"'
-    if len(sys.argv) > 1: args += " " + " ".join(sys.argv[1:])
-    ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, args, None, 1)
-
-def get_lan_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except: return "127.0.0.1"
-
-def kill_port_owner(port):
-    """Убивает процесс, занимающий порт, используя API psutil"""
-    print(f"Checking port {port}...")
-    try:
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                for conn in proc.net_connections(kind='inet'):
-                    if conn.laddr.port == port:
-                        print(f"Killing {proc.name()} (PID: {proc.pid}) on port {port}")
-                        proc.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-    except Exception as e:
-        print(f"Error cleaning port: {e}")
-
 class CyberBtn(ctk.CTkButton):
     def __init__(self, master, **kwargs):
         super().__init__(master, corner_radius=0, border_width=1, border_color=COLOR_ACCENT, 
                          fg_color="transparent", text_color=COLOR_ACCENT, hover_color=COLOR_ACCENT,
                          font=FONT_BOLD, **kwargs)
-        self.bind("<Enter>", self.on_enter)
-        self.bind("<Leave>", self.on_leave)
-    def on_enter(self, e): self.configure(text_color=COLOR_BG)
-    def on_leave(self, e): self.configure(text_color=COLOR_ACCENT)
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        if not is_admin():
-            run_as_admin()
+        if not self.is_admin():
+            self.run_as_admin()
             sys.exit()
 
-        self.title(f"CYBERDECK")
+        self.title("CYBERDECK")
         self.geometry("950x650")
         self.configure(fg_color=COLOR_BG)
-        self.protocol("WM_DELETE_WINDOW", self.hide_window)
+        self.protocol("WM_DELETE_WINDOW", self.quit_app)
 
-        if getattr(sys, 'frozen', False): base_dir = os.path.dirname(sys.executable)
-        else: base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.icon_path = os.path.join(base_dir, "icon.png")
+        if getattr(sys, 'frozen', False): 
+            self.base_dir = os.path.dirname(sys.executable)
+            self.server_exe = os.path.join(self.base_dir, "main.exe")
+        else: 
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.server_exe = os.path.join(self.base_dir, "main.py")
+
+        self.icon_path = os.path.join(self.base_dir, "icon.png")
         if os.path.exists(self.icon_path):
             try: self.iconbitmap(self.icon_path)
             except: pass
 
-        self.setup_ui()
-        self.setup_firewall_rules()
+        self.server_process = None
+        self.devices_data = [] # Список устройств с сервера
+        self.selected_token = None
+        self.pairing_code = "...."
         
-        self.server_thread = threading.Thread(target=self.start_server_raw, daemon=True)
-        self.server_thread.start()
+        self.setup_ui()
+        self.start_server_process()
+        
+        # Запускаем цикл обновления данных с сервера (каждые 2 сек)
+        self.after(2000, self.sync_loop)
         
         threading.Thread(target=self.setup_tray, daemon=True).start()
-        self.after(2000, self.update_status_loop)
 
-    def start_server_raw(self):
-        """
-        Запуск сервера в изолированном цикле событий.
-        """
+    def is_admin(self):
+        try: return ctypes.windll.shell32.IsUserAnAdmin()
+        except: return False
+
+    def run_as_admin(self):
+        if getattr(sys, 'frozen', False): executable = sys.executable; args = ""
+        else: executable = sys.executable; args = f'"{__file__}"'
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, args, None, 1)
+
+    def start_server_process(self):
+        self.kill_old_server()
+        cmd = [sys.executable, self.server_exe] if not getattr(sys, 'frozen', False) else [self.server_exe]
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
         try:
-            import uvicorn
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            config = uvicorn.Config(
-                main.app, 
-                host="0.0.0.0", 
-                port=main.PORT, 
-                log_level="info" if main.DEBUG else "critical",
+            self.server_process = subprocess.Popen(
+                cmd, cwd=self.base_dir, startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW
             )
-            server = uvicorn.Server(config)
-            
-            server.install_signal_handlers = False
-            
-            loop.run_until_complete(server.serve())
         except Exception as e:
-            print(f"CRITICAL SERVER ERROR: {e}")
+            print(f"Error starting server: {e}")
 
-    def setup_firewall_rules(self):
-        try:
-            subprocess.run(f'netsh advfirewall firewall delete rule name="CyberDeck TCP"', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(f'netsh advfirewall firewall add rule name="CyberDeck TCP" dir=in action=allow protocol=TCP localport={main.PORT} profile=any', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def kill_old_server(self):
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                for conn in proc.net_connections(kind='inet'):
+                    if conn.laddr.port == PORT:
+                        proc.kill()
+            except: continue
+
+    # --- СИНХРОНИЗАЦИЯ С СЕРВЕРОМ ---
+    def sync_loop(self):
+        """Опрашивает локальный API сервера и обновляет GUI"""
+        def _fetch():
+            try:
+                resp = requests.get(f"{API_URL}/info", timeout=1)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.pairing_code = data.get("pairing_code", "ERR")
+                    self.devices_data = data.get("devices", [])
+                    # Обновляем GUI в главном потоке
+                    self.after(0, self.update_gui_data)
+            except: pass # Сервер еще грузится или упал
             
-            subprocess.run(f'netsh advfirewall firewall delete rule name="CyberDeck UDP"', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(f'netsh advfirewall firewall add rule name="CyberDeck UDP" dir=in action=allow protocol=UDP localport={main.UDP_PORT} profile=any', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except: pass
+        threading.Thread(target=_fetch, daemon=True).start()
+        self.after(2000, self.sync_loop)
 
-    def safe_update_status(self, text, color=None):
-        """Обновляет статус из любого потока, не вешая GUI"""
-        def _update():
-            self.lbl_status.configure(text=text)
-            if color:
-                self.lbl_status.configure(text_color=color)
-        self.after(0, _update)
+    def update_gui_data(self):
+        # 1. Обновляем код
+        self.lbl_code.configure(text=self.pairing_code)
+        
+        # 2. Обновляем список устройств
+        for w in self.device_list.winfo_children(): w.destroy()
+        
+        if not self.devices_data:
+            ctk.CTkLabel(self.device_list, text="[NO CONNECTIONS]", text_color="#333", font=("Consolas", 12)).pack(pady=20)
+        else:
+            for d in self.devices_data:
+                row = ctk.CTkFrame(self.device_list, fg_color="#111", corner_radius=0)
+                row.pack(fill="x", pady=2)
+                
+                is_sel = (self.selected_token == d['token'])
+                col = COLOR_ACCENT if is_sel else "#333"
+                
+                ctk.CTkCanvas(row, width=5, height=40, bg=col, highlightthickness=0).pack(side="left")
+                ctk.CTkLabel(row, text=f"{d['name']} :: {d['ip']}", font=("Consolas", 12), text_color="white").pack(side="left", padx=10)
+                
+                btn_txt = "LINKED" if is_sel else "SELECT"
+                btn_fg = COLOR_ACCENT if is_sel else "transparent"
+                btn_txt_col = "black" if is_sel else COLOR_ACCENT
+                
+                ctk.CTkButton(row, text=btn_txt, width=80, corner_radius=0, fg_color=btn_fg, 
+                              border_width=1, border_color=COLOR_ACCENT, text_color=btn_txt_col,
+                              command=lambda t=d['token']: self.select_device(t)).pack(side="right", padx=10, pady=5)
 
+    def select_device(self, token):
+        self.selected_token = token
+        self.lbl_status.configure(text="> TARGET LOCKED", text_color=COLOR_ACCENT)
+        # Принудительно обновляем список, чтобы перерисовать кнопки
+        self.update_gui_data()
+
+    def send_file(self):
+        if not self.selected_token:
+            self.lbl_status.configure(text="> NO TARGET SELECTED", text_color=COLOR_FAIL)
+            return
+            
+        path = filedialog.askopenfilename()
+        if not path: return
+
+        def _bg_send():
+            self.lbl_status.configure(text="> REQUESTING TRANSFER...", text_color="yellow")
+            try:
+                # Шлем запрос на наш же сервер через локальный API
+                payload = {"token": self.selected_token, "file_path": path}
+                resp = requests.post(f"{API_URL}/trigger_file", json=payload)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok"):
+                        self.lbl_status.configure(text="> TRANSFER STARTED", text_color=COLOR_ACCENT)
+                    else:
+                        self.lbl_status.configure(text=f"> ERROR: {data.get('msg')}", text_color=COLOR_FAIL)
+                else:
+                    self.lbl_status.configure(text="> API ERROR", text_color=COLOR_FAIL)
+            except Exception as e:
+                self.lbl_status.configure(text=f"> CRASH: {e}", text_color=COLOR_FAIL)
+
+        threading.Thread(target=_bg_send, daemon=True).start()
+
+    def regenerate_code_action(self):
+        def _req():
+            try: requests.post(f"{API_URL}/regenerate_code")
+            except: pass
+        threading.Thread(target=_req, daemon=True).start()
+
+    # --- UI SETUP ---
     def setup_ui(self):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -164,10 +204,7 @@ class App(ctk.CTk):
         self.btn_home = self.create_nav_btn("TERMINAL", "home", 2)
         self.btn_devices = self.create_nav_btn("UPLINK", "devices", 3)
         
-        self.lbl_cpu = ctk.CTkLabel(self.sidebar, text="CPU: 0% | MEM: 0%", font=("Consolas", 11), text_color="gray")
-        self.lbl_cpu.grid(row=5, column=0, padx=20, pady=5, sticky="w")
-        ctk.CTkLabel(self.sidebar, text=f"BUILD: {main.VERSION}", font=("Consolas", 10), text_color=COLOR_TEXT_DIM).grid(row=6, column=0, padx=20, pady=20, sticky="sw")
-
+        # Frames
         self.home_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.devices_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         
@@ -183,37 +220,26 @@ class App(ctk.CTk):
         return btn
 
     def setup_home(self):
+        # HEADER
         header = ctk.CTkFrame(self.home_frame, fg_color=COLOR_PANEL, corner_radius=0, height=60)
         header.pack(fill="x", padx=20, pady=20)
         ctk.CTkLabel(header, text="SYSTEM STATUS :: ONLINE", font=FONT_HEADER, text_color=COLOR_ACCENT).pack(side="left", padx=20, pady=15)
         
+        # GRID
         grid = ctk.CTkFrame(self.home_frame, fg_color="transparent")
         grid.pack(fill="both", expand=True, padx=20)
         
         left = ctk.CTkFrame(grid, fg_color="transparent")
         left.pack(side="left", fill="both", expand=True, padx=(0,10))
         
+        # CODE CARD
         card = ctk.CTkFrame(left, fg_color=COLOR_PANEL, corner_radius=0, border_width=1, border_color="#333")
         card.pack(fill="x", pady=(0, 20))
         ctk.CTkLabel(card, text="ACCESS KEY", font=("Consolas", 12), text_color="gray").pack(pady=(15,5))
-        self.lbl_code = ctk.CTkLabel(card, text=main.PAIRING_CODE, font=("Consolas", 50, "bold"), text_color="white")
+        self.lbl_code = ctk.CTkLabel(card, text="....", font=("Consolas", 50, "bold"), text_color="white")
         self.lbl_code.pack(pady=5)
-        self.lbl_ip = ctk.CTkLabel(card, text=f"{get_lan_ip()}:{main.PORT}", font=("Consolas", 16), text_color=COLOR_ACCENT)
-        self.lbl_ip.pack(pady=(0, 15))
         
-        CyberBtn(card, text="REGENERATE", command=self.restart_server, height=30).pack(pady=(0,15), padx=40, fill="x")
-
-        right = ctk.CTkFrame(grid, fg_color="transparent")
-        right.pack(side="right", fill="both", expand=True, padx=(10,0))
-        
-        act = ctk.CTkFrame(right, fg_color=COLOR_PANEL, corner_radius=0, border_width=1, border_color="#333")
-        act.pack(fill="x")
-        ctk.CTkLabel(act, text="QUICK ACTIONS", font=("Consolas", 12), text_color="gray").pack(pady=(15,10))
-        CyberBtn(act, text="OPEN FILES", command=lambda: os.startfile(main.FILES_DIR)).pack(pady=5, padx=20, fill="x")
-        ctk.CTkLabel(act, text="", height=10).pack()
-        
-        if SHOW_CONSOLE:
-            ctk.CTkLabel(self.home_frame, text="LOGS ARE DISPLAYED IN CONSOLE WINDOW", font=("Consolas", 12), text_color="gray").pack(pady=50)
+        CyberBtn(card, text="REGENERATE", command=self.regenerate_code_action, height=30).pack(pady=(0,15), padx=40, fill="x")
 
     def setup_devices(self):
         ctk.CTkLabel(self.devices_frame, text="CONNECTED NODES", font=FONT_HEADER, text_color="white").pack(pady=20, padx=20, anchor="w")
@@ -225,70 +251,12 @@ class App(ctk.CTk):
         self.lbl_status = ctk.CTkLabel(box, text="> SELECT TARGET", text_color="gray", font=("Consolas", 12))
         self.lbl_status.pack(pady=10)
         CyberBtn(box, text="UPLOAD PAYLOAD", command=self.send_file).pack(pady=10)
-        self.selected_token = None
-
-    def update_status_loop(self):
-        try:
-            cpu = psutil.cpu_percent()
-            ram = psutil.virtual_memory().percent
-            self.lbl_cpu.configure(text=f"CPU: {cpu}% | RAM: {ram}%")
-            
-            devs = main.device_manager.get_all_devices()
-            for w in self.device_list.winfo_children(): w.destroy()
-            
-            if not devs:
-                ctk.CTkLabel(self.device_list, text="[SCANNING... NO SIGNAL]", text_color="#333", font=("Consolas", 12)).pack(pady=20)
-            else:
-                for d in devs:
-                    row = ctk.CTkFrame(self.device_list, fg_color="#111", corner_radius=0)
-                    row.pack(fill="x", pady=2)
-                    is_sel = (self.selected_token == d['token'])
-                    col = COLOR_ACCENT if is_sel else "#333"
-                    ctk.CTkCanvas(row, width=5, height=40, bg=col, highlightthickness=0).pack(side="left")
-                    ctk.CTkLabel(row, text=f"{d['name']} :: {d['ip']}", font=("Consolas", 12), text_color="white").pack(side="left", padx=10)
-                    btn_txt = "LINKED" if is_sel else "CONNECT"
-                    btn_fg = COLOR_ACCENT if is_sel else "transparent"
-                    btn_txt_col = "black" if is_sel else COLOR_ACCENT
-                    ctk.CTkButton(row, text=btn_txt, width=80, corner_radius=0, fg_color=btn_fg, 
-                                  border_width=1, border_color=COLOR_ACCENT, text_color=btn_txt_col,
-                                  command=lambda t=d['token']: self.sel_dev(t)).pack(side="right", padx=10, pady=5)
-        except Exception as e: 
-            print(f"Status Loop Error: {e}")
-        
-        self.after(2000, self.update_status_loop)
 
     def select_frame(self, name):
         self.home_frame.grid_forget(); self.devices_frame.grid_forget()
         self.btn_home.configure(text_color="gray"); self.btn_devices.configure(text_color="gray")
         if name == "home": self.home_frame.grid(row=0, column=1, sticky="nsew"); self.btn_home.configure(text_color=COLOR_ACCENT)
         else: self.devices_frame.grid(row=0, column=1, sticky="nsew"); self.btn_devices.configure(text_color=COLOR_ACCENT)
-
-    def sel_dev(self, t):
-        self.selected_token = t
-        self.lbl_status.configure(text="> TARGET LOCKED", text_color=COLOR_ACCENT)
-        self.after(10, self.update_status_loop)
-
-    def send_file(self):
-        if not self.selected_token: return
-        path = filedialog.askopenfilename()
-        if not path: return
-
-        def _bg_send():
-            self.safe_update_status("> UPLOADING...", "yellow")
-            try:
-                ok, msg = main.trigger_file_send(self.selected_token, path)
-                if ok:
-                    self.safe_update_status(f"> SENT: {msg.upper()}", COLOR_ACCENT)
-                else:
-                    self.safe_update_status(f"> ERROR: {msg.upper()}", COLOR_FAIL)
-            except Exception as e:
-                self.safe_update_status(f"> CRASH: {str(e)}", COLOR_FAIL)
-
-        threading.Thread(target=_bg_send, daemon=True).start()
-
-    def restart_server(self):
-        main.PAIRING_CODE = str(main.uuid.uuid4().int)[:4]
-        self.lbl_code.configure(text=main.PAIRING_CODE)
 
     def setup_tray(self):
         try: image = Image.open(self.icon_path)
@@ -298,13 +266,13 @@ class App(ctk.CTk):
         self.tray.run()
 
     def show_window(self, icon=None, item=None): self.after(0, self.deiconify)
-    def hide_window(self): self.withdraw()
+    def hide_window(self): self.withdraw() # Свернуть в трей при закрытии
     def quit_app(self, icon=None, item=None):
+        if self.server_process:
+            self.server_process.kill()
         if hasattr(self, 'tray'): self.tray.stop()
         os._exit(0)
 
 if __name__ == "__main__":
-    kill_port_owner(main.PORT)
-    
     app = App()
     app.mainloop()

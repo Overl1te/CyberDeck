@@ -212,3 +212,5 @@ __marimo__/
 launcher.*/
 *.xml
 Output/
+*.json
+CyberDeck_Files/
