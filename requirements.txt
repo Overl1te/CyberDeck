@@ -6,6 +6,7 @@ packaging
 python-multipart
 aiofiles
 requests
+qrcode
 
 # Веб сервер
 uvicorn
