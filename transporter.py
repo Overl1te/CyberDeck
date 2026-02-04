@@ -6,16 +6,6 @@ import sys
 import time
 import urllib.parse
 
-# Transporter: отдельный мини-сервер для раздачи ОДНОГО файла.
-# Использование:
-#   python transporter.py <file_path> <port> [--chunk 65536] [--sleep 0.002] [--timeout 300] [--quiet]
-#
-# Параметры:
-#  --chunk   размер чанка (байты)
-#  --sleep   пауза между чанками (секунды, float). 0 = без троттлинга
-#  --timeout авто-выключение сервера (сек), если никто не скачал
-#  --quiet   не печатать ничего в stdout
-
 class OneFileHandler(http.server.BaseHTTPRequestHandler):
     file_path: str = ""
     filename: str = ""

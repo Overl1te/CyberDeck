@@ -16,6 +16,7 @@ import http.server
 import socketserver
 import urllib.parse
 import logging
+from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from PIL import Image, ImageDraw
@@ -38,10 +39,12 @@ except Exception:
     pass
 
 
-VERSION = "v1.2.0"
+VERSION = "v1.2.1"
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("CYBERDECK_PORT", "8080"))
 UDP_PORT = int(os.environ.get("CYBERDECK_UDP_PORT", "5555"))
+CURSOR_STREAM = int(os.environ.get("CYBERDECK_CURSOR_STREAM", "1")) == 1
+CURSOR_STREAM_FPS = int(os.environ.get("CYBERDECK_CURSOR_FPS", "30"))
 
 DEBUG = os.environ.get("CYBERDECK_DEBUG", "1") == "1"
 CONSOLE_LOG = os.environ.get("CYBERDECK_CONSOLE", "0") == "1"
@@ -71,7 +74,6 @@ HOSTNAME = os.environ.get("COMPUTERNAME", "CyberDeck PC")
 
 
 def setup_logging() -> logging.Logger:
-    """Логи включаются только при CYBERDECK_LOG=1 или CYBERDECK_CONSOLE=1."""
     os.makedirs(BASE_DIR, exist_ok=True)
     logger = logging.getLogger("cyberdeck")
     logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
@@ -116,6 +118,14 @@ def setup_logging() -> logging.Logger:
 
 
 log = setup_logging()
+
+try:
+    pyautogui.PAUSE = 0
+except Exception:
+    pass
+
+_mouse_remainders_lock = threading.Lock()
+_mouse_remainders = {}
 
 TRANSFER_PRESETS = {
     "fast": {"chunk": 1024 * 1024, "sleep": 0.0},
@@ -276,7 +286,14 @@ class DeviceManager:
             return False
         if not isinstance(patch, dict):
             return False
-        s.settings.update(patch)
+        for k, v in patch.items():
+            if v is None:
+                try:
+                    s.settings.pop(k, None)
+                except Exception:
+                    pass
+            else:
+                s.settings[k] = v
         self.save_sessions()
         return True
 
@@ -298,15 +315,43 @@ class DeviceManager:
 device_manager = DeviceManager()
 device_manager.load_sessions()
 
-app = FastAPI(title=f"CyberDeck {VERSION}")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+DEFAULT_PERMS = {
+    "perm_mouse": True,
+    "perm_keyboard": True,
+    "perm_upload": True,
+    "perm_file_send": True,
+    "perm_stream": True,
+    "perm_power": False,
+}
 
 
-@app.on_event("startup")
-async def startup_event():
+def _get_perm(token: str, key: str) -> bool:
+    s = device_manager.get_session(token)
+    if not s:
+        return False
+    try:
+        settings = s.settings or {}
+        if key in settings:
+            return bool(settings.get(key))
+        return bool(DEFAULT_PERMS.get(key, False))
+    except Exception:
+        return bool(DEFAULT_PERMS.get(key, False))
+
+
+def _require_perm(token: str, key: str):
+    if not _get_perm(token, key):
+        raise HTTPException(403, detail=f"permission_denied:{key}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global running_loop
     running_loop = asyncio.get_running_loop()
     log.info("Server startup complete")
+    yield
+
+
+app = FastAPI(title=f"CyberDeck {VERSION}", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 async def get_token(request: Request, token: Optional[str] = Query(None)):
@@ -345,6 +390,7 @@ def get_stats(token: str = Depends(get_token)):
 
 @app.post("/api/file/upload")
 async def upload_file(file: UploadFile = File(...), token: str = Depends(get_token)):
+    _require_perm(token, "perm_upload")
     try:
         file_path = os.path.join(FILES_DIR, file.filename)
         with open(file_path, "wb") as buffer:
@@ -360,6 +406,8 @@ async def upload_file(file: UploadFile = File(...), token: str = Depends(get_tok
 
 
 def trigger_file_send_logic(device_token: str, file_path: str):
+    if not _get_perm(device_token, "perm_file_send"):
+        return False, "permission_denied:perm_file_send"
     session = device_manager.get_session(device_token)
     if not session or not session.websocket:
         return False, "Offline"
@@ -628,17 +676,20 @@ def regenerate_code(request: Request):
 
 @app.post("/system/shutdown")
 def system_shutdown(token: str = Depends(get_token)):
+    _require_perm(token, "perm_power")
     os.system("shutdown /s /t 1")
     return {"status": "shutdown"}
 
 
 @app.post("/system/lock")
 def system_lock(token: str = Depends(get_token)):
+    _require_perm(token, "perm_power")
     ctypes.windll.user32.LockWorkStation()
     return {"status": "locked"}
 
 @app.post("/system/sleep")
 def system_sleep(token: str = Depends(get_token)):
+    _require_perm(token, "perm_power")
     if os.name != "nt":
         raise HTTPException(400, "sleep_supported_only_on_windows")
     try:
@@ -655,9 +706,10 @@ def system_sleep(token: str = Depends(get_token)):
 
 @app.post("/volume/{action}")
 def volume_control(action: str, token: str = Depends(get_token)):
+    _require_perm(token, "perm_keyboard")
     keys = {"up": "volumeup", "down": "volumedown", "mute": "volumemute"}
     if action in keys:
-        pyautogui.press(keys[action])
+        pyautogui.press(keys[action], _pause=False)
     return {"status": "ok"}
 
 
@@ -665,13 +717,21 @@ def volume_control(action: str, token: str = Depends(get_token)):
 class _VideoStreamer:
     def __init__(self):
         self._lock = threading.Lock()
-        self._latest_raw = None 
-        self._latest_jpeg = None 
+        self._latest_raw = None
+        self._raw_seq = 0
+        self._latest_jpeg = None
+        self._latest_jpeg_key = None
+        self._latest_jpeg_seq = -1
         self._ts = 0.0
         self.base_w = int(os.environ.get("CYBERDECK_STREAM_W", "960"))
         self.base_q = int(os.environ.get("CYBERDECK_STREAM_Q", "25"))
         self.base_fps = int(os.environ.get("CYBERDECK_STREAM_FPS", "30"))
         self.base_cursor = int(os.environ.get("CYBERDECK_STREAM_CURSOR", "0")) == 1
+        self._desired_key = (self.base_w, self.base_q, self.base_cursor)
+        self._ema_encode_ms = None
+        self._ema_grab_ms = None
+        self._ema_loop_fps = None
+        self._last_loop_t = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -687,15 +747,35 @@ class _VideoStreamer:
                 while not self._stop.is_set():
                     t0 = time.perf_counter()
                     try:
+                        g0 = time.perf_counter()
                         sct_img = sct.grab(monitor)
+                        g_ms = (time.perf_counter() - g0) * 1000.0
                         raw = bytes(sct_img.bgra)
                         size = sct_img.size
                         with self._lock:
-                            self._latest_raw = (raw, size, monitor)
-                        jpeg = self._encode(raw, size, monitor, self.base_w, self.base_q, self.base_cursor)
+                            self._raw_seq += 1
+                            raw_seq = self._raw_seq
+                            self._latest_raw = (raw, size, monitor, raw_seq)
+                            desired_w, desired_q, desired_cursor = self._desired_key
+
+                        e0 = time.perf_counter()
+                        jpeg = self._encode(raw, size, monitor, desired_w, desired_q, desired_cursor)
+                        e_ms = (time.perf_counter() - e0) * 1000.0
                         with self._lock:
                             self._latest_jpeg = jpeg
+                            self._latest_jpeg_key = (desired_w, desired_q, desired_cursor)
+                            self._latest_jpeg_seq = raw_seq
                             self._ts = time.time()
+
+                            a = 0.15
+                            self._ema_encode_ms = e_ms if self._ema_encode_ms is None else (self._ema_encode_ms * (1 - a) + e_ms * a)
+                            self._ema_grab_ms = g_ms if self._ema_grab_ms is None else (self._ema_grab_ms * (1 - a) + g_ms * a)
+                            now = time.perf_counter()
+                            if self._last_loop_t is not None:
+                                dt = max(0.0001, now - self._last_loop_t)
+                                fps_now = 1.0 / dt
+                                self._ema_loop_fps = fps_now if self._ema_loop_fps is None else (self._ema_loop_fps * (1 - a) + fps_now * a)
+                            self._last_loop_t = now
                     except Exception:
                         log.exception("Video grab/encode failed")
                         time.sleep(0.05)
@@ -723,19 +803,53 @@ class _VideoStreamer:
 
         buf = BytesIO()
         q = max(10, min(95, int(q)))
-        img.save(buf, format="JPEG", quality=q, optimize=False)
+        img.save(buf, format="JPEG", quality=q, subsampling=2, progressive=False, optimize=False)
         return buf.getvalue()
 
     def get_jpeg(self, w: int, q: int, cursor: bool) -> bytes:
         with self._lock:
             raw = self._latest_raw
             jpeg = self._latest_jpeg
+            jpeg_key = self._latest_jpeg_key
+            jpeg_seq = self._latest_jpeg_seq
         if raw is None:
             return b""
-        if w == self.base_w and q == self.base_q and cursor == self.base_cursor and jpeg is not None:
+
+        key = (int(w), int(q), bool(cursor))
+        raw_bgra, size, monitor, raw_seq = raw
+        if jpeg is not None and jpeg_key == key and jpeg_seq == raw_seq:
             return jpeg
-        raw_bgra, size, monitor = raw
-        return self._encode(raw_bgra, size, monitor, w, q, cursor)
+
+        try:
+            with self._lock:
+                self._desired_key = key
+        except Exception:
+            pass
+
+        out = self._encode(raw_bgra, size, monitor, key[0], key[1], key[2])
+        try:
+            with self._lock:
+                if self._latest_raw and self._latest_raw[3] == raw_seq:
+                    self._latest_jpeg = out
+                    self._latest_jpeg_key = key
+                    self._latest_jpeg_seq = raw_seq
+        except Exception:
+            pass
+        return out
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            desired = tuple(self._desired_key)
+            return {
+                "desired_w": int(desired[0]),
+                "desired_q": int(desired[1]),
+                "desired_cursor": bool(desired[2]),
+                "base_fps": int(self.base_fps),
+                "ema_encode_ms": float(self._ema_encode_ms) if self._ema_encode_ms is not None else None,
+                "ema_grab_ms": float(self._ema_grab_ms) if self._ema_grab_ms is not None else None,
+                "ema_loop_fps": float(self._ema_loop_fps) if self._ema_loop_fps is not None else None,
+                "ts": float(self._ts),
+            }
 
 
 _video_streamer = _VideoStreamer()
@@ -761,15 +875,58 @@ def generate_video_stream(w: int, q: int, fps: int, cursor: bool):
 @app.get("/video_feed")
 def video_feed(
     token: str = Depends(get_token),
-    w: int = 960,
-    q: int = 25,
+    w: Optional[int] = None,
+    q: Optional[int] = None,
+    max_w: Optional[int] = None,
+    quality: Optional[int] = None,
     fps: int = 30,
     cursor: int = 0,
+    low_latency: int = 0,
 ):
+    _require_perm(token, "perm_stream")
+
+    eff_w = int(max_w if max_w is not None else (w if w is not None else 960))
+    eff_q = int(quality if quality is not None else (q if q is not None else 25))
+    eff_fps = int(fps)
+
+    if int(low_latency) == 1:
+        eff_w = min(eff_w, 960)
+        eff_q = min(eff_q, 35)
+        eff_fps = min(eff_fps, 60)
+
     return StreamingResponse(
-        generate_video_stream(int(w), int(q), int(fps), bool(int(cursor))),
+        generate_video_stream(eff_w, eff_q, eff_fps, bool(int(cursor))),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
+
+
+@app.get("/api/stream_stats")
+def stream_stats(token: str = Depends(get_token)):
+    _require_perm(token, "perm_stream")
+    return _video_streamer.get_stats()
+
+
+async def _cursor_stream(websocket: WebSocket):
+    min_dt = 1.0 / max(5, int(CURSOR_STREAM_FPS))
+    last_pos = None
+    while True:
+        try:
+            x, y = pyautogui.position()
+            w, h = pyautogui.size()
+            pos = (int(x), int(y), int(w), int(h))
+            if pos != last_pos:
+                await websocket.send_json({"type": "cursor", "x": pos[0], "y": pos[1], "w": pos[2], "h": pos[3]})
+                last_pos = pos
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            break
+        await asyncio.sleep(min_dt)
 
 
 @app.websocket("/ws/mouse")
@@ -777,36 +934,71 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
     if not device_manager.get_session(token):
         await websocket.close(code=4003)
         return
+    if not (_get_perm(token, "perm_mouse") or _get_perm(token, "perm_keyboard")):
+        await websocket.close(code=4003)
+        return
     await websocket.accept()
     device_manager.register_socket(token, websocket)
     log.info(f"WS connected: {token}")
+    cursor_task = asyncio.create_task(_cursor_stream(websocket)) if CURSOR_STREAM else None
     try:
         while True:
             data = await websocket.receive_json()
             t = (data.get("type") or "").lower()
 
             if t == "move":
-                pyautogui.moveRel(int(data.get("dx", 0)), int(data.get("dy", 0)), _pause=False)
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                try:
+                    dx = float(data.get("dx", 0) or 0)
+                    dy = float(data.get("dy", 0) or 0)
+                except Exception:
+                    dx, dy = 0.0, 0.0
+
+                with _mouse_remainders_lock:
+                    rx, ry = _mouse_remainders.get(token, (0.0, 0.0))
+                    dx += rx
+                    dy += ry
+                    mx = int(round(dx))
+                    my = int(round(dy))
+                    _mouse_remainders[token] = (dx - mx, dy - my)
+
+                if mx or my:
+                    pyautogui.moveRel(mx, my, _pause=False)
 
             elif t == "click":
-                pyautogui.click()
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                pyautogui.click(_pause=False)
 
             elif t == "rclick":
-                pyautogui.click(button="right")
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                pyautogui.click(button="right", _pause=False)
 
             elif t == "dclick":
-                pyautogui.doubleClick()
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                pyautogui.doubleClick(_pause=False)
 
             elif t == "scroll":
-                pyautogui.scroll(int(data.get("dy", 0)))
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                pyautogui.scroll(int(data.get("dy", 0)), _pause=False)
 
             elif t == "drag_s":
-                pyautogui.mouseDown()
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                pyautogui.mouseDown(_pause=False)
 
             elif t == "drag_e":
-                pyautogui.mouseUp()
+                if not _get_perm(token, "perm_mouse"):
+                    continue
+                pyautogui.mouseUp(_pause=False)
 
             elif t == "text":
+                if not _get_perm(token, "perm_keyboard"):
+                    continue
                 text = str(data.get("text", ""))
                 if text:
                     hwnd = ctypes.windll.user32.GetForegroundWindow()
@@ -815,6 +1007,8 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                             ctypes.windll.user32.SendMessageW(hwnd, 0x0102, ord(char), 0)
 
             elif t == "key":
+                if not _get_perm(token, "perm_keyboard"):
+                    continue
                 key_map = {"enter": 0x0D, "backspace": 0x08, "space": 0x20, "win": 0x5B}
                 val = str(data.get("key", "")).lower()
                 vk = key_map.get(val)
@@ -823,12 +1017,16 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                     ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
 
             elif t == "hotkey":
+                if not _get_perm(token, "perm_keyboard"):
+                    continue
                 keys = data.get("keys") or []
                 if isinstance(keys, list) and keys:
                     keys = [str(k).lower() for k in keys]
-                    pyautogui.hotkey(*keys)
+                    pyautogui.hotkey(*keys, _pause=False)
 
             elif t == "media":
+                if not _get_perm(token, "perm_keyboard"):
+                    continue
                 act = str(data.get("action", "")).lower()
                 media_map = {
                     "play_pause": "playpause",
@@ -841,27 +1039,36 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                 }
                 key = media_map.get(act)
                 if key:
-                    pyautogui.press(key)
+                    pyautogui.press(key, _pause=False)
 
             elif t == "shortcut":
+                if not _get_perm(token, "perm_keyboard"):
+                    continue
                 act = str(data.get("action", "")).lower()
                 if act == "copy":
-                    pyautogui.hotkey("ctrl", "c")
+                    pyautogui.hotkey("ctrl", "c", _pause=False)
                 elif act == "paste":
-                    pyautogui.hotkey("ctrl", "v")
+                    pyautogui.hotkey("ctrl", "v", _pause=False)
                 elif act == "cut":
-                    pyautogui.hotkey("ctrl", "x")
+                    pyautogui.hotkey("ctrl", "x", _pause=False)
                 elif act == "undo":
-                    pyautogui.hotkey("ctrl", "z")
+                    pyautogui.hotkey("ctrl", "z", _pause=False)
                 elif act == "redo":
-                    pyautogui.hotkey("ctrl", "y")
+                    pyautogui.hotkey("ctrl", "y", _pause=False)
 
     except WebSocketDisconnect:
         pass
     except Exception:
         log.exception("WS error")
     finally:
+        if cursor_task:
+            cursor_task.cancel()
         device_manager.unregister_socket(token)
+        try:
+            with _mouse_remainders_lock:
+                _mouse_remainders.pop(token, None)
+        except Exception:
+            pass
         log.info(f"WS disconnected: {token}")
 
 
