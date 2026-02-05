@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
@@ -11,16 +11,101 @@
         .card { background: #121212; padding: 40px; border-radius: 20px; border: 1px solid #333; box-shadow: 0 0 20px rgba(0, 255, 157, 0.1); max-width: 400px; }
         .btn { display: inline-block; background: #00FF9D; color: #000; padding: 15px 30px; text-decoration: none; font-weight: bold; border-radius: 8px; margin-top: 20px; transition: transform 0.2s; }
         .btn:hover { transform: scale(1.05); }
+        .kv { margin: 10px 0; color: #fff; font-size: 1.05rem; }
+        .code { font-size: 2rem; font-weight: 800; letter-spacing: 0.2rem; color: #00FF9D; margin-top: 6px; }
+        .muted { color: #888; font-size: 0.95rem; }
+        .btn.secondary { background: transparent; color: #00FF9D; border: 1px solid #00FF9D; }
     </style>
 </head>
 <body>
     <div class="card">
         <h1>CyberDeck</h1>
-        <p>Сервер запущен и работает.</p>
-        <div style="color: #fff; margin: 20px 0;">
+        <p id="subtitle">Сервер запущен и работает.</p>
+
+        <div id="connect" style="display:none; margin: 16px 0;">
+            <div class="kv">Подключение к ПК:</div>
+            <div class="kv"><span id="ip">—</span>:<span id="port">—</span></div>
+            <div class="muted">PIN-код:</div>
+            <div class="code" id="code">—</div>
+            <div class="muted" style="margin-top: 10px;">
+                Открой CyberDeck Mobile и введи адрес и PIN.
+            </div>
+
+            <a id="openAppBtn" href="#" class="btn secondary" style="display:none;">Открыть в приложении</a>
+            <div id="openHint" class="muted" style="margin-top: 10px; display:none;">
+                Если приложение не открылось автоматически — нажми кнопку выше.
+            </div>
+        </div>
+
+        <div id="generic" style="color: #fff; margin: 20px 0;">
             Для управления этим ПК используйте мобильное приложение.
         </div>
+
         <a href="https://github.com/Overl1te/CyberDeck-Mobile/releases" class="btn">Скачать приложение</a>
     </div>
+
+    <script>
+        (function () {
+            const params = new URLSearchParams(window.location.search || "");
+            const ip = (params.get("ip") || "").trim();
+            const port = (params.get("port") || "").trim();
+            const code = (params.get("code") || "").trim();
+            const scheme = (params.get("scheme") || "").trim();
+            const serverId = (params.get("server_id") || "").trim();
+            const hostname = (params.get("hostname") || "").trim();
+            const type = (params.get("type") || "cyberdeck_qr_v1").trim();
+
+            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+
+            if (ip && port && code) {
+                document.getElementById("connect").style.display = "block";
+                document.getElementById("generic").style.display = "none";
+                document.getElementById("subtitle").textContent = "Открой в браузере — и подключайся.";
+                document.getElementById("ip").textContent = ip;
+                document.getElementById("port").textContent = port;
+                document.getElementById("code").textContent = code;
+
+                const dl = new URLSearchParams();
+                dl.set("type", type);
+                if (serverId) dl.set("server_id", serverId);
+                if (hostname) dl.set("hostname", hostname);
+                dl.set("ip", ip);
+                dl.set("port", port);
+                dl.set("code", code);
+                if (scheme) dl.set("scheme", scheme);
+
+                const deepLink = "cyberdeck://pair?" + dl.toString();
+
+                const btn = document.getElementById("openAppBtn");
+                const hint = document.getElementById("openHint");
+
+                btn.href = deepLink;
+                btn.style.display = "inline-block";
+                hint.style.display = "block";
+
+                function tryOpenApp() {
+                    // Many browsers (especially iOS Safari) may block automatic deep-linking without a user gesture.
+                    // We still try once on page load for the "instant redirect" behavior.
+                    let didHide = false;
+                    const onHide = () => { didHide = true; };
+                    document.addEventListener("visibilitychange", onHide, { once: true });
+
+                    // Attempt deep link
+                    window.location.href = deepLink;
+
+                    // Fallback: if app didn't open, keep the page. Do not auto-redirect to store.
+                    setTimeout(() => {
+                        if (!didHide) {
+                            // no-op: user can tap the button or install the app
+                        }
+                    }, 1500);
+                }
+
+                if (isMobile) {
+                    setTimeout(tryOpenApp, 200);
+                }
+            }
+        })();
+    </script>
 </body>
 </html>

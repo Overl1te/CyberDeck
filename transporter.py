@@ -5,6 +5,7 @@ import socketserver
 import sys
 import time
 import urllib.parse
+from urllib.parse import parse_qs, urlparse
 
 class OneFileHandler(http.server.BaseHTTPRequestHandler):
     file_path: str = ""
@@ -12,6 +13,8 @@ class OneFileHandler(http.server.BaseHTTPRequestHandler):
     chunk_size: int = 64 * 1024
     sleep_s: float = 0.002
     quiet: bool = True
+    token: str = ""
+    allow_ip: str = ""
     server_instance = None
 
     def log_message(self, format, *args):
@@ -24,10 +27,32 @@ class OneFileHandler(http.server.BaseHTTPRequestHandler):
                 self.send_error(404, "File not found")
                 return
 
-            req = urllib.parse.unquote(self.path.lstrip("/"))
+            parsed = urlparse(self.path)
+            req = urllib.parse.unquote(parsed.path.lstrip("/"))
             if req and req != self.filename:
                 self.send_error(404, "Not found")
                 return
+
+            if self.allow_ip:
+                try:
+                    ip = (self.client_address[0] if self.client_address else "") or ""
+                    if ip != self.allow_ip:
+                        self.send_error(403, "Forbidden")
+                        return
+                except Exception:
+                    self.send_error(403, "Forbidden")
+                    return
+
+            if self.token:
+                try:
+                    qs = parse_qs(parsed.query or "")
+                    got = (qs.get("t") or [""])[0]
+                    if got != self.token:
+                        self.send_error(403, "Forbidden")
+                        return
+                except Exception:
+                    self.send_error(403, "Forbidden")
+                    return
 
             file_size = os.path.getsize(self.file_path)
             encoded_name = urllib.parse.quote(self.filename)
@@ -66,6 +91,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--sleep", type=float, default=0.002)
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--token", type=str, default="")
+    ap.add_argument("--allow-ip", type=str, default="")
     args = ap.parse_args(argv)
 
     file_path = os.path.abspath(args.file_path)
@@ -83,6 +110,8 @@ def main(argv: list[str]) -> int:
     Handler.chunk_size = max(1024, int(args.chunk))
     Handler.sleep_s = max(0.0, float(args.sleep))
     Handler.quiet = bool(args.quiet)
+    Handler.token = str(args.token or "")
+    Handler.allow_ip = str(args.allow_ip or "")
 
     socketserver.TCPServer.allow_reuse_address = True
 

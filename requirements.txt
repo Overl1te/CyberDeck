@@ -1,4 +1,4 @@
-fastapi # Основной бек
+﻿fastapi # Основной бек
 pystray # Трей
 pyinstaller
 customtkinter
@@ -7,6 +7,7 @@ python-multipart
 aiofiles
 requests
 qrcode
+zeroconf
 
 # Веб сервер
 uvicorn

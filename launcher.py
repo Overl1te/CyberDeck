@@ -1,9 +1,11 @@
-import customtkinter as ctk
+﻿import customtkinter as ctk
 import threading
 import sys
 import os
 import ctypes
 import subprocess
+import socket
+import shlex
 import pystray
 import psutil
 import time
@@ -11,14 +13,14 @@ import requests
 import json
 import uvicorn
 import queue
+import urllib.parse
 from PIL import Image
 from tkinter import filedialog, messagebox
 from collections import deque
 import qrcode
 
 SERVER_SCRIPT_NAME = "main.py"
-PORT = 8080
-API_URL = f"http://127.0.0.1:{PORT}/api/local"
+DEFAULT_PORT = 8080
 SYNC_INTERVAL_MS = 1000
 
 ctk.set_appearance_mode("Dark")
@@ -52,6 +54,20 @@ DEFAULT_SETTINGS = {
     "hotkey_enabled": False,
     "start_in_tray": True,
     "show_on_start": True,
+    "debug": False,
+    "preferred_port": DEFAULT_PORT,
+    "pairing_ttl_min": 0,
+    "session_ttl_days": 0,
+    "session_idle_ttl_min": 0,
+    "max_sessions": 0,
+    "pin_window_s": 60,
+    "pin_max_fails": 8,
+    "pin_block_s": 300,
+    "tls_enabled": False,
+    "tls_cert_path": "",
+    "tls_key_path": "",
+    "tls_ca_path": "",
+    "qr_mode": "site",  # site|app
 }
 
 ABOUT_TEXT = (
@@ -92,7 +108,7 @@ def ensure_console():
 
 
 def ensure_null_stdio():
-    """In --noconsole builds sys.stdout/stderr can be None; make them safe sinks."""
+    """В сборках с `--noconsole` sys.stdout/stderr могут быть None; подменяем их на безопасные «поглотители»."""
     try:
         if sys.stdout is None:
             sys.stdout = open(os.devnull, "w", encoding="utf-8", errors="ignore")
@@ -129,22 +145,58 @@ def save_json(path: str, data: dict):
 
 def set_autostart(enabled: bool, command: str):
     """HKCU Run. Без админа."""
-    if not is_windows():
-        return
-    try:
-        import winreg
+    if is_windows():
+        try:
+            import winreg
 
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-            if enabled:
-                winreg.SetValueEx(key, "CyberDeckLauncher", 0, winreg.REG_SZ, command)
-            else:
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                if enabled:
+                    winreg.SetValueEx(key, "CyberDeckLauncher", 0, winreg.REG_SZ, str(command))
+                else:
+                    try:
+                        winreg.DeleteValue(key, "CyberDeckLauncher")
+                    except FileNotFoundError:
+                        pass
+        except Exception:
+            pass
+        return
+
+    # Автозапуск по XDG на Linux (по возможности).
+    if sys.platform.startswith("linux"):
+        try:
+            autostart_dir = os.path.join(os.path.expanduser("~"), ".config", "autostart")
+            os.makedirs(autostart_dir, exist_ok=True)
+            desktop_path = os.path.join(autostart_dir, "CyberDeck.desktop")
+
+            if not enabled:
                 try:
-                    winreg.DeleteValue(key, "CyberDeckLauncher")
-                except FileNotFoundError:
+                    if os.path.exists(desktop_path):
+                        os.remove(desktop_path)
+                except Exception:
                     pass
-    except Exception:
-        pass
+                return
+
+            if isinstance(command, (list, tuple)):
+                cmd_str = " ".join(shlex.quote(str(x)) for x in command if str(x))
+            else:
+                cmd_str = str(command)
+
+            # Поле Exec в .desktop — не команда оболочки; запускаем через sh для корректного экранирования.
+            exec_line = f"sh -lc {shlex.quote(cmd_str)}"
+
+            content = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=CyberDeck\n"
+                f"Exec={exec_line}\n"
+                "Terminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
+            )
+            with open(desktop_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception:
+            pass
 
 
 class CyberBtn(ctk.CTkButton):
@@ -174,23 +226,34 @@ class App(ctk.CTk):
         else:
             ensure_null_stdio()
 
-        if not self.is_admin():
-            self.run_as_admin()
-            sys.exit()
+        if is_windows():
+            if not self.is_admin():
+                self.run_as_admin()
+                sys.exit()
 
         if getattr(sys, "frozen", False):
             self.base_dir = os.path.dirname(sys.executable)
-            self.server_exe = os.path.join(self.base_dir, "main.exe")
-            self.launch_cmd_for_autostart = f'"{sys.executable}"'
+            self.server_exe = os.path.join(self.base_dir, "main.exe" if is_windows() else "main")
+            if is_windows():
+                self.launch_cmd_for_autostart = f'"{sys.executable}"'
+            else:
+                self.launch_cmd_for_autostart = [sys.executable]
         else:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
             self.server_exe = os.path.join(self.base_dir, SERVER_SCRIPT_NAME)
-            self.launch_cmd_for_autostart = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+            if is_windows():
+                self.launch_cmd_for_autostart = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+            else:
+                self.launch_cmd_for_autostart = [sys.executable, os.path.abspath(__file__)]
 
         self.settings_path = os.path.join(self.base_dir, SETTINGS_FILE_NAME)
         self.settings = load_json(self.settings_path, DEFAULT_SETTINGS)
         self.start_in_tray = bool(self.settings.get("start_in_tray", True))
         self.show_on_start = bool(self.settings.get("show_on_start", True))
+        self.tls_enabled = bool(self.settings.get("tls_enabled"))
+        self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
+        self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
+        self.tls_ca_path = str(self.settings.get("tls_ca_path") or "").strip()
 
         self.icon_path_png = os.path.join(self.base_dir, "icon.png")
         self.icon_path_ico = os.path.join(self.base_dir, "icon.ico")
@@ -221,8 +284,17 @@ class App(ctk.CTk):
         self.selected_token = None
         self.selected_device_name = None
         self.pairing_code = "...."
+        self.server_id = ""
+        self.server_hostname = ""
         self.server_ip = "0.0.0.0"
-        self.server_port = PORT
+        self.port = int(DEFAULT_PORT)
+        self.server_port = int(self.port)
+        self.api_scheme = "https" if self.tls_enabled else "http"
+        if self.tls_enabled:
+            self.requests_verify = self.tls_ca_path if self.tls_ca_path else False
+        else:
+            self.requests_verify = True
+        self.api_url = f"{self.api_scheme}://127.0.0.1:{self.port}/api/local"
         self.server_version = "unknown"
         self.status_text = "> ОЖИДАНИЕ СЕРВЕРА"
         self.server_online = False
@@ -262,12 +334,16 @@ class App(ctk.CTk):
             threading.Thread(target=self.hotkey_loop, daemon=True).start()
 
     def is_admin(self):
+        if not is_windows():
+            return True
         try:
             return ctypes.windll.shell32.IsUserAnAdmin()
         except Exception:
             return False
 
     def run_as_admin(self):
+        if not is_windows():
+            return
         if getattr(sys, "frozen", False):
             executable = sys.executable
             args = " ".join(sys.argv[1:])
@@ -279,22 +355,89 @@ class App(ctk.CTk):
         ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, args, None, 1)
 
     def kill_old_server(self):
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                for conn in proc.net_connections(kind="inet"):
-                    if conn.laddr and conn.laddr.port == PORT:
-                        proc.kill()
-            except Exception:
-                continue
+        # Устарело: не убиваем произвольные процессы по порту.
+        return
+
+    def _is_port_free(self, port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("0.0.0.0", int(port)))
+                return True
+        except Exception:
+            return False
+
+    def _pick_port(self, preferred: int) -> int:
+        try:
+            preferred = int(preferred)
+        except Exception:
+            preferred = int(DEFAULT_PORT)
+        if preferred > 0 and self._is_port_free(preferred):
+            return preferred
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("0.0.0.0", 0))
+                return int(s.getsockname()[1])
+        except Exception:
+            return int(DEFAULT_PORT)
+
+    def _select_port_for_launch(self) -> None:
+        self.port = self._pick_port(self.settings.get("preferred_port", DEFAULT_PORT))
+        self.server_port = int(self.port)
+        self.api_url = f"{self.api_scheme}://127.0.0.1:{self.port}/api/local"
 
     def start_server_process(self):
-        self.kill_old_server()
+        self._select_port_for_launch()
 
         env = os.environ.copy()
         env["CYBERDECK_CONSOLE"] = "1" if self.logs_enabled else "0"
         env["CYBERDECK_LOG"] = "1" if self.logs_enabled else "0"
-        env["CYBERDECK_DEBUG"] = "1"
-        env["CYBERDECK_PORT"] = str(PORT)
+        env["CYBERDECK_DEBUG"] = "1" if bool(self.settings.get("debug")) else "0"
+        env["CYBERDECK_PORT"] = str(int(self.port))
+        env["CYBERDECK_PORT_AUTO"] = "0"
+
+        try:
+            env["CYBERDECK_PAIRING_TTL_S"] = str(max(0, int(self.settings.get("pairing_ttl_min", 0))) * 60)
+        except Exception:
+            env["CYBERDECK_PAIRING_TTL_S"] = "0"
+
+        try:
+            env["CYBERDECK_SESSION_TTL_S"] = str(max(0, int(self.settings.get("session_ttl_days", 0))) * 86400)
+        except Exception:
+            env["CYBERDECK_SESSION_TTL_S"] = "0"
+
+        try:
+            env["CYBERDECK_SESSION_IDLE_TTL_S"] = str(max(0, int(self.settings.get("session_idle_ttl_min", 0))) * 60)
+        except Exception:
+            env["CYBERDECK_SESSION_IDLE_TTL_S"] = "0"
+
+        try:
+            env["CYBERDECK_MAX_SESSIONS"] = str(max(0, int(self.settings.get("max_sessions", 0))))
+        except Exception:
+            env["CYBERDECK_MAX_SESSIONS"] = "0"
+
+        try:
+            env["CYBERDECK_PIN_WINDOW_S"] = str(max(1, int(self.settings.get("pin_window_s", 60))))
+        except Exception:
+            env["CYBERDECK_PIN_WINDOW_S"] = "60"
+
+        try:
+            env["CYBERDECK_PIN_MAX_FAILS"] = str(max(1, int(self.settings.get("pin_max_fails", 8))))
+        except Exception:
+            env["CYBERDECK_PIN_MAX_FAILS"] = "8"
+
+        try:
+            env["CYBERDECK_PIN_BLOCK_S"] = str(max(1, int(self.settings.get("pin_block_s", 300))))
+        except Exception:
+            env["CYBERDECK_PIN_BLOCK_S"] = "300"
+
+        if self.tls_enabled and self.tls_cert_path and self.tls_key_path:
+            env["CYBERDECK_TLS"] = "1"
+            env["CYBERDECK_TLS_CERT"] = self.tls_cert_path
+            env["CYBERDECK_TLS_KEY"] = self.tls_key_path
+        else:
+            env["CYBERDECK_TLS"] = "0"
+            env["CYBERDECK_TLS_CERT"] = ""
+            env["CYBERDECK_TLS_KEY"] = ""
 
         os.environ.update(env)
 
@@ -358,10 +501,18 @@ class App(ctk.CTk):
         if self.server_thread and self.server_thread.is_alive():
             return
         try:
+            try:
+                import cyberdeck.config as cfg
+                cfg.reload_from_env()
+                import cyberdeck.logging_config as lc
+                lc.reload_logging()
+            except Exception:
+                pass
+
             import main as cyberdeck_server
 
-            log_level = "debug" if os.environ.get("CYBERDECK_DEBUG", "1") == "1" else "info"
-            access_log = os.environ.get("CYBERDECK_DEBUG", "1") == "1"
+            log_level = "debug" if os.environ.get("CYBERDECK_DEBUG", "0") == "1" else "info"
+            access_log = os.environ.get("CYBERDECK_DEBUG", "0") == "1"
             if os.environ.get("CYBERDECK_LOG", "0") != "1":
                 log_level = "critical"
                 access_log = False
@@ -369,9 +520,11 @@ class App(ctk.CTk):
             config = uvicorn.Config(
                 cyberdeck_server.app,
                 host="0.0.0.0",
-                port=PORT,
+                port=int(self.port),
                 log_level=log_level,
                 access_log=access_log,
+                ssl_certfile=os.environ.get("CYBERDECK_TLS_CERT") if os.environ.get("CYBERDECK_TLS", "0") == "1" else None,
+                ssl_keyfile=os.environ.get("CYBERDECK_TLS_KEY") if os.environ.get("CYBERDECK_TLS", "0") == "1" else None,
             )
             server = uvicorn.Server(config)
             self._uvicorn_server = server
@@ -495,14 +648,29 @@ class App(ctk.CTk):
 
         def _fetch():
             try:
-                resp = requests.get(f"{API_URL}/info", timeout=1)
+                resp = requests.get(f"{self.api_url}/info", timeout=1, verify=self.requests_verify)
                 if resp.status_code == 200:
                     data = resp.json()
                     self.server_online = True
+                    try:
+                        self.server_id = str(data.get("server_id") or "")
+                    except Exception:
+                        self.server_id = ""
                     self.pairing_code = data.get("pairing_code", "ERR")
                     self.server_ip = data.get("ip", "0.0.0.0")
-                    self.server_port = data.get("port", PORT)
+                    try:
+                        new_port = int(data.get("port", self.port))
+                    except Exception:
+                        new_port = int(self.port)
+                    self.server_port = int(new_port)
+                    if int(new_port) != int(self.port):
+                        self.port = int(new_port)
+                        self.api_url = f"{self.api_scheme}://127.0.0.1:{self.port}/api/local"
                     self.server_version = data.get("version", "unknown")
+                    try:
+                        self.server_hostname = str(data.get("hostname") or "")
+                    except Exception:
+                        self.server_hostname = ""
                     self.log_file = data.get("log_file", self.log_file)
                     self.devices_data = data.get("devices", [])
                 else:
@@ -726,11 +894,40 @@ class App(ctk.CTk):
 
         def _bg():
             try:
-                resp = requests.get(f"{API_URL}/qr_payload", timeout=1)
+                resp = requests.get(f"{self.api_url}/qr_payload", timeout=1, verify=self.requests_verify)
                 if resp.status_code != 200:
                     raise RuntimeError(f"http {resp.status_code}")
-                payload = (resp.json() or {}).get("payload") or {}
-                qr_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                data = resp.json() or {}
+                payload = data.get("payload") or {}
+
+                mode = str(self.settings.get("qr_mode", "site") or "site").strip().lower()
+                if mode not in ("site", "app"):
+                    mode = "site"
+
+                if mode == "app":
+                    try:
+                        qs = urllib.parse.urlencode(
+                            {
+                                "type": payload.get("type", "cyberdeck_qr_v1"),
+                                "server_id": payload.get("server_id", ""),
+                                "hostname": payload.get("hostname", ""),
+                                "version": payload.get("version", ""),
+                                "ip": payload.get("ip", ""),
+                                "port": payload.get("port", ""),
+                                "code": payload.get("pairing_code", ""),
+                                "scheme": payload.get("scheme", ""),
+                                "ts": payload.get("ts", ""),
+                                "nonce": payload.get("nonce", ""),
+                            },
+                            doseq=False,
+                        )
+                        qr_text = f"cyberdeck://pair?{qs}"
+                    except Exception:
+                        url = str(data.get("url") or "").strip()
+                        qr_text = url if url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                else:
+                    url = str(data.get("url") or "").strip()
+                    qr_text = url if url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
                 img = qrcode.make(qr_text).convert("RGB").resize((220, 220), Image.NEAREST)
 
@@ -825,7 +1022,7 @@ class App(ctk.CTk):
 
         def _bg():
             try:
-                requests.post(f"{API_URL}/device_disconnect", json={"token": token}, timeout=2)
+                requests.post(f"{self.api_url}/device_disconnect", json={"token": token}, timeout=2, verify=self.requests_verify)
             except Exception as e:
                 self.ui_call(lambda: messagebox.showerror("CyberDeck", f"Не удалось отключить устройство.\n\n{e}"))
             finally:
@@ -845,7 +1042,7 @@ class App(ctk.CTk):
 
         def _bg():
             try:
-                requests.post(f"{API_URL}/device_delete", json={"token": token}, timeout=3)
+                requests.post(f"{self.api_url}/device_delete", json={"token": token}, timeout=3, verify=self.requests_verify)
                 if self.selected_token == token:
                     self.selected_token = None
                     self.selected_device_name = None
@@ -900,7 +1097,7 @@ class App(ctk.CTk):
         def _bg():
             try:
                 payload = {"token": self.selected_token, "settings": patch}
-                resp = requests.post(f"{API_URL}/device_settings", json=payload, timeout=2)
+                resp = requests.post(f"{self.api_url}/device_settings", json=payload, timeout=2, verify=self.requests_verify)
                 if resp.status_code == 200:
                     self.ui_call(lambda: self._mark_device_settings_saved())
                 else:
@@ -944,7 +1141,7 @@ class App(ctk.CTk):
             self.ui_call(lambda: self.lbl_status.configure(text="> Запрос передачи...", text_color=COLOR_WARN))
             try:
                 payload = {"token": self.selected_token, "file_path": path}
-                resp = requests.post(f"{API_URL}/trigger_file", json=payload, timeout=4)
+                resp = requests.post(f"{self.api_url}/trigger_file", json=payload, timeout=4, verify=self.requests_verify)
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -963,7 +1160,7 @@ class App(ctk.CTk):
     def regenerate_code_action(self):
         def _req():
             try:
-                requests.post(f"{API_URL}/regenerate_code", timeout=2)
+                requests.post(f"{self.api_url}/regenerate_code", timeout=2, verify=self.requests_verify)
             except Exception:
                 pass
 
@@ -1338,6 +1535,93 @@ class App(ctk.CTk):
         self.sw_hotkey.pack(anchor="w", padx=18, pady=(6, 14))
         self.sw_hotkey.select() if self.settings.get("hotkey_enabled") else self.sw_hotkey.deselect()
 
+        self.sw_debug = ctk.CTkSwitch(box, text="DEBUG (подробные логи сервера)", text_color=COLOR_TEXT)
+        self.sw_debug.pack(anchor="w", padx=18, pady=(0, 14))
+        self.sw_debug.select() if self.settings.get("debug") else self.sw_debug.deselect()
+
+        ctk.CTkLabel(
+            box,
+            text="Сервер/безопасность (применяется после перезапуска сервера)",
+            text_color=COLOR_TEXT_DIM,
+            font=FONT_SMALL,
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+
+        adv = ctk.CTkFrame(box, fg_color="transparent")
+        adv.pack(fill="x", padx=18, pady=(0, 14))
+
+        def _row(label: str, initial: str):
+            r = ctk.CTkFrame(adv, fg_color="transparent")
+            r.pack(fill="x", pady=4)
+            ctk.CTkLabel(r, text=label, text_color=COLOR_TEXT).pack(side="left")
+            e = ctk.CTkEntry(r, width=140)
+            try:
+                e.insert(0, str(initial))
+            except Exception:
+                pass
+            e.pack(side="right")
+            return e
+
+        self.ent_preferred_port = _row("Порт (предпочт.)", self.settings.get("preferred_port", DEFAULT_PORT))
+        self.ent_pairing_ttl = _row("PIN действует, мин (0=∞)", self.settings.get("pairing_ttl_min", 0))
+        self.ent_session_ttl_days = _row("Сессия TTL, дней (0=∞)", self.settings.get("session_ttl_days", 0))
+        self.ent_session_idle_min = _row("Сессия idle, мин (0=∞)", self.settings.get("session_idle_ttl_min", 0))
+        self.ent_max_sessions = _row("Макс устройств (0=∞)", self.settings.get("max_sessions", 0))
+        self.ent_pin_window_s = _row("PIN окно, сек", self.settings.get("pin_window_s", 60))
+        self.ent_pin_max_fails = _row("PIN ошибок/окно", self.settings.get("pin_max_fails", 8))
+        self.ent_pin_block_s = _row("PIN блок, сек", self.settings.get("pin_block_s", 300))
+
+        ctk.CTkLabel(
+            box,
+            text="TLS (HTTPS)",
+            text_color=COLOR_TEXT_DIM,
+            font=FONT_SMALL,
+        ).pack(anchor="w", padx=18, pady=(8, 4))
+
+        self.sw_tls = ctk.CTkSwitch(box, text="Включить TLS", text_color=COLOR_TEXT)
+        self.sw_tls.pack(anchor="w", padx=18, pady=(0, 8))
+        self.sw_tls.select() if self.settings.get("tls_enabled") else self.sw_tls.deselect()
+
+        tls_box = ctk.CTkFrame(box, fg_color="transparent")
+        tls_box.pack(fill="x", padx=18, pady=(0, 10))
+
+        def _row_with_browse(label: str, initial: str):
+            r = ctk.CTkFrame(tls_box, fg_color="transparent")
+            r.pack(fill="x", pady=4)
+            ctk.CTkLabel(r, text=label, text_color=COLOR_TEXT).pack(side="left")
+            e = ctk.CTkEntry(r, width=320)
+            try:
+                e.insert(0, str(initial))
+            except Exception:
+                pass
+            e.pack(side="left", padx=(8, 6), expand=True, fill="x")
+            def _pick():
+                try:
+                    p = filedialog.askopenfilename(title=label)
+                    if p:
+                        e.delete(0, "end")
+                        e.insert(0, p)
+                except Exception:
+                    pass
+            CyberBtn(r, text="...", width=36, height=28, command=_pick).pack(side="right")
+            return e
+
+        self.ent_tls_cert = _row_with_browse("Сертификат (.crt/.pem)", self.settings.get("tls_cert_path", ""))
+        self.ent_tls_key = _row_with_browse("Ключ (.key/.pem)", self.settings.get("tls_key_path", ""))
+        self.ent_tls_ca = _row_with_browse("CA (опц.)", self.settings.get("tls_ca_path", ""))
+
+        ctk.CTkLabel(
+            box,
+            text="QR режим",
+            text_color=COLOR_TEXT_DIM,
+            font=FONT_SMALL,
+        ).pack(anchor="w", padx=18, pady=(8, 4))
+
+        self.qr_mode_var = ctk.StringVar(value=str(self.settings.get("qr_mode", "site") or "site"))
+        qr_row = ctk.CTkFrame(box, fg_color="transparent")
+        qr_row.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkRadioButton(qr_row, text="Открывать сайт", variable=self.qr_mode_var, value="site").pack(side="left")
+        ctk.CTkRadioButton(qr_row, text="Открывать приложение", variable=self.qr_mode_var, value="app").pack(side="left", padx=(16, 0))
+
         CyberBtn(box, text="Применить", command=self.save_settings_action, height=34).pack(
             padx=18, pady=(0, 14), fill="x"
         )
@@ -1350,18 +1634,88 @@ class App(ctk.CTk):
         )
 
     def save_settings_action(self):
+        restart_keys = (
+            "debug",
+            "preferred_port",
+            "pairing_ttl_min",
+            "session_ttl_days",
+            "session_idle_ttl_min",
+            "max_sessions",
+            "pin_window_s",
+            "pin_max_fails",
+            "pin_block_s",
+            "tls_enabled",
+            "tls_cert_path",
+            "tls_key_path",
+            "tls_ca_path",
+            "qr_mode",
+        )
+        old_restart_values = {k: self.settings.get(k) for k in restart_keys}
+
+        def _get_int(entry, default: int) -> int:
+            try:
+                v = str(entry.get()).strip()
+                if v == "":
+                    return int(default)
+                return int(float(v))
+            except Exception:
+                return int(default)
+
         self.settings["start_in_tray"] = bool(self.sw_start_in_tray.get())
         self.settings["show_on_start"] = bool(self.sw_show_on_start.get())
         self.settings["close_to_tray"] = bool(self.sw_close_to_tray.get())
         self.settings["always_on_top"] = bool(self.sw_topmost.get())
         self.settings["autostart"] = bool(self.sw_autostart.get())
         self.settings["hotkey_enabled"] = bool(self.sw_hotkey.get())
+        self.settings["debug"] = bool(self.sw_debug.get())
+
+        self.settings["preferred_port"] = max(1, _get_int(self.ent_preferred_port, DEFAULT_PORT))
+        self.settings["pairing_ttl_min"] = max(0, _get_int(self.ent_pairing_ttl, 0))
+        self.settings["session_ttl_days"] = max(0, _get_int(self.ent_session_ttl_days, 0))
+        self.settings["session_idle_ttl_min"] = max(0, _get_int(self.ent_session_idle_min, 0))
+        self.settings["max_sessions"] = max(0, _get_int(self.ent_max_sessions, 0))
+        self.settings["pin_window_s"] = max(1, _get_int(self.ent_pin_window_s, 60))
+        self.settings["pin_max_fails"] = max(1, _get_int(self.ent_pin_max_fails, 8))
+        self.settings["pin_block_s"] = max(1, _get_int(self.ent_pin_block_s, 300))
+
+        self.settings["tls_enabled"] = bool(self.sw_tls.get())
+        self.settings["tls_cert_path"] = str(self.ent_tls_cert.get()).strip()
+        self.settings["tls_key_path"] = str(self.ent_tls_key.get()).strip()
+        self.settings["tls_ca_path"] = str(self.ent_tls_ca.get()).strip()
+        self.settings["qr_mode"] = str(self.qr_mode_var.get() or "site").strip().lower()
+
+        if self.settings["tls_enabled"] and (not self.settings["tls_cert_path"] or not self.settings["tls_key_path"]):
+            try:
+                messagebox.showerror("CyberDeck", "TLS включён, но не задан путь к сертификату или ключу.")
+            except Exception:
+                pass
+            self.settings["tls_enabled"] = False
+            try:
+                self.sw_tls.deselect()
+            except Exception:
+                pass
+
         self.start_in_tray = bool(self.settings.get("start_in_tray"))
         self.show_on_start = bool(self.settings.get("show_on_start", True))
+        self.tls_enabled = bool(self.settings.get("tls_enabled"))
+        self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
+        self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
+        self.tls_ca_path = str(self.settings.get("tls_ca_path") or "").strip()
+        self.api_scheme = "https" if self.tls_enabled else "http"
+        if self.tls_enabled:
+            self.requests_verify = self.tls_ca_path if self.tls_ca_path else False
+        else:
+            self.requests_verify = True
         self.apply_settings()
         self.append_log("[launcher] настройки применены\n")
         if hasattr(self, "lbl_settings_status"):
             self.lbl_settings_status.configure(text="Настройки применены", text_color=COLOR_ACCENT)
+
+        try:
+            if any(self.settings.get(k) != old_restart_values.get(k) for k in restart_keys):
+                self.restart_server()
+        except Exception:
+            pass
 
     def select_frame(self, name):
         self.home_frame.grid_forget()
@@ -1402,8 +1756,13 @@ class App(ctk.CTk):
 
     def open_downloads(self, icon=None, item=None):
         try:
+            path = os.path.join(os.path.expanduser("~"), "Downloads")
             if is_windows():
-                os.startfile(os.path.join(os.path.expanduser("~"), "Downloads"))
+                os.startfile(path)
+            elif sys.platform.startswith("linux"):
+                subprocess.Popen(["xdg-open", path], close_fds=True)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path], close_fds=True)
         except Exception:
             pass
 
