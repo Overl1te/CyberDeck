@@ -18,6 +18,12 @@ from PIL import Image
 from tkinter import filedialog, messagebox
 from collections import deque
 import qrcode
+from cyberdeck.wayland_setup import (
+    ensure_wayland_ready,
+    find_wayland_setup_script,
+    format_wayland_issues,
+    is_linux_wayland_session,
+)
 
 SERVER_SCRIPT_NAME = "main.py"
 DEFAULT_PORT = 8080
@@ -88,6 +94,17 @@ ABOUT_TEXT = (
 
 def is_windows() -> bool:
     return os.name == "nt"
+
+
+def tray_unavailable_reason() -> str:
+    if not sys.platform.startswith("linux"):
+        return ""
+    xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+    wayland_display = bool(os.environ.get("WAYLAND_DISPLAY"))
+    x11_display = bool(os.environ.get("DISPLAY"))
+    if xdg_type == "wayland" or (wayland_display and not x11_display):
+        return "Wayland-сессия"
+    return ""
 
 
 def ensure_console():
@@ -276,6 +293,7 @@ class App(ctk.CTk):
         self.server_process = None
         self.server_thread = None
         self._uvicorn_server = None
+        self.tray = None
         self._server_log_ring = deque(maxlen=400)
         self._qr_last_fetch_ts = 0.0
         self._qr_ctk_img = None
@@ -317,15 +335,22 @@ class App(ctk.CTk):
         self._ui_queue = queue.Queue()
         self._device_settings_dirty = False
         self._suppress_device_setting_trace = False
+        self._wayland_auto_setup_attempted = False
+        self._wayland_warning_shown = False
 
         self.setup_ui()
         self.start_server_process()
 
         self.after(50, self._process_ui_queue)
         self._schedule_sync(0)
-        threading.Thread(target=self.setup_tray, daemon=True).start()
+        tray_reason = tray_unavailable_reason()
+        if self.settings.get("start_in_tray") or self.settings.get("close_to_tray"):
+            if tray_reason:
+                self.append_log(f"[launcher] трей отключён: {tray_reason}\n")
+            else:
+                threading.Thread(target=self.setup_tray, daemon=True).start()
 
-        if self.start_in_tray and (not self.show_on_start):
+        if self.start_in_tray and (not self.show_on_start) and not tray_reason:
             self.withdraw()
 
         if self.settings.get("autostart"):
@@ -386,6 +411,7 @@ class App(ctk.CTk):
         self.api_url = f"{self.api_scheme}://127.0.0.1:{self.port}/api/local"
 
     def start_server_process(self):
+        self._ensure_wayland_setup()
         self._select_port_for_launch()
 
         env = os.environ.copy()
@@ -477,6 +503,47 @@ class App(ctk.CTk):
         except Exception as e:
             self.append_log(f"[launcher] ошибка запуска сервера: {e}\n")
             self._show_server_start_error(str(e))
+
+    def _ensure_wayland_setup(self):
+        if not is_linux_wayland_session():
+            return
+
+        auto_install = not self._wayland_auto_setup_attempted
+        if auto_install:
+            self.append_log("[launcher] обнаружен Wayland: проверка окружения и автоподготовка...\n")
+        else:
+            self.append_log("[launcher] обнаружен Wayland: повторная проверка окружения...\n")
+
+        ok, issues, attempted, reason = ensure_wayland_ready(
+            self.base_dir,
+            auto_install=auto_install,
+            log=lambda line: self.append_log(f"[wayland-setup] {line}\n"),
+        )
+        if attempted:
+            self._wayland_auto_setup_attempted = True
+
+        if ok:
+            self.append_log("[launcher] Wayland окружение готово.\n")
+            return
+
+        issue_text = format_wayland_issues(issues)
+        self.append_log(f"[launcher] Wayland окружение не готово: {issue_text} ({reason})\n")
+
+        if self._wayland_warning_shown:
+            return
+        self._wayland_warning_shown = True
+
+        msg = (
+            "Wayland окружение не полностью настроено.\n\n"
+            f"Проблемы: {issue_text}\n\n"
+            "Попробуй запустить вручную:\n"
+            f"  bash {find_wayland_setup_script(self.base_dir) or './scripts/setup_arch_wayland.sh'}\n\n"
+            "После установки перелогинься и перезапусти CyberDeck."
+        )
+        try:
+            messagebox.showwarning("CyberDeck", msg)
+        except Exception:
+            pass
 
     def _show_server_start_error(self, extra: str = ""):
         try:
@@ -621,6 +688,14 @@ class App(ctk.CTk):
     def ui_call(self, fn):
         try:
             self._ui_queue.put(fn)
+        except Exception:
+            pass
+
+    def _ensure_window_visible(self):
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
         except Exception:
             pass
 
@@ -1527,7 +1602,7 @@ class App(ctk.CTk):
         self.sw_topmost.pack(anchor="w", padx=18, pady=6)
         self.sw_topmost.select() if self.settings.get("always_on_top") else self.sw_topmost.deselect()
 
-        self.sw_autostart = ctk.CTkSwitch(box, text="Автозапуск с Windows", text_color=COLOR_TEXT)
+        self.sw_autostart = ctk.CTkSwitch(box, text="Автозапуск с системой", text_color=COLOR_TEXT)
         self.sw_autostart.pack(anchor="w", padx=18, pady=6)
         self.sw_autostart.select() if self.settings.get("autostart") else self.sw_autostart.deselect()
 
@@ -1736,6 +1811,12 @@ class App(ctk.CTk):
             self.btn_settings.configure(text_color=COLOR_ACCENT, fg_color=COLOR_PANEL_ALT)
 
     def setup_tray(self):
+        reason = tray_unavailable_reason()
+        if reason:
+            self.append_log(f"[launcher] трей отключён: {reason}\n")
+            self.ui_call(self._ensure_window_visible)
+            return
+
         try:
             image = Image.open(self.icon_path_png)
         except Exception:
@@ -1749,7 +1830,17 @@ class App(ctk.CTk):
             pystray.MenuItem("Выход", self.quit_app),
         )
         self.tray = pystray.Icon("CyberDeck", image, "CyberDeck", menu)
-        self.tray.run()
+        try:
+            self.tray.run()
+        except Exception as e:
+            self.append_log(f"[launcher] трей недоступен: {e}\n")
+            try:
+                if hasattr(self, "tray") and self.tray:
+                    self.tray.stop()
+            except Exception:
+                pass
+            self.tray = None
+            self.ui_call(self._ensure_window_visible)
 
     def tray_restart_server(self, icon=None, item=None):
         self.ui_call(self.restart_server)
@@ -1779,7 +1870,7 @@ class App(ctk.CTk):
             pass
 
     def on_close(self):
-        if self.settings.get("close_to_tray"):
+        if self.settings.get("close_to_tray") and getattr(self, "tray", None):
             self.withdraw()
             self.append_log("[launcher] скрыто в трей\n")
         else:

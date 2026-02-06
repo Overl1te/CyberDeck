@@ -48,7 +48,7 @@ mkdir -p "${OUT_DIR}"
 # Переносим бинарь внутрь папки
 mv "${BIN_PATH}" "${OUT_DIR}/${APP_NAME}"
 
-# Переносим содержимое .dist внутрь папки (как ты и хотел)
+# Переносим содержимое .dist внутрь папки
 mv "${DEFAULT_DIST}/"* "${OUT_DIR}/"
 rmdir "${DEFAULT_DIST}" || true
 

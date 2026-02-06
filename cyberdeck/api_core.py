@@ -2,21 +2,20 @@ import os
 import time
 
 import psutil
-import pyautogui
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from . import config
 from .auth import TokenDep, require_perm
 from .context import device_manager
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 from .pin_limiter import pin_limiter
 
 
 router = APIRouter()
 
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0
+INPUT_BACKEND.configure()
 
 
 class HandshakeRequest(BaseModel):

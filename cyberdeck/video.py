@@ -5,19 +5,236 @@ import threading
 import time
 from io import BytesIO
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 import mss
-import pyautogui
 from PIL import Image, ImageDraw
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from .auth import TokenDep, require_perm
 from . import config
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 
 
 router = APIRouter()
+
+_ffmpeg_diag_lock = threading.Lock()
+_ffmpeg_last_cmd: Optional[str] = None
+_ffmpeg_last_error: Optional[str] = None
+_ffmpeg_last_error_ts: float = 0.0
+
+_ffmpeg_formats_lock = threading.Lock()
+_ffmpeg_formats_cached: Optional[str] = None
+
+_ffmpeg_encoders_lock = threading.Lock()
+_ffmpeg_encoders_cached: Optional[str] = None
+
+
+def _set_ffmpeg_diag(cmd: Optional[list], err: Optional[str]) -> None:
+    global _ffmpeg_last_cmd, _ffmpeg_last_error, _ffmpeg_last_error_ts
+    with _ffmpeg_diag_lock:
+        _ffmpeg_last_cmd = " ".join([str(x) for x in (cmd or [])]) if cmd else None
+        _ffmpeg_last_error = str(err)[:800] if err else None
+        _ffmpeg_last_error_ts = time.time() if err else _ffmpeg_last_error_ts
+
+
+def _get_ffmpeg_diag() -> Dict[str, Any]:
+    with _ffmpeg_diag_lock:
+        return {
+            "ffmpeg_available": bool(_ffmpeg_available()),
+            "ffmpeg_pipewire": bool(_ffmpeg_supports_pipewire()),
+            "ffmpeg_libx264": bool(_ffmpeg_supports_encoder("libx264")),
+            "ffmpeg_libx265": bool(_ffmpeg_supports_encoder("libx265")),
+            "gst_available": bool(_gst_available()),
+            "gst_pipewire": bool(_gst_supports_pipewire()),
+            "ffmpeg_last_cmd": _ffmpeg_last_cmd,
+            "ffmpeg_last_error": _ffmpeg_last_error,
+            "ffmpeg_last_error_ts": float(_ffmpeg_last_error_ts) if _ffmpeg_last_error_ts else None,
+        }
+
+
+def _ffmpeg_formats() -> str:
+    global _ffmpeg_formats_cached
+    with _ffmpeg_formats_lock:
+        if _ffmpeg_formats_cached is not None:
+            return _ffmpeg_formats_cached
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-formats"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        out = str(proc.stdout or "")
+    except Exception:
+        out = ""
+    with _ffmpeg_formats_lock:
+        _ffmpeg_formats_cached = out
+    return out
+
+
+def _ffmpeg_supports_pipewire() -> bool:
+    txt = _ffmpeg_formats()
+    return "pipewire" in txt.lower()
+
+
+def _ffmpeg_encoders() -> str:
+    global _ffmpeg_encoders_cached
+    with _ffmpeg_encoders_lock:
+        if _ffmpeg_encoders_cached is not None:
+            return _ffmpeg_encoders_cached
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        out = str(proc.stdout or "")
+    except Exception:
+        out = ""
+    with _ffmpeg_encoders_lock:
+        _ffmpeg_encoders_cached = out
+    return out
+
+
+def _ffmpeg_supports_encoder(name: str) -> bool:
+    needle = str(name or "").strip().lower()
+    if not needle:
+        return False
+    txt = _ffmpeg_encoders().lower()
+    return needle in txt
+
+
+def _gst_available() -> bool:
+    return bool(shutil.which("gst-launch-1.0"))
+
+
+def _gst_supports_pipewire() -> bool:
+    gst_inspect = shutil.which("gst-inspect-1.0")
+    if not gst_inspect:
+        return False
+    try:
+        proc = subprocess.run(
+            [gst_inspect, "pipewiresrc"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return int(proc.returncode) == 0
+    except Exception:
+        return False
+
+
+def _is_wayland_session() -> bool:
+    if os.name == "nt":
+        return False
+    xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+    if xdg_type == "wayland":
+        return True
+    if xdg_type == "x11":
+        return False
+    return bool(os.environ.get("WAYLAND_DISPLAY")) and not bool(os.environ.get("DISPLAY"))
+
+
+def _get_monitor_rect(monitor: int) -> Optional[tuple[int, int, int, int]]:
+    try:
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            if not monitors:
+                return None
+            if len(monitors) == 1:
+                m = monitors[0]
+            else:
+                if monitor < 1 or monitor >= len(monitors):
+                    monitor = 1
+                m = monitors[monitor]
+            return int(m.get("left", 0)), int(m.get("top", 0)), int(m.get("width", 0)), int(m.get("height", 0))
+    except Exception:
+        return None
+
+
+def _pipewire_source_candidates() -> list[str]:
+    out: list[str] = []
+    env_sources = [
+        os.environ.get("CYBERDECK_PIPEWIRE_NODE"),
+        os.environ.get("PIPEWIRE_NODE"),
+    ]
+    for item in env_sources:
+        val = str(item or "").strip()
+        if val:
+            out.append(val)
+    # Different ffmpeg builds expect different default aliases.
+    out.extend(["default", "0", "pipewire:"])
+    uniq: list[str] = []
+    for x in out:
+        if x not in uniq:
+            uniq.append(x)
+    return uniq
+
+
+def _build_ffmpeg_input_arg_sets(monitor: int, fps: int) -> list[list]:
+    fps = max(5, int(fps))
+    is_wayland = _is_wayland_session()
+    if os.name == "nt":
+        rect = _get_monitor_rect(monitor)
+        if not rect:
+            return []
+        left, top, width, height = rect
+        return [[
+            "-f",
+            "gdigrab",
+            "-draw_mouse",
+            "1",
+            "-framerate",
+            str(fps),
+            "-offset_x",
+            str(left),
+            "-offset_y",
+            str(top),
+            "-video_size",
+            f"{width}x{height}",
+            "-i",
+            "desktop",
+        ]]
+
+    if is_wayland:
+        if not _ffmpeg_supports_pipewire():
+            return []
+        out: list[list] = []
+        for src in _pipewire_source_candidates():
+            out.append(["-f", "pipewire", "-framerate", str(fps), "-i", src])
+        return out
+
+    rect = _get_monitor_rect(monitor)
+    if not rect:
+        return []
+    left, top, width, height = rect
+    display = os.environ.get("DISPLAY") or ":0.0"
+    return [[
+        "-f",
+        "x11grab",
+        "-draw_mouse",
+        "1",
+        "-framerate",
+        str(fps),
+        "-video_size",
+        f"{width}x{height}",
+        "-i",
+        f"{display}+{left},{top}",
+    ]]
+
+
+def _build_ffmpeg_input_args(monitor: int, fps: int) -> Optional[list]:
+    sets = _build_ffmpeg_input_arg_sets(monitor, fps)
+    return sets[0] if sets else None
 
 
 class _VideoStreamer:
@@ -54,6 +271,21 @@ class _VideoStreamer:
         with self._lock:
             return self._disabled_reason
 
+    def is_native_healthy(self, max_stale_s: float = 2.5, min_error_streak: int = 3) -> bool:
+        with self._lock:
+            ts = float(self._ts or 0.0)
+            err = int(self._error_streak or 0)
+            disabled = self._disabled_reason
+        if disabled:
+            return False
+        # Startup: allow native path a chance to warm up.
+        if ts <= 0.0 and err <= 0:
+            return True
+        stale = ts <= 0.0 or (time.time() - ts) > float(max_stale_s)
+        if stale and err >= int(min_error_streak):
+            return False
+        return True
+
     def _record_error(self, msg: str) -> None:
         now = time.time()
         with self._lock:
@@ -65,12 +297,19 @@ class _VideoStreamer:
         with self._lock:
             self._error_streak = 0
 
+    def _disable_native_capture(self, reason: str, log_msg: str) -> None:
+        with self._lock:
+            self._disabled_reason = str(reason or "native_capture_disabled")
+        log.warning(log_msg)
+
     def _is_wayland_session(self) -> bool:
         if os.name == "nt":
             return False
-        xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+        xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
         if xdg_type == "wayland":
             return True
+        if xdg_type == "x11":
+            return False
         return bool(os.environ.get("WAYLAND_DISPLAY")) and not bool(os.environ.get("DISPLAY"))
 
     def _loop(self):
@@ -142,6 +381,14 @@ class _VideoStreamer:
                         if now - last_log_t > 3.0:
                             last_log_t = now
                             log.warning("Video grab failed (mss): %s", e)
+                        with self._lock:
+                            streak = int(self._error_streak)
+                        if streak >= 10:
+                            self._disable_native_capture(
+                                "mss_capture_failed",
+                                "MJPEG native capture disabled after repeated mss failures; ffmpeg/gstreamer fallback will be used.",
+                            )
+                            return
                         time.sleep(backoff_s)
                         backoff_s = min(2.0, backoff_s * 1.5)
                     except Exception as e:
@@ -150,6 +397,14 @@ class _VideoStreamer:
                         if now - last_log_t > 3.0:
                             last_log_t = now
                             log.exception("Video grab/encode failed")
+                        with self._lock:
+                            streak = int(self._error_streak)
+                        if streak >= 10:
+                            self._disable_native_capture(
+                                "mss_capture_failed",
+                                "MJPEG native capture disabled after repeated internal failures; ffmpeg/gstreamer fallback will be used.",
+                            )
+                            return
                         time.sleep(backoff_s)
                         backoff_s = min(2.0, backoff_s * 1.5)
                     dt = time.perf_counter() - t0
@@ -162,7 +417,10 @@ class _VideoStreamer:
         img = Image.frombytes("RGB", size, raw_bgra, "raw", "BGRX")
         if cursor:
             try:
-                cx, cy = pyautogui.position()
+                cur = INPUT_BACKEND.position()
+                if not cur:
+                    raise RuntimeError("cursor_position_unavailable")
+                cx, cy = cur
                 rx, ry = cx - monitor["left"], cy - monitor["top"]
                 draw = ImageDraw.Draw(img)
                 draw.ellipse((rx - 6, ry - 6, rx + 6, ry + 6), outline=(0, 255, 65), width=2)
@@ -253,7 +511,7 @@ def generate_video_stream(w: int, q: int, fps: int, cursor: bool, monitor: int):
             time.sleep(min_dt - dt)
 
 
-@router.get("/video_feed")
+@router.api_route("/video_feed", methods=["GET", "HEAD"])
 def video_feed(
     token: str = TokenDep,
     w: Optional[int] = None,
@@ -261,16 +519,11 @@ def video_feed(
     max_w: Optional[int] = None,
     quality: Optional[int] = None,
     fps: int = 30,
-    cursor: int = 0,
+    cursor: int = 1,
     low_latency: int = 0,
     monitor: int = 1,
 ):
     require_perm(token, "perm_stream")
-
-    disabled = video_streamer.disabled_reason()
-    if disabled:
-        from fastapi import HTTPException
-        raise HTTPException(501, f"stream_unavailable:{disabled}")
 
     eff_w = int(max_w if max_w is not None else (w if w is not None else 960))
     eff_q = int(quality if quality is not None else (q if q is not None else 25))
@@ -281,6 +534,21 @@ def video_feed(
         eff_w = min(eff_w, 960)
         eff_q = min(eff_q, 35)
         eff_fps = min(eff_fps, 60)
+
+    disabled = video_streamer.disabled_reason()
+    native_ok = (disabled is None) and video_streamer.is_native_healthy()
+    if not native_ok:
+        # Wayland or broken mss path: try ffmpeg/GStreamer fallback for MJPEG endpoint.
+        ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q, eff_w)
+        if ffmpeg_stream is not None:
+            return ffmpeg_stream
+        gst_stream = _gst_mjpeg_stream(eff_fps, eff_q, eff_w)
+        if gst_stream is not None:
+            return gst_stream
+        from fastapi import HTTPException
+        reason = disabled or "native_capture_unhealthy"
+        detail = _get_ffmpeg_diag().get("ffmpeg_last_error") or f"stream_unavailable:{reason}"
+        raise HTTPException(501, detail)
 
     return StreamingResponse(
         generate_video_stream(eff_w, eff_q, eff_fps, bool(int(cursor)), eff_monitor),
@@ -296,7 +564,138 @@ def video_feed(
 @router.get("/api/stream_stats")
 def stream_stats(token: str = TokenDep):
     require_perm(token, "perm_stream")
-    return video_streamer.get_stats()
+    out = video_streamer.get_stats()
+    try:
+        out.update(_get_ffmpeg_diag())
+        out["input_backend"] = getattr(INPUT_BACKEND, "name", "unknown")
+        out["input_can_pointer"] = bool(getattr(INPUT_BACKEND, "can_pointer", False))
+        out["input_can_keyboard"] = bool(getattr(INPUT_BACKEND, "can_keyboard", False))
+        out["wayland_session"] = bool(_is_wayland_session())
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/api/stream_offer")
+def stream_offer(
+    request: Request,
+    token: str = TokenDep,
+    monitor: int = 1,
+    fps: int = 30,
+    max_w: int = 1280,
+    quality: int = 25,
+    bitrate_k: int = 1500,
+    gop: int = 60,
+    preset: str = "ultrafast",
+    low_latency: int = 1,
+):
+    require_perm(token, "perm_stream")
+
+    eff_monitor = int(monitor)
+    eff_fps = max(5, int(fps))
+    eff_w = max(0, int(max_w))
+    eff_q = max(10, min(95, int(quality)))
+    eff_bitrate = max(200, int(bitrate_k))
+    eff_gop = max(10, int(gop))
+    eff_preset = str(preset or "ultrafast")
+    eff_low = bool(int(low_latency))
+
+    can_capture = _capture_input_available(eff_monitor, eff_fps)
+    h264_ok = can_capture and _codec_encoder_available("h264")
+    h265_ok = can_capture and _codec_encoder_available("h265")
+    mjpeg_native = video_streamer.disabled_reason() is None
+    mjpeg_ffmpeg = _ffmpeg_available() and can_capture
+    mjpeg_gst = os.name != "nt" and _is_wayland_session() and _gst_available() and _gst_supports_pipewire()
+    mjpeg_ok = mjpeg_native or mjpeg_ffmpeg or mjpeg_gst
+
+    base = str(request.base_url).rstrip("/")
+
+    def _url(path: str, params: Dict[str, Any]) -> str:
+        qp = urlencode({k: v for k, v in params.items() if v is not None})
+        return f"{base}{path}?{qp}" if qp else f"{base}{path}"
+
+    candidates = []
+    if h264_ok:
+        candidates.append(
+            {
+                "id": "h264_ts",
+                "codec": "h264",
+                "container": "mpegts",
+                "mime": "video/mp2t",
+                "url": _url(
+                    "/video_h264",
+                    {
+                        "token": token,
+                        "monitor": eff_monitor,
+                        "fps": eff_fps,
+                        "bitrate_k": eff_bitrate,
+                        "gop": eff_gop,
+                        "preset": eff_preset,
+                        "max_w": eff_w,
+                        "low_latency": 1 if eff_low else 0,
+                    },
+                ),
+            }
+        )
+
+    if mjpeg_ok:
+        candidates.append(
+            {
+                "id": "mjpeg",
+                "codec": "mjpeg",
+                "container": "multipart",
+                "mime": "multipart/x-mixed-replace; boundary=frame",
+                "url": _url(
+                    "/video_feed",
+                    {
+                        "token": token,
+                        "monitor": eff_monitor,
+                        "fps": eff_fps,
+                        "max_w": eff_w,
+                        "quality": eff_q,
+                        "cursor": 1,
+                        "low_latency": 1 if eff_low else 0,
+                    },
+                ),
+            }
+        )
+
+    if h265_ok:
+        candidates.append(
+            {
+                "id": "h265_ts",
+                "codec": "h265",
+                "container": "mpegts",
+                "mime": "video/mp2t",
+                "url": _url(
+                    "/video_h265",
+                    {
+                        "token": token,
+                        "monitor": eff_monitor,
+                        "fps": eff_fps,
+                        "bitrate_k": max(300, int(eff_bitrate * 0.8)),
+                        "gop": eff_gop,
+                        "preset": eff_preset,
+                        "max_w": eff_w,
+                        "low_latency": 1 if eff_low else 0,
+                    },
+                ),
+            }
+        )
+
+    return {
+        "recommended": candidates[0]["id"] if candidates else None,
+        "candidates": candidates,
+        "support": {
+            "capture_input": can_capture,
+            "h264_encoder": _codec_encoder_available("h264"),
+            "h265_encoder": _codec_encoder_available("h265"),
+            "mjpeg_native": mjpeg_native,
+            "mjpeg_ffmpeg": mjpeg_ffmpeg,
+            "mjpeg_gstreamer": mjpeg_gst,
+        },
+        "diag": _get_ffmpeg_diag(),
+    }
 
 
 @router.get("/api/monitors")
@@ -341,84 +740,305 @@ def _ffmpeg_available() -> bool:
     return bool(shutil.which("ffmpeg"))
 
 
-def _build_ffmpeg_cmd(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int, preset: str) -> Optional[list]:
-    if os.name != "nt":
-        return None
+def _stream_headers() -> Dict[str, str]:
+    return {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "X-Accel-Buffering": "no",
+    }
+
+
+def _codec_encoder_available(codec: str) -> bool:
+    if not _ffmpeg_available():
+        return False
+    if codec == "h264":
+        return _ffmpeg_supports_encoder("libx264")
+    if codec == "h265":
+        return _ffmpeg_supports_encoder("libx265")
+    return False
+
+
+def _capture_input_available(monitor: int, fps: int) -> bool:
+    return bool(_build_ffmpeg_input_arg_sets(monitor, fps))
+
+
+def _spawn_stream_process(
+    cmd: list,
+    media_type: str,
+    *,
+    settle_s: float,
+    stderr_lines: int,
+    exit_tag: str,
+):
+    _set_ffmpeg_diag(cmd, None)
     try:
-        with mss.mss() as sct:
-            monitors = sct.monitors
-            if not monitors:
-                return None
-            if monitor < 1 or monitor >= len(monitors):
-                monitor = 1
-            m = monitors[monitor]
-            left = int(m.get("left", 0))
-            top = int(m.get("top", 0))
-            width = int(m.get("width", 0))
-            height = int(m.get("height", 0))
-    except Exception:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, bufsize=0)
+    except Exception as e:
+        _set_ffmpeg_diag(cmd, f"{type(e).__name__}: {e}")
         return None
 
+    def _stderr_reader():
+        try:
+            if not proc.stderr:
+                return
+            last = None
+            for _ in range(max(1, int(stderr_lines))):
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                txt = line.decode("utf-8", errors="replace").strip()
+                if txt:
+                    last = txt
+            if last:
+                _set_ffmpeg_diag(cmd, last)
+        except Exception:
+            pass
+
+    threading.Thread(target=_stderr_reader, daemon=True).start()
+
+    try:
+        time.sleep(max(0.05, float(settle_s)))
+        if proc.poll() is not None:
+            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"{exit_tag}:{proc.returncode}")
+            return None
+    except Exception:
+        pass
+
+    def _gen():
+        try:
+            if not proc.stdout:
+                return
+            for chunk in iter(lambda: proc.stdout.read(64 * 1024), b""):
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    return StreamingResponse(_gen(), media_type=media_type, headers=_stream_headers())
+
+
+def _build_ffmpeg_cmds(
+    codec: str,
+    monitor: int,
+    fps: int,
+    bitrate_k: int,
+    gop: int,
+    preset: str,
+    max_w: int = 0,
+    low_latency: bool = False,
+) -> list[list]:
+    if codec not in ("h264", "h265"):
+        return []
+    if not _codec_encoder_available(codec):
+        return []
     fps = max(5, int(fps))
     bitrate_k = max(200, int(bitrate_k))
     gop = max(10, int(gop))
+    if low_latency:
+        gop = min(gop, max(10, fps))
     preset = str(preset or "ultrafast")
+    max_w = max(0, int(max_w))
 
     enc = "libx264" if codec == "h264" else "libx265"
+    input_arg_sets = _build_ffmpeg_input_arg_sets(monitor, fps)
+    if not input_arg_sets:
+        return []
 
-    cmd = [
-        "ffmpeg",
-        "-loglevel",
-        "error",
-        "-f",
-        "gdigrab",
-        "-framerate",
-        str(fps),
-        "-offset_x",
-        str(left),
-        "-offset_y",
-        str(top),
-        "-video_size",
-        f"{width}x{height}",
-        "-i",
-        "desktop",
-        "-an",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:v",
-        enc,
-        "-preset",
-        preset,
-        "-tune",
-        "zerolatency",
-        "-b:v",
-        f"{bitrate_k}k",
-        "-maxrate",
-        f"{bitrate_k}k",
-        "-bufsize",
-        f"{bitrate_k * 2}k",
-        "-g",
-        str(gop),
-        "-keyint_min",
-        str(gop),
-        "-bf",
-        "0",
-        "-f",
-        "mpegts",
-        "pipe:1",
-    ]
-    if codec == "h265":
-        cmd.extend(["-x265-params", "repeat-headers=1:log-level=error"])
-    return cmd
+    out: list[list] = []
+    for input_args in input_arg_sets:
+        cmd = ["ffmpeg", "-loglevel", "error", *input_args]
+        cmd += [
+            "-an",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            enc,
+        ]
+        if max_w > 0:
+            cmd += ["-vf", f"scale={max_w}:-2:flags=fast_bilinear:force_original_aspect_ratio=decrease"]
+        if codec == "h264":
+            cmd += ["-profile:v", "baseline"]
+        cmd += [
+            "-preset",
+            preset,
+            "-tune",
+            "zerolatency",
+            "-b:v",
+            f"{bitrate_k}k",
+            "-maxrate",
+            f"{bitrate_k}k",
+            "-bufsize",
+            f"{bitrate_k * 2}k",
+            "-g",
+            str(gop),
+            "-keyint_min",
+            str(gop),
+            "-bf",
+            "0",
+            "-f",
+            "mpegts",
+            "pipe:1",
+        ]
+        if codec == "h265":
+            cmd.extend(["-x265-params", "repeat-headers=1:log-level=error"])
+        out.append(cmd)
+    return out
 
 
-def _ffmpeg_stream(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int, preset: str):
+def _ffmpeg_mjpeg_stream(monitor: int, fps: int, quality: int, width: int):
     if not _ffmpeg_available():
+        _set_ffmpeg_diag(None, "ffmpeg_unavailable")
         return None
-    cmd = _build_ffmpeg_cmd(codec, monitor, fps, bitrate_k, gop, preset)
-    if not cmd:
+
+    input_arg_sets = _build_ffmpeg_input_arg_sets(monitor, fps)
+    if not input_arg_sets:
+        if os.name != "nt" and _is_wayland_session() and not _ffmpeg_supports_pipewire():
+            _set_ffmpeg_diag(None, "ffmpeg_missing_pipewire_support")
+        else:
+            _set_ffmpeg_diag(None, "ffmpeg_unsupported_or_capture_unavailable")
         return None
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+
+    q = max(10, min(95, int(quality)))
+    # ffmpeg MJPEG q:v scale: 2(best) .. 31(worst)
+    qv = int(round(31 - ((q - 10) * 29.0 / 85.0)))
+    qv = max(2, min(31, qv))
+    w = max(0, int(width))
+
+    for input_args in input_arg_sets:
+        cmd = [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            *input_args,
+            "-an",
+        ]
+        if w > 0:
+            cmd += ["-vf", f"scale={w}:-2:flags=fast_bilinear:force_original_aspect_ratio=decrease"]
+        cmd += [
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            str(qv),
+            "-f",
+            "mpjpeg",
+            "-boundary_tag",
+            "frame",
+            "pipe:1",
+        ]
+        stream = _spawn_stream_process(
+            cmd,
+            "multipart/x-mixed-replace; boundary=frame",
+            settle_s=0.2,
+            stderr_lines=120,
+            exit_tag="ffmpeg_exited",
+        )
+        if stream is not None:
+            return stream
+    return None
+
+
+def _ffmpeg_stream(
+    codec: str,
+    monitor: int,
+    fps: int,
+    bitrate_k: int,
+    gop: int,
+    preset: str,
+    max_w: int = 0,
+    low_latency: bool = False,
+):
+    if not _ffmpeg_available():
+        _set_ffmpeg_diag(None, "ffmpeg_unavailable")
+        return None
+    cmds = _build_ffmpeg_cmds(codec, monitor, fps, bitrate_k, gop, preset, max_w=max_w, low_latency=low_latency)
+    if not cmds:
+        if not _codec_encoder_available(codec):
+            _set_ffmpeg_diag(None, f"ffmpeg_missing_encoder:{codec}")
+            return None
+        is_wayland = _is_wayland_session()
+        if os.name != "nt" and is_wayland and not _ffmpeg_supports_pipewire():
+            _set_ffmpeg_diag(None, "ffmpeg_missing_pipewire_support")
+        else:
+            _set_ffmpeg_diag(None, "ffmpeg_unsupported_or_capture_unavailable")
+        return None
+
+    for cmd in cmds:
+        stream = _spawn_stream_process(
+            cmd,
+            "video/mp2t",
+            settle_s=0.15,
+            stderr_lines=80,
+            exit_tag="ffmpeg_exited",
+        )
+        if stream is not None:
+            return stream
+    return None
+
+
+def _gst_mjpeg_stream(fps: int, quality: int, width: int):
+    if not _is_wayland_session():
+        return None
+    if not _gst_available():
+        return None
+    if not _gst_supports_pipewire():
+        _set_ffmpeg_diag(None, "gstreamer_missing_pipewire_support")
+        return None
+
+    fps = max(5, int(fps))
+    q = max(10, min(95, int(quality)))
+    w = max(0, int(width))
+    node = str(os.environ.get("CYBERDECK_PIPEWIRE_NODE", "") or "").strip()
+
+    cmd = ["gst-launch-1.0", "-q", "pipewiresrc"]
+    # Allow explicit node override; otherwise let plugin choose default.
+    if node and node.lower() not in ("default", "pipewire:"):
+        cmd.append(f"path={node}")
+    cmd += ["do-timestamp=true", "!", "videorate", "!", f"video/x-raw,framerate={fps}/1", "!", "videoconvert"]
+    if w > 0:
+        cmd += ["!", "videoscale", "!", f"video/x-raw,width={w}"]
+    cmd += ["!", "jpegenc", f"quality={q}", "!", "multipartmux", "boundary=frame", "!", "fdsink", "fd=1"]
+
+    _set_ffmpeg_diag(cmd, None)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, bufsize=0)
+    except Exception as e:
+        _set_ffmpeg_diag(cmd, f"{type(e).__name__}: {e}")
+        return None
+
+    def _stderr_reader():
+        try:
+            if not proc.stderr:
+                return
+            last = None
+            for _ in range(120):
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                txt = line.decode("utf-8", errors="replace").strip()
+                if txt:
+                    last = txt
+            if last:
+                _set_ffmpeg_diag(cmd, last)
+        except Exception:
+            pass
+
+    threading.Thread(target=_stderr_reader, daemon=True).start()
+
+    try:
+        time.sleep(0.2)
+        if proc.poll() is not None:
+            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"gstreamer_exited:{proc.returncode}")
+            return None
+    except Exception:
+        pass
 
     def _gen():
         try:
@@ -440,7 +1060,7 @@ def _ffmpeg_stream(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int,
 
     return StreamingResponse(
         _gen(),
-        media_type="video/mp2t",
+        media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
@@ -449,7 +1069,7 @@ def _ffmpeg_stream(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int,
     )
 
 
-@router.get("/video_h264")
+@router.api_route("/video_h264", methods=["GET", "HEAD"])
 def video_h264(
     token: str = TokenDep,
     monitor: int = 1,
@@ -457,16 +1077,40 @@ def video_h264(
     bitrate_k: int = 1500,
     gop: int = 60,
     preset: str = "ultrafast",
+    max_w: int = 1280,
+    low_latency: int = 1,
 ):
     require_perm(token, "perm_stream")
-    stream = _ffmpeg_stream("h264", int(monitor), int(fps), int(bitrate_k), int(gop), preset)
+    eff_monitor = int(monitor)
+    eff_fps = int(fps)
+    eff_bitrate = int(bitrate_k)
+    eff_gop = int(gop)
+    eff_preset = str(preset or "ultrafast")
+    eff_w = int(max_w)
+    eff_low = bool(int(low_latency))
+    if eff_low:
+        eff_fps = min(60, max(10, eff_fps))
+        eff_gop = min(eff_gop, max(10, eff_fps))
+        eff_preset = "ultrafast"
+    stream = _ffmpeg_stream(
+        "h264",
+        eff_monitor,
+        eff_fps,
+        eff_bitrate,
+        eff_gop,
+        eff_preset,
+        max_w=eff_w,
+        low_latency=eff_low,
+    )
     if stream is None:
         from fastapi import HTTPException
-        raise HTTPException(501, "ffmpeg_unavailable_or_unsupported")
+        diag = _get_ffmpeg_diag()
+        detail = diag.get("ffmpeg_last_error") or "ffmpeg_unavailable_or_unsupported"
+        raise HTTPException(502, detail)
     return stream
 
 
-@router.get("/video_h265")
+@router.api_route("/video_h265", methods=["GET", "HEAD"])
 def video_h265(
     token: str = TokenDep,
     monitor: int = 1,
@@ -474,10 +1118,34 @@ def video_h265(
     bitrate_k: int = 1200,
     gop: int = 60,
     preset: str = "ultrafast",
+    max_w: int = 1280,
+    low_latency: int = 1,
 ):
     require_perm(token, "perm_stream")
-    stream = _ffmpeg_stream("h265", int(monitor), int(fps), int(bitrate_k), int(gop), preset)
+    eff_monitor = int(monitor)
+    eff_fps = int(fps)
+    eff_bitrate = int(bitrate_k)
+    eff_gop = int(gop)
+    eff_preset = str(preset or "ultrafast")
+    eff_w = int(max_w)
+    eff_low = bool(int(low_latency))
+    if eff_low:
+        eff_fps = min(60, max(10, eff_fps))
+        eff_gop = min(eff_gop, max(10, eff_fps))
+        eff_preset = "ultrafast"
+    stream = _ffmpeg_stream(
+        "h265",
+        eff_monitor,
+        eff_fps,
+        eff_bitrate,
+        eff_gop,
+        eff_preset,
+        max_w=eff_w,
+        low_latency=eff_low,
+    )
     if stream is None:
         from fastapi import HTTPException
-        raise HTTPException(501, "ffmpeg_unavailable_or_unsupported")
+        diag = _get_ffmpeg_diag()
+        detail = diag.get("ffmpeg_last_error") or "ffmpeg_unavailable_or_unsupported"
+        raise HTTPException(502, detail)
     return stream

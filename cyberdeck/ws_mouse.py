@@ -5,12 +5,12 @@ import sys
 import threading
 from typing import Optional
 
-import pyautogui
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from . import config
 from .auth import get_perm
 from .context import device_manager
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 
 
@@ -18,17 +18,82 @@ router = APIRouter()
 
 _mouse_remainders_lock = threading.Lock()
 _mouse_remainders = {}
+_virtual_cursor_lock = threading.Lock()
+_virtual_cursor = {}
 _IS_WINDOWS = os.name == "nt"
+_IS_WAYLAND = (os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
-async def _cursor_stream(websocket: WebSocket):
+def _safe_screen_size() -> tuple[int, int]:
+    try:
+        wh = INPUT_BACKEND.screen_size()
+        if wh and int(wh[0]) > 0 and int(wh[1]) > 0:
+            return int(wh[0]), int(wh[1])
+    except Exception:
+        pass
+    # Fallback: best-effort logical canvas for client cursor overlay.
+    try:
+        w = max(320, int(os.environ.get("CYBERDECK_STREAM_W", "1920")))
+    except Exception:
+        w = 1920
+    try:
+        h = max(240, int(os.environ.get("CYBERDECK_STREAM_H", "1080")))
+    except Exception:
+        h = 1080
+    return w, h
+
+
+def _init_virtual_cursor(token: str) -> None:
+    w, h = _safe_screen_size()
+    x = w // 2
+    y = h // 2
+    try:
+        pos = INPUT_BACKEND.position()
+        if pos:
+            x = int(pos[0])
+            y = int(pos[1])
+    except Exception:
+        pass
+    x = max(0, min(max(0, w - 1), int(x)))
+    y = max(0, min(max(0, h - 1), int(y)))
+    with _virtual_cursor_lock:
+        _virtual_cursor[token] = (x, y, w, h)
+
+
+def _get_virtual_cursor(token: str) -> tuple[int, int, int, int]:
+    with _virtual_cursor_lock:
+        pos = _virtual_cursor.get(token)
+    if pos is None:
+        _init_virtual_cursor(token)
+        with _virtual_cursor_lock:
+            pos = _virtual_cursor.get(token) or (0, 0, 1920, 1080)
+    return int(pos[0]), int(pos[1]), int(pos[2]), int(pos[3])
+
+
+def _move_virtual_cursor(token: str, dx: int, dy: int) -> None:
+    x, y, w, h = _get_virtual_cursor(token)
+    nx = max(0, min(max(0, w - 1), int(x) + int(dx)))
+    ny = max(0, min(max(0, h - 1), int(y) + int(dy)))
+    with _virtual_cursor_lock:
+        _virtual_cursor[token] = (nx, ny, w, h)
+
+
+async def _cursor_stream(websocket: WebSocket, token: str):
     min_dt = 1.0 / max(5, int(config.CURSOR_STREAM_FPS))
     last_pos = None
     while True:
         try:
-            x, y = pyautogui.position()
-            w, h = pyautogui.size()
-            pos = (int(x), int(y), int(w), int(h))
+            if INPUT_BACKEND.can_position and INPUT_BACKEND.can_screen_size:
+                pos_xy = INPUT_BACKEND.position()
+                wh = INPUT_BACKEND.screen_size()
+                if not pos_xy or not wh:
+                    await asyncio.sleep(min_dt)
+                    continue
+                x, y = pos_xy
+                w, h = wh
+                pos = (int(x), int(y), int(w), int(h))
+            else:
+                pos = _get_virtual_cursor(token)
             if pos != last_pos:
                 await websocket.send_json({"type": "cursor", "x": pos[0], "y": pos[1], "w": pos[2], "h": pos[3]})
                 last_pos = pos
@@ -40,17 +105,47 @@ async def _cursor_stream(websocket: WebSocket):
 
 
 @router.websocket("/ws/mouse")
-async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
-    if not device_manager.get_session(token):
+async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(None)):
+    auth_header = str(websocket.headers.get("authorization") or "").strip()
+    bearer = ""
+    if auth_header.lower().startswith("bearer "):
+        bearer = auth_header[7:].strip()
+    ws_qs_token = str(websocket.query_params.get("token") or "").strip()
+    resolved_token = str(token or "").strip() or ws_qs_token or bearer
+
+    if not resolved_token or not device_manager.get_session(resolved_token):
         await websocket.close(code=4003)
         return
+    token = resolved_token
+
     if not (get_perm(token, "perm_mouse") or get_perm(token, "perm_keyboard")):
         await websocket.close(code=4003)
         return
     await websocket.accept()
     device_manager.register_socket(token, websocket)
     log.info(f"WS connected: {token}")
-    cursor_task: Optional[asyncio.Task] = asyncio.create_task(_cursor_stream(websocket)) if config.CURSOR_STREAM else None
+    if (not INPUT_BACKEND.can_pointer or not INPUT_BACKEND.can_keyboard) and (
+        get_perm(token, "perm_mouse") or get_perm(token, "perm_keyboard")
+    ):
+        try:
+            await websocket.send_json(
+                {"type": "warning", "code": "wayland_input_limited" if _IS_WAYLAND else "input_backend_limited"}
+            )
+        except Exception:
+            pass
+    if not INPUT_BACKEND.can_pointer and not INPUT_BACKEND.can_keyboard:
+        try:
+            await websocket.send_json({"type": "error", "code": "input_backend_unavailable"})
+        except Exception:
+            pass
+        await websocket.close(code=1011)
+        return
+    _init_virtual_cursor(token)
+    cursor_task: Optional[asyncio.Task] = (
+        asyncio.create_task(_cursor_stream(websocket, token))
+        if config.CURSOR_STREAM
+        else None
+    )
     try:
         while True:
             data = await websocket.receive_json()
@@ -74,37 +169,38 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                     _mouse_remainders[token] = (dx - mx, dy - my)
 
                 if mx or my:
-                    pyautogui.moveRel(mx, my, _pause=False)
+                    INPUT_BACKEND.move_rel(mx, my)
+                    _move_virtual_cursor(token, mx, my)
 
             elif t == "click":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.click(_pause=False)
+                INPUT_BACKEND.click("left")
 
             elif t == "rclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.click(button="right", _pause=False)
+                INPUT_BACKEND.click("right")
 
             elif t == "dclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.doubleClick(_pause=False)
+                INPUT_BACKEND.click("left", double=True)
 
             elif t == "scroll":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.scroll(int(data.get("dy", 0)), _pause=False)
+                INPUT_BACKEND.scroll(int(data.get("dy", 0)))
 
             elif t == "drag_s":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.mouseDown(_pause=False)
+                INPUT_BACKEND.mouse_down("left")
 
             elif t == "drag_e":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.mouseUp(_pause=False)
+                INPUT_BACKEND.mouse_up("left")
 
             elif t == "text":
                 if not get_perm(token, "perm_keyboard"):
@@ -121,9 +217,10 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                             pass
                     else:
                         try:
-                            pyautogui.write(text, interval=0, _pause=False)
+                            INPUT_BACKEND.write_text(text)
                         except Exception:
-                            pass
+                            if config.DEBUG:
+                                log.exception("Keyboard text injection failed")
 
             elif t == "key":
                 if not get_perm(token, "perm_keyboard"):
@@ -148,9 +245,10 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                         py_key = {"enter": "enter", "backspace": "backspace", "space": "space"}.get(val)
                     if py_key:
                         try:
-                            pyautogui.press(py_key, _pause=False)
+                            INPUT_BACKEND.press(py_key)
                         except Exception:
-                            pass
+                            if config.DEBUG:
+                                log.exception("Keyboard press failed")
 
             elif t == "hotkey":
                 if not get_perm(token, "perm_keyboard"):
@@ -158,7 +256,7 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                 keys = data.get("keys") or []
                 if isinstance(keys, list) and keys:
                     keys = [str(k).lower() for k in keys]
-                    pyautogui.hotkey(*keys, _pause=False)
+                    INPUT_BACKEND.hotkey(*keys)
 
             elif t == "media":
                 if not get_perm(token, "perm_keyboard"):
@@ -175,22 +273,22 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                 }
                 key = media_map.get(act)
                 if key:
-                    pyautogui.press(key, _pause=False)
+                    INPUT_BACKEND.press(key)
 
             elif t == "shortcut":
                 if not get_perm(token, "perm_keyboard"):
                     continue
                 act = str(data.get("action", "")).lower()
                 if act == "copy":
-                    pyautogui.hotkey("ctrl", "c", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "c")
                 elif act == "paste":
-                    pyautogui.hotkey("ctrl", "v", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "v")
                 elif act == "cut":
-                    pyautogui.hotkey("ctrl", "x", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "x")
                 elif act == "undo":
-                    pyautogui.hotkey("ctrl", "z", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "z")
                 elif act == "redo":
-                    pyautogui.hotkey("ctrl", "y", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "y")
 
     except WebSocketDisconnect:
         pass
@@ -203,6 +301,11 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
         try:
             with _mouse_remainders_lock:
                 _mouse_remainders.pop(token, None)
+        except Exception:
+            pass
+        try:
+            with _virtual_cursor_lock:
+                _virtual_cursor.pop(token, None)
         except Exception:
             pass
         log.info(f"WS disconnected: {token}")

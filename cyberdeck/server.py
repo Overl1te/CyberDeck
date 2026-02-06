@@ -11,6 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from . import config
 from .discovery import start_udp_discovery
 from .stdio import ensure_null_stdio
+from .wayland_setup import ensure_wayland_ready, format_wayland_issues, is_linux_wayland_session
+from .logging_config import log
 
 from .api_core import router as core_router
 from .api_local import router as local_router
@@ -56,6 +58,22 @@ def _port_available(port: int) -> bool:
 
 
 def run() -> None:
+    if is_linux_wayland_session():
+        auto_setup = os.environ.get("CYBERDECK_WAYLAND_AUTO_SETUP", "1") == "1"
+        ok, issues, attempted, reason = ensure_wayland_ready(
+            config.BASE_DIR,
+            auto_install=auto_setup,
+            log=lambda line: log.info("[wayland-setup] %s", line),
+        )
+        if ok:
+            log.info("Wayland environment is ready.")
+        else:
+            log.warning(
+                "Wayland environment is not ready (%s): %s",
+                reason,
+                format_wayland_issues(issues),
+            )
+
     log_level = "debug" if config.DEBUG else "info"
     access_log = config.DEBUG
     if not config.LOG_ENABLED:

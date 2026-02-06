@@ -35,7 +35,11 @@ class LocalTokenRequest(BaseModel):
 
 
 class QrLoginRequest(BaseModel):
-    nonce: str
+    # Compatibility with mobile clients:
+    # old payload: {"nonce": "..."}
+    # new payload: {"qr_token": "..."}
+    nonce: Optional[str] = None
+    qr_token: Optional[str] = None
     device_id: Optional[str] = None
     device_name: Optional[str] = None
 

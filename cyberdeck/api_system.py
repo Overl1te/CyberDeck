@@ -2,10 +2,10 @@ import ctypes
 import os
 import subprocess
 
-import pyautogui
 from fastapi import APIRouter, HTTPException
 
 from .auth import TokenDep, require_perm
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 
 
@@ -28,6 +28,28 @@ def _run_first_ok(cmds: list[list[str]]) -> bool:
         except Exception:
             continue
     return False
+
+
+def _linux_session_id() -> str:
+    return str(os.environ.get("XDG_SESSION_ID") or "").strip()
+
+
+def _linux_logoff_cmds() -> list[list[str]]:
+    session_id = _linux_session_id()
+    cmds: list[list[str]] = []
+    if session_id:
+        cmds.append(["loginctl", "terminate-session", session_id])
+    cmds.extend(
+        [
+            ["gnome-session-quit", "--logout", "--no-prompt"],
+            ["cinnamon-session-quit", "--logout", "--no-prompt"],
+            ["xfce4-session-logout", "--logout", "--fast"],
+            ["mate-session-save", "--logout-dialog"],
+            ["qdbus", "org.kde.Shutdown", "/Shutdown", "logout"],
+            ["systemctl", "--user", "exit"],
+        ]
+    )
+    return cmds
 
 
 @router.post("/system/shutdown")
@@ -57,9 +79,12 @@ def system_restart(token: str = TokenDep):
 @router.post("/system/logoff")
 def system_logoff(token: str = TokenDep):
     require_perm(token, "perm_power")
-    if not _IS_WINDOWS:
-        raise HTTPException(400, "logoff_supported_only_on_windows")
-    os.system("shutdown /l")
+    if _IS_WINDOWS:
+        os.system("shutdown /l")
+        return {"status": "logoff"}
+    ok = _run_first_ok(_linux_logoff_cmds())
+    if not ok:
+        raise HTTPException(400, "logoff_not_supported_on_this_system")
     return {"status": "logoff"}
 
 
@@ -127,6 +152,8 @@ def system_hibernate(token: str = TokenDep):
 def volume_control(action: str, token: str = TokenDep):
     require_perm(token, "perm_keyboard")
     keys = {"up": "volumeup", "down": "volumedown", "mute": "volumemute"}
-    if action in keys:
-        pyautogui.press(keys[action], _pause=False)
+    if action not in keys:
+        raise HTTPException(400, "unknown_action")
+    if not INPUT_BACKEND.press(keys[action]):
+        raise HTTPException(501, "keyboard_input_unavailable")
     return {"status": "ok"}
