@@ -74,6 +74,63 @@ python main.py
 
 ---
 
+## 🧰 Сборка бинарника (Arch Linux)
+
+Nuitka/PyInstaller **не кросс-компилируют**: бинарник для Linux нужно собирать **на Linux** (например, на Arch в нативной системе/VM).
+
+### 1) Поставить системные зависимости (минимум)
+
+```bash
+sudo pacman -S --needed python python-pip tk gcc patchelf
+```
+
+Опционально:
+- `base-devel` — если `pip` начнёт собирать зависимости из исходников
+- `ffmpeg` — для `/video_h264` и `/video_h265`
+- `libx11`, `libxtst`, `libxrandr`, `libxinerama`, `libxfixes` — если в минимальной системе не хватает X11 библиотек (ввод/захват экрана)
+- Для трея/иконки в некоторых окружениях может понадобиться GTK/AppIndicator (на Arch это зависит от DE/панели).
+
+### 2) Собрать через Nuitka (рекомендуется)
+
+```bash
+git clone https://github.com/Overl1te/CyberDeck.git
+cd CyberDeck
+
+python -m venv .venv
+source .venv/bin/activate
+
+python -m pip install -U pip
+pip install -r requirements-build.txt
+./scripts/build_arch_linux.sh
+```
+
+Результат будет в `dist-nuitka/CyberDeck.dist/` (запуск: `./dist-nuitka/CyberDeck.dist/CyberDeck`).
+
+Если у скрипта нет права на запуск: `chmod +x scripts/build_arch_linux.sh`.
+
+### 3) Fallback: PyInstaller
+
+Если нужно собрать старым способом:
+
+```bash
+pip install pyinstaller
+./scripts/build_arch_linux_pyinstaller.sh
+```
+
+---
+
+## 🪟 Сборка бинарника (Windows, Nuitka)
+
+Нужно установить **Visual Studio Build Tools** (C++ build tools + Windows SDK), иначе Nuitka не соберёт проект.
+
+Сборка:
+
+```powershell
+PowerShell -ExecutionPolicy Bypass -File .\\scripts\\build_windows_nuitka.ps1
+```
+
+Результат: `dist-nuitka-win\\CyberDeck.dist\\CyberDeck.exe`.
+
 ## 🎮 Использование
 
 1. Запусти `launcher.py` (или `main.py`).

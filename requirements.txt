@@ -1,6 +1,7 @@
 ﻿fastapi # Основной бек
 pystray # Трей
 pyinstaller
+nuitka
 customtkinter
 packaging
 python-multipart

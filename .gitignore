@@ -11,6 +11,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+dist-nuitka/
+dist-nuitka-win/
 downloads/
 eggs/
 .eggs/
@@ -210,6 +212,8 @@ __marimo__/
 
 # Other
 launcher.*/
+*.dist/
+*.build/
 *.xml
 Output/
 *.json
