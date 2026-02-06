@@ -29,6 +29,10 @@ class _VideoStreamer:
         self._latest_jpeg_key = None
         self._latest_jpeg_seq = -1
         self._ts = 0.0
+        self._last_error = None
+        self._last_error_ts = 0.0
+        self._error_streak = 0
+        self._disabled_reason = None
         self.base_w = int(os.environ.get("CYBERDECK_STREAM_W", "960"))
         self.base_q = int(os.environ.get("CYBERDECK_STREAM_Q", "25"))
         self.base_fps = int(os.environ.get("CYBERDECK_STREAM_FPS", "30"))
@@ -46,10 +50,45 @@ class _VideoStreamer:
     def stop(self):
         self._stop.set()
 
+    def disabled_reason(self) -> Optional[str]:
+        with self._lock:
+            return self._disabled_reason
+
+    def _record_error(self, msg: str) -> None:
+        now = time.time()
+        with self._lock:
+            self._last_error = str(msg)[:400]
+            self._last_error_ts = now
+            self._error_streak += 1
+
+    def _record_ok(self) -> None:
+        with self._lock:
+            self._error_streak = 0
+
+    def _is_wayland_session(self) -> bool:
+        if os.name == "nt":
+            return False
+        xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+        if xdg_type == "wayland":
+            return True
+        return bool(os.environ.get("WAYLAND_DISPLAY")) and not bool(os.environ.get("DISPLAY"))
+
     def _loop(self):
         try:
+            if self._is_wayland_session():
+                with self._lock:
+                    self._disabled_reason = "wayland_session"
+                log.warning("MJPEG screen capture disabled: Wayland session detected (mss requires X11).")
+                return
+            if os.name != "nt" and not os.environ.get("DISPLAY"):
+                with self._lock:
+                    self._disabled_reason = "no_display"
+                log.warning("MJPEG screen capture disabled: DISPLAY is not set (no X11 session).")
+                return
             with mss.mss() as sct:
                 min_dt = 1.0 / max(5, self.base_fps)
+                backoff_s = 0.05
+                last_log_t = 0.0
                 while not self._stop.is_set():
                     t0 = time.perf_counter()
                     try:
@@ -57,15 +96,20 @@ class _VideoStreamer:
                         with self._lock:
                             desired_w, desired_q, desired_cursor, desired_monitor = self._desired_key
                         monitors = sct.monitors
-                        if not monitors or len(monitors) < 2:
+                        if not monitors:
+                            raise RuntimeError("mss_no_monitors")
+                        if len(monitors) == 1:
+                            # Some environments report a single monitor entry only.
                             monitor = monitors[0]
-                            desired_monitor = 0
+                            desired_monitor = 1
                         else:
                             if desired_monitor < 1 or desired_monitor >= len(monitors):
                                 desired_monitor = 1
                             monitor = monitors[desired_monitor]
 
                         sct_img = sct.grab(monitor)
+                        self._record_ok()
+                        backoff_s = 0.05
                         g_ms = (time.perf_counter() - g0) * 1000.0
                         raw = bytes(sct_img.bgra)
                         size = sct_img.size
@@ -92,9 +136,22 @@ class _VideoStreamer:
                                 fps_now = 1.0 / dt
                                 self._ema_loop_fps = fps_now if self._ema_loop_fps is None else (self._ema_loop_fps * (1 - a) + fps_now * a)
                             self._last_loop_t = now
-                    except Exception:
-                        log.exception("Video grab/encode failed")
-                        time.sleep(0.05)
+                    except mss.exception.ScreenShotError as e:
+                        self._record_error(f"{type(e).__name__}: {e}")
+                        now = time.time()
+                        if now - last_log_t > 3.0:
+                            last_log_t = now
+                            log.warning("Video grab failed (mss): %s", e)
+                        time.sleep(backoff_s)
+                        backoff_s = min(2.0, backoff_s * 1.5)
+                    except Exception as e:
+                        self._record_error(f"{type(e).__name__}: {e}")
+                        now = time.time()
+                        if now - last_log_t > 3.0:
+                            last_log_t = now
+                            log.exception("Video grab/encode failed")
+                        time.sleep(backoff_s)
+                        backoff_s = min(2.0, backoff_s * 1.5)
                     dt = time.perf_counter() - t0
                     if dt < min_dt:
                         time.sleep(min_dt - dt)
@@ -169,6 +226,10 @@ class _VideoStreamer:
                 "ema_grab_ms": float(self._ema_grab_ms) if self._ema_grab_ms is not None else None,
                 "ema_loop_fps": float(self._ema_loop_fps) if self._ema_loop_fps is not None else None,
                 "ts": float(self._ts),
+                "disabled_reason": self._disabled_reason,
+                "last_error": self._last_error,
+                "last_error_ts": float(self._last_error_ts) if self._last_error_ts else None,
+                "error_streak": int(self._error_streak),
             }
 
 
@@ -206,6 +267,11 @@ def video_feed(
 ):
     require_perm(token, "perm_stream")
 
+    disabled = video_streamer.disabled_reason()
+    if disabled:
+        from fastapi import HTTPException
+        raise HTTPException(501, f"stream_unavailable:{disabled}")
+
     eff_w = int(max_w if max_w is not None else (w if w is not None else 960))
     eff_q = int(quality if quality is not None else (q if q is not None else 25))
     eff_fps = int(fps)
@@ -240,19 +306,32 @@ def list_monitors(token: str = TokenDep):
     try:
         with mss.mss() as sct:
             monitors = sct.monitors
-            for i, m in enumerate(monitors):
-                if i == 0:
-                    continue
+            if len(monitors) == 1:
+                m = monitors[0]
                 out.append(
                     {
-                        "id": i,
+                        "id": 1,
                         "left": int(m.get("left", 0)),
                         "top": int(m.get("top", 0)),
                         "width": int(m.get("width", 0)),
                         "height": int(m.get("height", 0)),
-                        "primary": i == 1,
+                        "primary": True,
                     }
                 )
+            else:
+                for i, m in enumerate(monitors):
+                    if i == 0:
+                        continue
+                    out.append(
+                        {
+                            "id": i,
+                            "left": int(m.get("left", 0)),
+                            "top": int(m.get("top", 0)),
+                            "width": int(m.get("width", 0)),
+                            "height": int(m.get("height", 0)),
+                            "primary": i == 1,
+                        }
+                    )
     except Exception:
         pass
     return {"monitors": out}

@@ -38,6 +38,7 @@
 - Для GUI-лаунчера обычно нужен пакет `tk`/`python3-tk`.
 - Трей/автостарт зависят от окружения рабочего стола (поддержка может отличаться).
 - Команды питания (`shutdown/reboot/suspend/hibernate`) выполняются через `systemctl` и могут требовать прав/Polkit.
+- MJPEG-стрим `/video_feed` использует `mss` (X11). В Wayland-сессии захват экрана может не работать — в `/api/stream_stats` будет `disabled_reason=wayland_session` или `no_display`.
 
 ### Из исходников
 
