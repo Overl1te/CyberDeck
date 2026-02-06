@@ -7,17 +7,132 @@ from io import BytesIO
 from typing import Any, Dict, Optional
 
 import mss
-import pyautogui
 from PIL import Image, ImageDraw
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from .auth import TokenDep, require_perm
 from . import config
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 
 
 router = APIRouter()
+
+_ffmpeg_diag_lock = threading.Lock()
+_ffmpeg_last_cmd: Optional[str] = None
+_ffmpeg_last_error: Optional[str] = None
+_ffmpeg_last_error_ts: float = 0.0
+
+_ffmpeg_formats_lock = threading.Lock()
+_ffmpeg_formats_cached: Optional[str] = None
+
+
+def _set_ffmpeg_diag(cmd: Optional[list], err: Optional[str]) -> None:
+    global _ffmpeg_last_cmd, _ffmpeg_last_error, _ffmpeg_last_error_ts
+    with _ffmpeg_diag_lock:
+        _ffmpeg_last_cmd = " ".join([str(x) for x in (cmd or [])]) if cmd else None
+        _ffmpeg_last_error = str(err)[:800] if err else None
+        _ffmpeg_last_error_ts = time.time() if err else _ffmpeg_last_error_ts
+
+
+def _get_ffmpeg_diag() -> Dict[str, Any]:
+    with _ffmpeg_diag_lock:
+        return {
+            "ffmpeg_available": bool(_ffmpeg_available()),
+            "ffmpeg_last_cmd": _ffmpeg_last_cmd,
+            "ffmpeg_last_error": _ffmpeg_last_error,
+            "ffmpeg_last_error_ts": float(_ffmpeg_last_error_ts) if _ffmpeg_last_error_ts else None,
+        }
+
+
+def _ffmpeg_formats() -> str:
+    global _ffmpeg_formats_cached
+    with _ffmpeg_formats_lock:
+        if _ffmpeg_formats_cached is not None:
+            return _ffmpeg_formats_cached
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-formats"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        out = str(proc.stdout or "")
+    except Exception:
+        out = ""
+    with _ffmpeg_formats_lock:
+        _ffmpeg_formats_cached = out
+    return out
+
+
+def _ffmpeg_supports_pipewire() -> bool:
+    txt = _ffmpeg_formats()
+    return "pipewire" in txt.lower()
+
+
+def _is_wayland_session() -> bool:
+    if os.name == "nt":
+        return False
+    xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+    return xdg_type == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _get_monitor_rect(monitor: int) -> Optional[tuple[int, int, int, int]]:
+    try:
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            if not monitors:
+                return None
+            if len(monitors) == 1:
+                m = monitors[0]
+            else:
+                if monitor < 1 or monitor >= len(monitors):
+                    monitor = 1
+                m = monitors[monitor]
+            return int(m.get("left", 0)), int(m.get("top", 0)), int(m.get("width", 0)), int(m.get("height", 0))
+    except Exception:
+        return None
+
+
+def _build_ffmpeg_input_args(monitor: int, fps: int) -> Optional[list]:
+    fps = max(5, int(fps))
+    is_wayland = _is_wayland_session()
+    if os.name == "nt":
+        rect = _get_monitor_rect(monitor)
+        if not rect:
+            return None
+        left, top, width, height = rect
+        return [
+            "-f",
+            "gdigrab",
+            "-framerate",
+            str(fps),
+            "-offset_x",
+            str(left),
+            "-offset_y",
+            str(top),
+            "-video_size",
+            f"{width}x{height}",
+            "-i",
+            "desktop",
+        ]
+
+    if is_wayland:
+        if not _ffmpeg_supports_pipewire():
+            return None
+        node = str(os.environ.get("CYBERDECK_PIPEWIRE_NODE", "") or "").strip()
+        pw_input = node or "default"
+        return ["-f", "pipewire", "-framerate", str(fps), "-i", pw_input]
+
+    rect = _get_monitor_rect(monitor)
+    if not rect:
+        return None
+    left, top, width, height = rect
+    display = os.environ.get("DISPLAY") or ":0.0"
+    return ["-f", "x11grab", "-framerate", str(fps), "-video_size", f"{width}x{height}", "-i", f"{display}+{left},{top}"]
 
 
 class _VideoStreamer:
@@ -162,7 +277,10 @@ class _VideoStreamer:
         img = Image.frombytes("RGB", size, raw_bgra, "raw", "BGRX")
         if cursor:
             try:
-                cx, cy = pyautogui.position()
+                cur = INPUT_BACKEND.position()
+                if not cur:
+                    raise RuntimeError("cursor_position_unavailable")
+                cx, cy = cur
                 rx, ry = cx - monitor["left"], cy - monitor["top"]
                 draw = ImageDraw.Draw(img)
                 draw.ellipse((rx - 6, ry - 6, rx + 6, ry + 6), outline=(0, 255, 65), width=2)
@@ -253,7 +371,7 @@ def generate_video_stream(w: int, q: int, fps: int, cursor: bool, monitor: int):
             time.sleep(min_dt - dt)
 
 
-@router.get("/video_feed")
+@router.api_route("/video_feed", methods=["GET", "HEAD"])
 def video_feed(
     token: str = TokenDep,
     w: Optional[int] = None,
@@ -267,11 +385,6 @@ def video_feed(
 ):
     require_perm(token, "perm_stream")
 
-    disabled = video_streamer.disabled_reason()
-    if disabled:
-        from fastapi import HTTPException
-        raise HTTPException(501, f"stream_unavailable:{disabled}")
-
     eff_w = int(max_w if max_w is not None else (w if w is not None else 960))
     eff_q = int(quality if quality is not None else (q if q is not None else 25))
     eff_fps = int(fps)
@@ -281,6 +394,16 @@ def video_feed(
         eff_w = min(eff_w, 960)
         eff_q = min(eff_q, 35)
         eff_fps = min(eff_fps, 60)
+
+    disabled = video_streamer.disabled_reason()
+    if disabled:
+        # Wayland: try ffmpeg PipeWire fallback for MJPEG endpoint used by mobile clients.
+        ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q)
+        if ffmpeg_stream is not None:
+            return ffmpeg_stream
+        from fastapi import HTTPException
+        detail = _get_ffmpeg_diag().get("ffmpeg_last_error") or f"stream_unavailable:{disabled}"
+        raise HTTPException(501, detail)
 
     return StreamingResponse(
         generate_video_stream(eff_w, eff_q, eff_fps, bool(int(cursor)), eff_monitor),
@@ -296,7 +419,15 @@ def video_feed(
 @router.get("/api/stream_stats")
 def stream_stats(token: str = TokenDep):
     require_perm(token, "perm_stream")
-    return video_streamer.get_stats()
+    out = video_streamer.get_stats()
+    try:
+        out.update(_get_ffmpeg_diag())
+        out["input_backend"] = getattr(INPUT_BACKEND, "name", "unknown")
+        out["input_can_pointer"] = bool(getattr(INPUT_BACKEND, "can_pointer", False))
+        out["input_can_keyboard"] = bool(getattr(INPUT_BACKEND, "can_keyboard", False))
+    except Exception:
+        pass
+    return out
 
 
 @router.get("/api/monitors")
@@ -342,23 +473,6 @@ def _ffmpeg_available() -> bool:
 
 
 def _build_ffmpeg_cmd(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int, preset: str) -> Optional[list]:
-    if os.name != "nt":
-        return None
-    try:
-        with mss.mss() as sct:
-            monitors = sct.monitors
-            if not monitors:
-                return None
-            if monitor < 1 or monitor >= len(monitors):
-                monitor = 1
-            m = monitors[monitor]
-            left = int(m.get("left", 0))
-            top = int(m.get("top", 0))
-            width = int(m.get("width", 0))
-            height = int(m.get("height", 0))
-    except Exception:
-        return None
-
     fps = max(5, int(fps))
     bitrate_k = max(200, int(bitrate_k))
     gop = max(10, int(gop))
@@ -366,22 +480,13 @@ def _build_ffmpeg_cmd(codec: str, monitor: int, fps: int, bitrate_k: int, gop: i
 
     enc = "libx264" if codec == "h264" else "libx265"
 
-    cmd = [
-        "ffmpeg",
-        "-loglevel",
-        "error",
-        "-f",
-        "gdigrab",
-        "-framerate",
-        str(fps),
-        "-offset_x",
-        str(left),
-        "-offset_y",
-        str(top),
-        "-video_size",
-        f"{width}x{height}",
-        "-i",
-        "desktop",
+    input_args = _build_ffmpeg_input_args(monitor, fps)
+    if not input_args:
+        return None
+
+    cmd = ["ffmpeg", "-loglevel", "error", *input_args]
+
+    cmd += [
         "-an",
         "-pix_fmt",
         "yuv420p",
@@ -412,13 +517,150 @@ def _build_ffmpeg_cmd(codec: str, monitor: int, fps: int, bitrate_k: int, gop: i
     return cmd
 
 
+def _ffmpeg_mjpeg_stream(monitor: int, fps: int, quality: int):
+    if not _ffmpeg_available():
+        _set_ffmpeg_diag(None, "ffmpeg_unavailable")
+        return None
+
+    input_args = _build_ffmpeg_input_args(monitor, fps)
+    if not input_args:
+        if os.name != "nt" and _is_wayland_session() and not _ffmpeg_supports_pipewire():
+            _set_ffmpeg_diag(None, "ffmpeg_missing_pipewire_support")
+        else:
+            _set_ffmpeg_diag(None, "ffmpeg_unsupported_or_capture_unavailable")
+        return None
+
+    q = max(10, min(95, int(quality)))
+    # ffmpeg MJPEG q:v scale: 2(best) .. 31(worst)
+    qv = int(round(31 - ((q - 10) * 29.0 / 85.0)))
+    qv = max(2, min(31, qv))
+
+    cmd = [
+        "ffmpeg",
+        "-loglevel",
+        "error",
+        *input_args,
+        "-an",
+        "-c:v",
+        "mjpeg",
+        "-q:v",
+        str(qv),
+        "-f",
+        "mpjpeg",
+        "pipe:1",
+    ]
+
+    _set_ffmpeg_diag(cmd, None)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, bufsize=0)
+    except Exception as e:
+        _set_ffmpeg_diag(cmd, f"{type(e).__name__}: {e}")
+        return None
+
+    def _stderr_reader():
+        try:
+            if not proc.stderr:
+                return
+            last = None
+            for _ in range(120):
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                txt = line.decode("utf-8", errors="replace").strip()
+                if txt:
+                    last = txt
+            if last:
+                _set_ffmpeg_diag(cmd, last)
+        except Exception:
+            pass
+
+    threading.Thread(target=_stderr_reader, daemon=True).start()
+
+    try:
+        time.sleep(0.15)
+        if proc.poll() is not None:
+            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"ffmpeg_exited:{proc.returncode}")
+            return None
+    except Exception:
+        pass
+
+    def _gen():
+        try:
+            if not proc.stdout:
+                return
+            for chunk in iter(lambda: proc.stdout.read(64 * 1024), b""):
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="multipart/x-mixed-replace;boundary=ffmpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def _ffmpeg_stream(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int, preset: str):
     if not _ffmpeg_available():
+        _set_ffmpeg_diag(None, "ffmpeg_unavailable")
         return None
     cmd = _build_ffmpeg_cmd(codec, monitor, fps, bitrate_k, gop, preset)
     if not cmd:
+        is_wayland = _is_wayland_session()
+        if os.name != "nt" and is_wayland and not _ffmpeg_supports_pipewire():
+            _set_ffmpeg_diag(None, "ffmpeg_missing_pipewire_support")
+        else:
+            _set_ffmpeg_diag(None, "ffmpeg_unsupported_or_capture_unavailable")
         return None
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+
+    _set_ffmpeg_diag(cmd, None)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, bufsize=0)
+    except Exception as e:
+        _set_ffmpeg_diag(cmd, f"{type(e).__name__}: {e}")
+        return None
+
+    def _stderr_reader():
+        try:
+            if not proc.stderr:
+                return
+            # Keep only the last non-empty lines, do not spam logs.
+            last = None
+            for _ in range(80):
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                txt = line.decode("utf-8", errors="replace").strip()
+                if txt:
+                    last = txt
+            if last:
+                _set_ffmpeg_diag(cmd, last)
+        except Exception:
+            pass
+
+    threading.Thread(target=_stderr_reader, daemon=True).start()
+
+    # If ffmpeg exits immediately, capture that as a failure.
+    try:
+        time.sleep(0.15)
+        if proc.poll() is not None:
+            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"ffmpeg_exited:{proc.returncode}")
+            return None
+    except Exception:
+        pass
 
     def _gen():
         try:
@@ -449,7 +691,7 @@ def _ffmpeg_stream(codec: str, monitor: int, fps: int, bitrate_k: int, gop: int,
     )
 
 
-@router.get("/video_h264")
+@router.api_route("/video_h264", methods=["GET", "HEAD"])
 def video_h264(
     token: str = TokenDep,
     monitor: int = 1,
@@ -462,11 +704,13 @@ def video_h264(
     stream = _ffmpeg_stream("h264", int(monitor), int(fps), int(bitrate_k), int(gop), preset)
     if stream is None:
         from fastapi import HTTPException
-        raise HTTPException(501, "ffmpeg_unavailable_or_unsupported")
+        diag = _get_ffmpeg_diag()
+        detail = diag.get("ffmpeg_last_error") or "ffmpeg_unavailable_or_unsupported"
+        raise HTTPException(502, detail)
     return stream
 
 
-@router.get("/video_h265")
+@router.api_route("/video_h265", methods=["GET", "HEAD"])
 def video_h265(
     token: str = TokenDep,
     monitor: int = 1,
@@ -479,5 +723,7 @@ def video_h265(
     stream = _ffmpeg_stream("h265", int(monitor), int(fps), int(bitrate_k), int(gop), preset)
     if stream is None:
         from fastapi import HTTPException
-        raise HTTPException(501, "ffmpeg_unavailable_or_unsupported")
+        diag = _get_ffmpeg_diag()
+        detail = diag.get("ffmpeg_last_error") or "ffmpeg_unavailable_or_unsupported"
+        raise HTTPException(502, detail)
     return stream

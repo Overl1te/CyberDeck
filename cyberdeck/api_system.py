@@ -2,10 +2,10 @@ import ctypes
 import os
 import subprocess
 
-import pyautogui
 from fastapi import APIRouter, HTTPException
 
 from .auth import TokenDep, require_perm
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 
 
@@ -127,6 +127,8 @@ def system_hibernate(token: str = TokenDep):
 def volume_control(action: str, token: str = TokenDep):
     require_perm(token, "perm_keyboard")
     keys = {"up": "volumeup", "down": "volumedown", "mute": "volumemute"}
-    if action in keys:
-        pyautogui.press(keys[action], _pause=False)
+    if action not in keys:
+        raise HTTPException(400, "unknown_action")
+    if not INPUT_BACKEND.press(keys[action]):
+        raise HTTPException(501, "keyboard_input_unavailable")
     return {"status": "ok"}

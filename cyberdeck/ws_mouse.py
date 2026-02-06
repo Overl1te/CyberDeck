@@ -5,12 +5,12 @@ import sys
 import threading
 from typing import Optional
 
-import pyautogui
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from . import config
 from .auth import get_perm
 from .context import device_manager
+from .input_backend import INPUT_BACKEND
 from .logging_config import log
 
 
@@ -19,6 +19,7 @@ router = APIRouter()
 _mouse_remainders_lock = threading.Lock()
 _mouse_remainders = {}
 _IS_WINDOWS = os.name == "nt"
+_IS_WAYLAND = (os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
 async def _cursor_stream(websocket: WebSocket):
@@ -26,8 +27,13 @@ async def _cursor_stream(websocket: WebSocket):
     last_pos = None
     while True:
         try:
-            x, y = pyautogui.position()
-            w, h = pyautogui.size()
+            pos_xy = INPUT_BACKEND.position()
+            wh = INPUT_BACKEND.screen_size()
+            if not pos_xy or not wh:
+                await asyncio.sleep(min_dt)
+                continue
+            x, y = pos_xy
+            w, h = wh
             pos = (int(x), int(y), int(w), int(h))
             if pos != last_pos:
                 await websocket.send_json({"type": "cursor", "x": pos[0], "y": pos[1], "w": pos[2], "h": pos[3]})
@@ -50,7 +56,27 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
     await websocket.accept()
     device_manager.register_socket(token, websocket)
     log.info(f"WS connected: {token}")
-    cursor_task: Optional[asyncio.Task] = asyncio.create_task(_cursor_stream(websocket)) if config.CURSOR_STREAM else None
+    if (not INPUT_BACKEND.can_pointer or not INPUT_BACKEND.can_keyboard) and (
+        get_perm(token, "perm_mouse") or get_perm(token, "perm_keyboard")
+    ):
+        try:
+            await websocket.send_json(
+                {"type": "warning", "code": "wayland_input_limited" if _IS_WAYLAND else "input_backend_limited"}
+            )
+        except Exception:
+            pass
+    if not INPUT_BACKEND.can_pointer and not INPUT_BACKEND.can_keyboard:
+        try:
+            await websocket.send_json({"type": "error", "code": "input_backend_unavailable"})
+        except Exception:
+            pass
+        await websocket.close(code=1011)
+        return
+    cursor_task: Optional[asyncio.Task] = (
+        asyncio.create_task(_cursor_stream(websocket))
+        if config.CURSOR_STREAM and INPUT_BACKEND.can_position and INPUT_BACKEND.can_screen_size
+        else None
+    )
     try:
         while True:
             data = await websocket.receive_json()
@@ -74,37 +100,37 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                     _mouse_remainders[token] = (dx - mx, dy - my)
 
                 if mx or my:
-                    pyautogui.moveRel(mx, my, _pause=False)
+                    INPUT_BACKEND.move_rel(mx, my)
 
             elif t == "click":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.click(_pause=False)
+                INPUT_BACKEND.click("left")
 
             elif t == "rclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.click(button="right", _pause=False)
+                INPUT_BACKEND.click("right")
 
             elif t == "dclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.doubleClick(_pause=False)
+                INPUT_BACKEND.click("left", double=True)
 
             elif t == "scroll":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.scroll(int(data.get("dy", 0)), _pause=False)
+                INPUT_BACKEND.scroll(int(data.get("dy", 0)))
 
             elif t == "drag_s":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.mouseDown(_pause=False)
+                INPUT_BACKEND.mouse_down("left")
 
             elif t == "drag_e":
                 if not get_perm(token, "perm_mouse"):
                     continue
-                pyautogui.mouseUp(_pause=False)
+                INPUT_BACKEND.mouse_up("left")
 
             elif t == "text":
                 if not get_perm(token, "perm_keyboard"):
@@ -121,9 +147,10 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                             pass
                     else:
                         try:
-                            pyautogui.write(text, interval=0, _pause=False)
+                            INPUT_BACKEND.write_text(text)
                         except Exception:
-                            pass
+                            if config.DEBUG:
+                                log.exception("Keyboard text injection failed")
 
             elif t == "key":
                 if not get_perm(token, "perm_keyboard"):
@@ -148,9 +175,10 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                         py_key = {"enter": "enter", "backspace": "backspace", "space": "space"}.get(val)
                     if py_key:
                         try:
-                            pyautogui.press(py_key, _pause=False)
+                            INPUT_BACKEND.press(py_key)
                         except Exception:
-                            pass
+                            if config.DEBUG:
+                                log.exception("Keyboard press failed")
 
             elif t == "hotkey":
                 if not get_perm(token, "perm_keyboard"):
@@ -158,7 +186,7 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                 keys = data.get("keys") or []
                 if isinstance(keys, list) and keys:
                     keys = [str(k).lower() for k in keys]
-                    pyautogui.hotkey(*keys, _pause=False)
+                    INPUT_BACKEND.hotkey(*keys)
 
             elif t == "media":
                 if not get_perm(token, "perm_keyboard"):
@@ -175,22 +203,22 @@ async def websocket_mouse(websocket: WebSocket, token: str = Query(...)):
                 }
                 key = media_map.get(act)
                 if key:
-                    pyautogui.press(key, _pause=False)
+                    INPUT_BACKEND.press(key)
 
             elif t == "shortcut":
                 if not get_perm(token, "perm_keyboard"):
                     continue
                 act = str(data.get("action", "")).lower()
                 if act == "copy":
-                    pyautogui.hotkey("ctrl", "c", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "c")
                 elif act == "paste":
-                    pyautogui.hotkey("ctrl", "v", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "v")
                 elif act == "cut":
-                    pyautogui.hotkey("ctrl", "x", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "x")
                 elif act == "undo":
-                    pyautogui.hotkey("ctrl", "z", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "z")
                 elif act == "redo":
-                    pyautogui.hotkey("ctrl", "y", _pause=False)
+                    INPUT_BACKEND.hotkey("ctrl", "y")
 
     except WebSocketDisconnect:
         pass

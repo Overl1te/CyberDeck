@@ -50,7 +50,8 @@ LOG_FILE = os.path.join(BASE_DIR, "cyberdeck.log")
 if not os.path.exists(FILES_DIR):
     os.makedirs(FILES_DIR, exist_ok=True)
 
-PAIRING_CODE = str(uuid.uuid4().int)[:4]
+_PAIRING_CODE_ENV = str(os.environ.get("CYBERDECK_PAIRING_CODE", "") or "").strip()
+PAIRING_CODE = (_PAIRING_CODE_ENV[:4] if _PAIRING_CODE_ENV else str(uuid.uuid4().int)[:4])
 PAIRING_EXPIRES_AT = (time.time() + PAIRING_TTL_S) if PAIRING_TTL_S > 0 else None
 SERVER_ID = str(uuid.uuid4())[:8]
 if os.name == "nt":
@@ -63,7 +64,7 @@ def reload_from_env() -> None:
     global PORT, PORT_AUTO, DEBUG, CONSOLE_LOG, LOG_ENABLED
     global SESSION_TTL_S, SESSION_IDLE_TTL_S, MAX_SESSIONS
     global PIN_WINDOW_S, PIN_MAX_FAILS, PIN_BLOCK_S
-    global PAIRING_TTL_S, PAIRING_EXPIRES_AT
+    global PAIRING_TTL_S, PAIRING_EXPIRES_AT, PAIRING_CODE
     global MDNS_ENABLED, STREAM_MONITOR
     global TLS_CERT, TLS_KEY, TLS_ENABLED, SCHEME
 
@@ -92,3 +93,7 @@ def reload_from_env() -> None:
 
     PAIRING_TTL_S = int(os.environ.get("CYBERDECK_PAIRING_TTL_S", str(PAIRING_TTL_S)))
     PAIRING_EXPIRES_AT = (time.time() + PAIRING_TTL_S) if PAIRING_TTL_S > 0 else None
+
+    p = str(os.environ.get("CYBERDECK_PAIRING_CODE", "") or "").strip()
+    if p:
+        PAIRING_CODE = p[:4]

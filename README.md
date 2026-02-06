@@ -38,7 +38,11 @@
 - Для GUI-лаунчера обычно нужен пакет `tk`/`python3-tk`.
 - Трей/автостарт зависят от окружения рабочего стола (поддержка может отличаться).
 - Команды питания (`shutdown/reboot/suspend/hibernate`) выполняются через `systemctl` и могут требовать прав/Polkit.
+- Ввод на Linux выбирается автоматически: `X11 -> pynput`, `Wayland -> evdev/uinput` (если разрешено в системе), Windows по-прежнему использует `pyautogui`.
 - MJPEG-стрим `/video_feed` использует `mss` (X11). В Wayland-сессии захват экрана может не работать — в `/api/stream_stats` будет `disabled_reason=wayland_session` или `no_display`.
+- Для Wayland можно использовать `/video_h264` или `/video_h265` при установленном `ffmpeg` (захват идёт через PipeWire; при необходимости укажи `CYBERDECK_PIPEWIRE_NODE`).
+- На Wayland для ввода через `evdev` нужен доступ к `/dev/uinput` (иначе управление мышью/клавиатурой будет недоступно).
+- Для отладки можно зафиксировать PIN: `CYBERDECK_PAIRING_CODE=3071` (иначе PIN генерируется заново при каждом запуске).
 
 ### Из исходников
 

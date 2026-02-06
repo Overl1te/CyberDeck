@@ -323,7 +323,8 @@ class App(ctk.CTk):
 
         self.after(50, self._process_ui_queue)
         self._schedule_sync(0)
-        threading.Thread(target=self.setup_tray, daemon=True).start()
+        if self.settings.get("start_in_tray") or self.settings.get("close_to_tray"):
+            threading.Thread(target=self.setup_tray, daemon=True).start()
 
         if self.start_in_tray and (not self.show_on_start):
             self.withdraw()
@@ -1737,6 +1738,15 @@ class App(ctk.CTk):
 
     def setup_tray(self):
         try:
+            if sys.platform.startswith("linux"):
+                xdg_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+                if xdg_type == "wayland" or (os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY")):
+                    self.append_log("[launcher] трей отключён: Wayland-сессия\n")
+                    return
+        except Exception:
+            pass
+
+        try:
             image = Image.open(self.icon_path_png)
         except Exception:
             image = Image.new("RGB", (64, 64), color="green")
@@ -1749,7 +1759,16 @@ class App(ctk.CTk):
             pystray.MenuItem("Выход", self.quit_app),
         )
         self.tray = pystray.Icon("CyberDeck", image, "CyberDeck", menu)
-        self.tray.run()
+        try:
+            self.tray.run()
+        except Exception as e:
+            self.append_log(f"[launcher] трей недоступен: {e}\n")
+            try:
+                if hasattr(self, "tray") and self.tray:
+                    self.tray.stop()
+            except Exception:
+                pass
+            self.tray = None
 
     def tray_restart_server(self, icon=None, item=None):
         self.ui_call(self.restart_server)
