@@ -1,4 +1,5 @@
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -180,6 +181,26 @@ def _pipewire_source_candidates() -> list[str]:
     return uniq
 
 
+def _x11_input_args(monitor: int, fps: int) -> Optional[list]:
+    rect = _get_monitor_rect(monitor)
+    if not rect:
+        return None
+    left, top, width, height = rect
+    display = os.environ.get("DISPLAY") or ":0.0"
+    return [
+        "-f",
+        "x11grab",
+        "-draw_mouse",
+        "1",
+        "-framerate",
+        str(fps),
+        "-video_size",
+        f"{width}x{height}",
+        "-i",
+        f"{display}+{left},{top}",
+    ]
+
+
 def _build_ffmpeg_input_arg_sets(monitor: int, fps: int) -> list[list]:
     fps = max(5, int(fps))
     is_wayland = _is_wayland_session()
@@ -206,30 +227,21 @@ def _build_ffmpeg_input_arg_sets(monitor: int, fps: int) -> list[list]:
         ]]
 
     if is_wayland:
-        if not _ffmpeg_supports_pipewire():
-            return []
         out: list[list] = []
-        for src in _pipewire_source_candidates():
-            out.append(["-f", "pipewire", "-framerate", str(fps), "-i", src])
+        if _ffmpeg_supports_pipewire():
+            for src in _pipewire_source_candidates():
+                out.append(["-f", "pipewire", "-framerate", str(fps), "-i", src])
+        # In mixed Wayland sessions (XWayland available), x11grab can still work.
+        if os.environ.get("DISPLAY"):
+            x11_args = _x11_input_args(monitor, fps)
+            if x11_args:
+                out.append(x11_args)
         return out
 
-    rect = _get_monitor_rect(monitor)
-    if not rect:
+    x11_args = _x11_input_args(monitor, fps)
+    if not x11_args:
         return []
-    left, top, width, height = rect
-    display = os.environ.get("DISPLAY") or ":0.0"
-    return [[
-        "-f",
-        "x11grab",
-        "-draw_mouse",
-        "1",
-        "-framerate",
-        str(fps),
-        "-video_size",
-        f"{width}x{height}",
-        "-i",
-        f"{display}+{left},{top}",
-    ]]
+    return [x11_args]
 
 
 def _build_ffmpeg_input_args(monitor: int, fps: int) -> Optional[list]:
@@ -769,6 +781,7 @@ def _spawn_stream_process(
     settle_s: float,
     stderr_lines: int,
     exit_tag: str,
+    first_chunk_timeout: float = 2.5,
 ):
     _set_ffmpeg_diag(cmd, None)
     try:
@@ -796,6 +809,27 @@ def _spawn_stream_process(
 
     threading.Thread(target=_stderr_reader, daemon=True).start()
 
+    stdout_q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=16)
+
+    def _stdout_reader():
+        try:
+            if not proc.stdout:
+                return
+            for chunk in iter(lambda: proc.stdout.read(64 * 1024), b""):
+                if not chunk:
+                    break
+                try:
+                    stdout_q.put(chunk, timeout=1.0)
+                except Exception:
+                    pass
+        finally:
+            try:
+                stdout_q.put(None, timeout=0.2)
+            except Exception:
+                pass
+
+    threading.Thread(target=_stdout_reader, daemon=True).start()
+
     try:
         time.sleep(max(0.05, float(settle_s)))
         if proc.poll() is not None:
@@ -804,14 +838,41 @@ def _spawn_stream_process(
     except Exception:
         pass
 
+    first_chunk: Optional[bytes] = None
+    deadline = time.time() + max(0.3, float(first_chunk_timeout))
+    while time.time() < deadline and first_chunk is None:
+        if proc.poll() is not None:
+            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"{exit_tag}:{proc.returncode}")
+            return None
+        try:
+            item = stdout_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if item is None:
+            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"{exit_tag}:eof_before_output")
+            return None
+        first_chunk = item
+
+    if first_chunk is None:
+        _set_ffmpeg_diag(cmd, f"{exit_tag}:no_output_timeout")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return None
+
     def _gen():
         try:
-            if not proc.stdout:
-                return
-            for chunk in iter(lambda: proc.stdout.read(64 * 1024), b""):
-                if not chunk:
+            yield first_chunk
+            while True:
+                item = stdout_q.get()
+                if item is None:
                     break
-                yield chunk
+                yield item
         finally:
             try:
                 proc.terminate()
@@ -939,6 +1000,7 @@ def _ffmpeg_mjpeg_stream(monitor: int, fps: int, quality: int, width: int):
             settle_s=0.2,
             stderr_lines=120,
             exit_tag="ffmpeg_exited",
+            first_chunk_timeout=2.5,
         )
         if stream is not None:
             return stream
@@ -977,6 +1039,7 @@ def _ffmpeg_stream(
             settle_s=0.15,
             stderr_lines=80,
             exit_tag="ffmpeg_exited",
+            first_chunk_timeout=2.5,
         )
         if stream is not None:
             return stream
@@ -1006,66 +1069,13 @@ def _gst_mjpeg_stream(fps: int, quality: int, width: int):
         cmd += ["!", "videoscale", "!", f"video/x-raw,width={w}"]
     cmd += ["!", "jpegenc", f"quality={q}", "!", "multipartmux", "boundary=frame", "!", "fdsink", "fd=1"]
 
-    _set_ffmpeg_diag(cmd, None)
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, bufsize=0)
-    except Exception as e:
-        _set_ffmpeg_diag(cmd, f"{type(e).__name__}: {e}")
-        return None
-
-    def _stderr_reader():
-        try:
-            if not proc.stderr:
-                return
-            last = None
-            for _ in range(120):
-                line = proc.stderr.readline()
-                if not line:
-                    break
-                txt = line.decode("utf-8", errors="replace").strip()
-                if txt:
-                    last = txt
-            if last:
-                _set_ffmpeg_diag(cmd, last)
-        except Exception:
-            pass
-
-    threading.Thread(target=_stderr_reader, daemon=True).start()
-
-    try:
-        time.sleep(0.2)
-        if proc.poll() is not None:
-            _set_ffmpeg_diag(cmd, _ffmpeg_last_error or f"gstreamer_exited:{proc.returncode}")
-            return None
-    except Exception:
-        pass
-
-    def _gen():
-        try:
-            if not proc.stdout:
-                return
-            for chunk in iter(lambda: proc.stdout.read(64 * 1024), b""):
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-    return StreamingResponse(
-        _gen(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+    return _spawn_stream_process(
+        cmd,
+        "multipart/x-mixed-replace; boundary=frame",
+        settle_s=0.2,
+        stderr_lines=120,
+        exit_tag="gstreamer_exited",
+        first_chunk_timeout=2.5,
     )
 
 
