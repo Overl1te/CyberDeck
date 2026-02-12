@@ -1,7 +1,9 @@
 import os
 import queue
+import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from io import BytesIO
@@ -36,6 +38,22 @@ _pipewire_nodes_lock = threading.Lock()
 _pipewire_nodes_cached: Optional[list[str]] = None
 _pipewire_nodes_cached_ts: float = 0.0
 
+_screenshot_tool_lock = threading.Lock()
+_screenshot_tool_cached: Optional[str] = None
+
+_MJPEG_BACKENDS = ("native", "ffmpeg", "gstreamer", "screenshot")
+_MJPEG_BACKEND_ALIASES = {
+    "auto": "auto",
+    "native": "native",
+    "mss": "native",
+    "ffmpeg": "ffmpeg",
+    "gst": "gstreamer",
+    "gstreamer": "gstreamer",
+    "grim": "screenshot",
+    "screenshot": "screenshot",
+    "tool": "screenshot",
+}
+
 
 def _set_ffmpeg_diag(cmd: Optional[list], err: Optional[str]) -> None:
     global _ffmpeg_last_cmd, _ffmpeg_last_error, _ffmpeg_last_error_ts
@@ -54,6 +72,9 @@ def _get_ffmpeg_diag() -> Dict[str, Any]:
             "ffmpeg_libx265": bool(_ffmpeg_supports_encoder("libx265")),
             "gst_available": bool(_gst_available()),
             "gst_pipewire": bool(_gst_supports_pipewire()),
+            "grim_available": bool(_grim_available()),
+            "screenshot_tool_available": bool(_screenshot_tool_available()),
+            "screenshot_tool_selected": _selected_screenshot_tool(),
             "ffmpeg_last_cmd": _ffmpeg_last_cmd,
             "ffmpeg_last_error": _ffmpeg_last_error,
             "ffmpeg_last_error_ts": float(_ffmpeg_last_error_ts) if _ffmpeg_last_error_ts else None,
@@ -120,6 +141,48 @@ def _ffmpeg_supports_encoder(name: str) -> bool:
 
 def _gst_available() -> bool:
     return bool(shutil.which("gst-launch-1.0"))
+
+
+def _grim_available() -> bool:
+    return bool(shutil.which("grim"))
+
+
+def _screenshot_tool_candidates() -> list[str]:
+    out: list[str] = []
+    forced = str(os.environ.get("CYBERDECK_SCREENSHOT_TOOL", "") or "").strip()
+    if forced:
+        out.append(forced)
+    # Order: GNOME shell DBus, KDE KWin DBus, then CLI tools.
+    if shutil.which("gdbus"):
+        out.append("gdbus_gnome_shell")
+    if shutil.which("qdbus") or shutil.which("qdbus6"):
+        out.append("qdbus_kwin")
+    for name in ("gnome-screenshot", "spectacle", "grim"):
+        if shutil.which(name):
+            out.append(name)
+    uniq: list[str] = []
+    for x in out:
+        sx = str(x or "").strip()
+        if sx and sx not in uniq:
+            uniq.append(sx)
+    return uniq
+
+
+def _selected_screenshot_tool() -> Optional[str]:
+    with _screenshot_tool_lock:
+        return _screenshot_tool_cached
+
+
+def _mark_screenshot_tool(name: Optional[str]) -> None:
+    with _screenshot_tool_lock:
+        global _screenshot_tool_cached
+        _screenshot_tool_cached = str(name or "").strip() or None
+
+
+def _screenshot_tool_available() -> bool:
+    if _selected_screenshot_tool():
+        return True
+    return bool(_screenshot_tool_candidates())
 
 
 def _gst_supports_pipewire() -> bool:
@@ -643,6 +706,7 @@ def video_feed(
     cursor: int = 1,
     low_latency: int = 0,
     monitor: int = 1,
+    backend: Optional[str] = None,
 ):
     require_perm(token, "perm_stream")
 
@@ -656,38 +720,35 @@ def video_feed(
         eff_q = min(eff_q, 35)
         eff_fps = min(eff_fps, 60)
 
-    disabled = video_streamer.disabled_reason()
-    native_ok = (disabled is None) and video_streamer.is_native_healthy()
-    if not native_ok:
-        # Wayland or broken mss path: use the most reliable backend first.
-        if _prefer_gst_over_ffmpeg_mjpeg():
-            gst_stream = _gst_mjpeg_stream(eff_fps, eff_q, eff_w)
-            if gst_stream is not None:
-                return gst_stream
-            ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q, eff_w)
-            if ffmpeg_stream is not None:
-                return ffmpeg_stream
-        else:
-            ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q, eff_w)
-            if ffmpeg_stream is not None:
-                return ffmpeg_stream
-            gst_stream = _gst_mjpeg_stream(eff_fps, eff_q, eff_w)
-            if gst_stream is not None:
-                return gst_stream
-        from fastapi import HTTPException
-        reason = disabled or "native_capture_unhealthy"
-        detail = _get_ffmpeg_diag().get("ffmpeg_last_error") or f"stream_unavailable:{reason}"
-        raise HTTPException(501, detail)
+    requested_backend = _normalize_mjpeg_backend(backend)
+    status = _mjpeg_backend_status(eff_monitor, eff_fps)
+    order = _mjpeg_backend_order(requested_backend, status)
+    if not order:
+        order = []
+        if requested_backend != "auto":
+            order.append(requested_backend)
+        for x in _MJPEG_BACKENDS:
+            if x not in order:
+                order.append(x)
 
-    return StreamingResponse(
-        generate_video_stream(eff_w, eff_q, eff_fps, bool(int(cursor)), eff_monitor),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    for name in order:
+        stream = _mjpeg_stream_for_backend(
+            name,
+            monitor=eff_monitor,
+            fps=eff_fps,
+            quality=eff_q,
+            width=eff_w,
+            cursor=cursor,
+        )
+        if stream is not None:
+            return stream
+
+    from fastapi import HTTPException
+
+    diag = _get_ffmpeg_diag()
+    reason = video_streamer.disabled_reason() or "mjpeg_backends_failed"
+    detail = diag.get("ffmpeg_last_error") or f"stream_unavailable:{reason}"
+    raise HTTPException(501, detail)
 
 
 @router.get("/api/stream_stats")
@@ -696,6 +757,11 @@ def stream_stats(token: str = TokenDep):
     out = video_streamer.get_stats()
     try:
         out.update(_get_ffmpeg_diag())
+        stats_fps = int(out.get("base_fps") or 30)
+        stats_monitor = int(out.get("desired_monitor") or 1)
+        mjpeg_status = _mjpeg_backend_status(stats_monitor, stats_fps)
+        out["mjpeg_backends"] = mjpeg_status
+        out["mjpeg_order_auto"] = _mjpeg_backend_order("auto", mjpeg_status)
         out["input_backend"] = getattr(INPUT_BACKEND, "name", "unknown")
         out["input_can_pointer"] = bool(getattr(INPUT_BACKEND, "can_pointer", False))
         out["input_can_keyboard"] = bool(getattr(INPUT_BACKEND, "can_keyboard", False))
@@ -703,6 +769,28 @@ def stream_stats(token: str = TokenDep):
     except Exception:
         pass
     return out
+
+
+@router.get("/api/stream_backends")
+def stream_backends(
+    token: str = TokenDep,
+    monitor: int = 1,
+    fps: int = 30,
+    backend: Optional[str] = None,
+):
+    require_perm(token, "perm_stream")
+    eff_monitor = int(monitor)
+    eff_fps = max(5, int(fps))
+    selected = _normalize_mjpeg_backend(backend)
+    status = _mjpeg_backend_status(eff_monitor, eff_fps)
+    order = _mjpeg_backend_order(selected, status)
+    return {
+        "selected": selected,
+        "available": status,
+        "order": order,
+        "supported_values": ["auto", *_MJPEG_BACKENDS],
+        "diag": _get_ffmpeg_diag(),
+    }
 
 
 @router.get("/api/stream_offer")
@@ -717,6 +805,7 @@ def stream_offer(
     gop: int = 60,
     preset: str = "ultrafast",
     low_latency: int = 1,
+    backend: Optional[str] = None,
 ):
     require_perm(token, "perm_stream")
 
@@ -733,10 +822,9 @@ def stream_offer(
     ffmpeg_codec_capture_ok = can_capture and _ffmpeg_wayland_capture_reliable()
     h264_ok = ffmpeg_codec_capture_ok and _codec_encoder_available("h264")
     h265_ok = ffmpeg_codec_capture_ok and _codec_encoder_available("h265")
-    mjpeg_native = video_streamer.disabled_reason() is None
-    mjpeg_ffmpeg = _ffmpeg_available() and can_capture
-    mjpeg_gst = os.name != "nt" and _is_wayland_session() and _gst_available() and _gst_supports_pipewire()
-    mjpeg_ok = mjpeg_native or mjpeg_ffmpeg or mjpeg_gst
+    mjpeg_status = _mjpeg_backend_status(eff_monitor, eff_fps)
+    mjpeg_order = _mjpeg_backend_order(_normalize_mjpeg_backend(backend), mjpeg_status)
+    mjpeg_ok = any(mjpeg_status.values())
 
     base = str(request.base_url).rstrip("/")
 
@@ -769,26 +857,31 @@ def stream_offer(
         )
 
     if mjpeg_ok:
-        candidates.append(
-            {
-                "id": "mjpeg",
-                "codec": "mjpeg",
-                "container": "multipart",
-                "mime": "multipart/x-mixed-replace; boundary=frame",
-                "url": _url(
-                    "/video_feed",
-                    {
-                        "token": token,
-                        "monitor": eff_monitor,
-                        "fps": eff_fps,
-                        "max_w": eff_w,
-                        "quality": eff_q,
-                        "cursor": 1,
-                        "low_latency": 1 if eff_low else 0,
-                    },
-                ),
-            }
-        )
+        if not mjpeg_order:
+            mjpeg_order = [x for x in _MJPEG_BACKENDS if mjpeg_status.get(x, False)]
+        for i, mj_backend in enumerate(mjpeg_order):
+            candidates.append(
+                {
+                    "id": "mjpeg" if i == 0 else f"mjpeg_{mj_backend}",
+                    "codec": "mjpeg",
+                    "container": "multipart",
+                    "mime": "multipart/x-mixed-replace; boundary=frame",
+                    "backend": mj_backend,
+                    "url": _url(
+                        "/video_feed",
+                        {
+                            "token": token,
+                            "monitor": eff_monitor,
+                            "fps": eff_fps,
+                            "max_w": eff_w,
+                            "quality": eff_q,
+                            "cursor": 1,
+                            "low_latency": 1 if eff_low else 0,
+                            "backend": mj_backend,
+                        },
+                    ),
+                }
+            )
 
     if h265_ok:
         candidates.append(
@@ -820,9 +913,11 @@ def stream_offer(
             "capture_input": can_capture,
             "h264_encoder": _codec_encoder_available("h264"),
             "h265_encoder": _codec_encoder_available("h265"),
-            "mjpeg_native": mjpeg_native,
-            "mjpeg_ffmpeg": mjpeg_ffmpeg,
-            "mjpeg_gstreamer": mjpeg_gst,
+            "mjpeg_native": bool(mjpeg_status.get("native")),
+            "mjpeg_ffmpeg": bool(mjpeg_status.get("ffmpeg")),
+            "mjpeg_gstreamer": bool(mjpeg_status.get("gstreamer")),
+            "mjpeg_grim": bool(mjpeg_status.get("screenshot")),
+            "mjpeg_order": mjpeg_order,
         },
         "diag": _get_ffmpeg_diag(),
     }
@@ -890,6 +985,87 @@ def _codec_encoder_available(codec: str) -> bool:
 
 def _capture_input_available(monitor: int, fps: int) -> bool:
     return bool(_build_ffmpeg_input_arg_sets(monitor, fps))
+
+
+def _normalize_mjpeg_backend(value: Optional[str]) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "auto"
+    return _MJPEG_BACKEND_ALIASES.get(raw, "auto")
+
+
+def _mjpeg_backend_status(monitor: int, fps: int) -> Dict[str, bool]:
+    disabled = video_streamer.disabled_reason()
+    native_ok = (disabled is None) and video_streamer.is_native_healthy()
+    ffmpeg_ok = _ffmpeg_available() and bool(_build_ffmpeg_input_arg_sets(monitor, fps))
+    gstreamer_ok = os.name != "nt" and _is_wayland_session() and _gst_available() and _gst_supports_pipewire()
+    screenshot_ok = os.name != "nt" and _is_wayland_session() and (_grim_available() or _screenshot_tool_available())
+    return {
+        "native": bool(native_ok),
+        "ffmpeg": bool(ffmpeg_ok),
+        "gstreamer": bool(gstreamer_ok),
+        "screenshot": bool(screenshot_ok),
+    }
+
+
+def _mjpeg_backend_order(preferred: str, status: Dict[str, bool]) -> list[str]:
+    preferred = _normalize_mjpeg_backend(preferred)
+    env_order = str(os.environ.get("CYBERDECK_MJPEG_BACKEND_ORDER", "") or "").strip()
+    parsed_env: list[str] = []
+    if env_order:
+        for x in env_order.split(","):
+            name = _normalize_mjpeg_backend(x)
+            if name != "auto" and name in _MJPEG_BACKENDS and name not in parsed_env:
+                parsed_env.append(name)
+
+    if parsed_env:
+        base = parsed_env
+    elif _prefer_gst_over_ffmpeg_mjpeg():
+        base = ["gstreamer", "screenshot", "ffmpeg", "native"]
+    else:
+        base = ["native", "ffmpeg", "gstreamer", "screenshot"]
+
+    if preferred != "auto":
+        ordered = [preferred] + [x for x in base if x != preferred]
+    else:
+        ordered = list(base)
+
+    for x in _MJPEG_BACKENDS:
+        if x not in ordered:
+            ordered.append(x)
+
+    # Keep only currently available backends, preserve order.
+    available = [x for x in ordered if status.get(x, False)]
+    return available
+
+
+def _native_mjpeg_stream(w: int, q: int, fps: int, cursor: int, monitor: int):
+    return StreamingResponse(
+        generate_video_stream(w, q, fps, bool(int(cursor)), monitor),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_stream_headers(),
+    )
+
+
+def _mjpeg_stream_for_backend(
+    backend: str,
+    *,
+    monitor: int,
+    fps: int,
+    quality: int,
+    width: int,
+    cursor: int,
+):
+    name = _normalize_mjpeg_backend(backend)
+    if name == "native":
+        return _native_mjpeg_stream(width, quality, fps, cursor, monitor)
+    if name == "ffmpeg":
+        return _ffmpeg_mjpeg_stream(monitor, fps, quality, width)
+    if name == "gstreamer":
+        return _gst_mjpeg_stream(fps, quality, width)
+    if name == "screenshot":
+        return _grim_mjpeg_stream(fps, quality, width)
+    return None
 
 
 def _ffmpeg_wayland_capture_reliable() -> bool:
@@ -1208,6 +1384,193 @@ def _gst_mjpeg_stream(fps: int, quality: int, width: int):
         if stream is not None:
             return stream
     return None
+
+
+def _wayland_grim_frame(width: int, quality: int) -> Optional[bytes]:
+    grim = shutil.which("grim")
+    if not grim:
+        return None
+    try:
+        proc = subprocess.run(
+            [grim, "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3.0,
+            check=False,
+        )
+        raw = bytes(proc.stdout or b"")
+        if not raw:
+            return None
+        img = Image.open(BytesIO(raw)).convert("RGB")
+        w = max(0, int(width))
+        if w > 0 and img.width > w:
+            h = int(img.height * (w / img.width))
+            img = img.resize((w, max(1, h)), Image.Resampling.NEAREST)
+        q = max(10, min(95, int(quality)))
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=q, subsampling=2, progressive=False, optimize=False)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _wayland_screenshot_tool_frame(width: int, quality: int) -> Optional[bytes]:
+    tool_list: list[str] = []
+    cached = _selected_screenshot_tool()
+    if cached:
+        tool_list.append(cached)
+    for t in _screenshot_tool_candidates():
+        if t not in tool_list:
+            tool_list.append(t)
+    if not tool_list:
+        return None
+
+    fd, path = tempfile.mkstemp(prefix="cyberdeck-shot-", suffix=".png")
+    os.close(fd)
+    try:
+        for tool in tool_list:
+            cmd: list[str]
+            capture_path = path
+            if tool == "gdbus_gnome_shell":
+                gdbus = shutil.which("gdbus")
+                if not gdbus:
+                    continue
+                cmd = [
+                    gdbus,
+                    "call",
+                    "--session",
+                    "--dest",
+                    "org.gnome.Shell.Screenshot",
+                    "--object-path",
+                    "/org/gnome/Shell/Screenshot",
+                    "--method",
+                    "org.gnome.Shell.Screenshot.Screenshot",
+                    "false",
+                    "false",
+                    path,
+                ]
+            elif tool == "qdbus_kwin":
+                qdbus = shutil.which("qdbus") or shutil.which("qdbus6")
+                if not qdbus:
+                    continue
+                # KWin API names differ across versions/builds.
+                outputs: list[str] = []
+                tried_cmds = [
+                    [qdbus, "org.kde.KWin", "/Screenshot", "screenshotFullscreen"],
+                    [qdbus, "org.kde.KWin", "/Screenshot", "org.kde.KWin.ScreenShot2.screenshotFullscreen"],
+                ]
+                for qcmd in tried_cmds:
+                    try:
+                        proc = subprocess.run(
+                            qcmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                            timeout=3.0,
+                            check=False,
+                            text=True,
+                        )
+                        if int(proc.returncode) == 0:
+                            out = str(proc.stdout or "").strip()
+                            if out:
+                                outputs.append(out)
+                    except Exception:
+                        continue
+                found_path = ""
+                for out in outputs:
+                    m = re.search(r"(/[^'\"\\s]+\\.(?:png|jpg|jpeg))", out, flags=re.IGNORECASE)
+                    if m:
+                        found_path = m.group(1).strip()
+                        break
+                    if os.path.exists(out):
+                        found_path = out
+                        break
+                if not found_path:
+                    continue
+                capture_path = found_path
+                cmd = []
+            elif tool == "gnome-screenshot":
+                cmd = [tool, "-f", path]
+            elif tool == "spectacle":
+                cmd = [tool, "-b", "-n", "-o", path]
+            elif tool == "grim":
+                cmd = [tool, path]
+            else:
+                continue
+            try:
+                if cmd:
+                    proc = subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if int(proc.returncode) != 0:
+                        continue
+                if not os.path.exists(capture_path) or os.path.getsize(capture_path) <= 0:
+                    continue
+                img = Image.open(capture_path).convert("RGB")
+                w = max(0, int(width))
+                if w > 0 and img.width > w:
+                    h = int(img.height * (w / img.width))
+                    img = img.resize((w, max(1, h)), Image.Resampling.NEAREST)
+                q = max(10, min(95, int(quality)))
+                buf = BytesIO()
+                img.save(buf, format="JPEG", quality=q, subsampling=2, progressive=False, optimize=False)
+                _mark_screenshot_tool(tool)
+                if capture_path != path:
+                    try:
+                        if os.path.exists(capture_path):
+                            os.remove(capture_path)
+                    except Exception:
+                        pass
+                return buf.getvalue()
+            except Exception:
+                continue
+    finally:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+    return None
+
+
+def _grim_mjpeg_stream(fps: int, quality: int, width: int):
+    if os.name == "nt" or not _is_wayland_session():
+        return None
+    if not _grim_available() and not _screenshot_tool_available():
+        return None
+
+    boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+    min_dt = 1.0 / max(2, int(fps))
+    first = _wayland_grim_frame(width, quality)
+    if not first:
+        first = _wayland_screenshot_tool_frame(width, quality)
+    if not first:
+        _set_ffmpeg_diag(None, "screenshot_capture_no_output")
+        return None
+
+    def _gen():
+        yield boundary + first + b"\r\n"
+        last_fail_log = 0.0
+        while True:
+            t0 = time.perf_counter()
+            frame = _wayland_grim_frame(width, quality)
+            if not frame:
+                frame = _wayland_screenshot_tool_frame(width, quality)
+            if frame:
+                yield boundary + frame + b"\r\n"
+            else:
+                now = time.time()
+                if now - last_fail_log > 3.0:
+                    last_fail_log = now
+                    _set_ffmpeg_diag(None, "screenshot_capture_failed")
+            dt = time.perf_counter() - t0
+            if dt < min_dt:
+                time.sleep(min_dt - dt)
+
+    return StreamingResponse(_gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers=_stream_headers())
 
 
 @router.api_route("/video_h264", methods=["GET", "HEAD"])
