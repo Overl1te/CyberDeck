@@ -231,8 +231,9 @@ def _build_ffmpeg_input_arg_sets(monitor: int, fps: int) -> list[list]:
         if _ffmpeg_supports_pipewire():
             for src in _pipewire_source_candidates():
                 out.append(["-f", "pipewire", "-framerate", str(fps), "-i", src])
-        # In mixed Wayland sessions (XWayland available), x11grab can still work.
-        if os.environ.get("DISPLAY"):
+        # Optional escape hatch for mixed sessions where XWayland capture is desired.
+        allow_x11_fallback = os.environ.get("CYBERDECK_WAYLAND_ALLOW_X11_FALLBACK", "0") == "1"
+        if allow_x11_fallback and os.environ.get("DISPLAY"):
             x11_args = _x11_input_args(monitor, fps)
             if x11_args:
                 out.append(x11_args)
@@ -550,13 +551,21 @@ def video_feed(
     disabled = video_streamer.disabled_reason()
     native_ok = (disabled is None) and video_streamer.is_native_healthy()
     if not native_ok:
-        # Wayland or broken mss path: try ffmpeg/GStreamer fallback for MJPEG endpoint.
-        ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q, eff_w)
-        if ffmpeg_stream is not None:
-            return ffmpeg_stream
-        gst_stream = _gst_mjpeg_stream(eff_fps, eff_q, eff_w)
-        if gst_stream is not None:
-            return gst_stream
+        # Wayland or broken mss path: use the most reliable backend first.
+        if _prefer_gst_over_ffmpeg_mjpeg():
+            gst_stream = _gst_mjpeg_stream(eff_fps, eff_q, eff_w)
+            if gst_stream is not None:
+                return gst_stream
+            ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q, eff_w)
+            if ffmpeg_stream is not None:
+                return ffmpeg_stream
+        else:
+            ffmpeg_stream = _ffmpeg_mjpeg_stream(eff_monitor, eff_fps, eff_q, eff_w)
+            if ffmpeg_stream is not None:
+                return ffmpeg_stream
+            gst_stream = _gst_mjpeg_stream(eff_fps, eff_q, eff_w)
+            if gst_stream is not None:
+                return gst_stream
         from fastapi import HTTPException
         reason = disabled or "native_capture_unhealthy"
         detail = _get_ffmpeg_diag().get("ffmpeg_last_error") or f"stream_unavailable:{reason}"
@@ -613,8 +622,9 @@ def stream_offer(
     eff_low = bool(int(low_latency))
 
     can_capture = _capture_input_available(eff_monitor, eff_fps)
-    h264_ok = can_capture and _codec_encoder_available("h264")
-    h265_ok = can_capture and _codec_encoder_available("h265")
+    ffmpeg_codec_capture_ok = can_capture and _ffmpeg_wayland_capture_reliable()
+    h264_ok = ffmpeg_codec_capture_ok and _codec_encoder_available("h264")
+    h265_ok = ffmpeg_codec_capture_ok and _codec_encoder_available("h265")
     mjpeg_native = video_streamer.disabled_reason() is None
     mjpeg_ffmpeg = _ffmpeg_available() and can_capture
     mjpeg_gst = os.name != "nt" and _is_wayland_session() and _gst_available() and _gst_supports_pipewire()
@@ -772,6 +782,18 @@ def _codec_encoder_available(codec: str) -> bool:
 
 def _capture_input_available(monitor: int, fps: int) -> bool:
     return bool(_build_ffmpeg_input_arg_sets(monitor, fps))
+
+
+def _ffmpeg_wayland_capture_reliable() -> bool:
+    if os.name == "nt":
+        return True
+    if not _is_wayland_session():
+        return True
+    return _ffmpeg_supports_pipewire()
+
+
+def _prefer_gst_over_ffmpeg_mjpeg() -> bool:
+    return os.name != "nt" and _is_wayland_session() and not _ffmpeg_supports_pipewire() and _gst_supports_pipewire()
 
 
 def _spawn_stream_process(
