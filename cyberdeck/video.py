@@ -32,6 +32,10 @@ _ffmpeg_formats_cached: Optional[str] = None
 _ffmpeg_encoders_lock = threading.Lock()
 _ffmpeg_encoders_cached: Optional[str] = None
 
+_pipewire_nodes_lock = threading.Lock()
+_pipewire_nodes_cached: Optional[list[str]] = None
+_pipewire_nodes_cached_ts: float = 0.0
+
 
 def _set_ffmpeg_diag(cmd: Optional[list], err: Optional[str]) -> None:
     global _ffmpeg_last_cmd, _ffmpeg_last_error, _ffmpeg_last_error_ts
@@ -53,6 +57,7 @@ def _get_ffmpeg_diag() -> Dict[str, Any]:
             "ffmpeg_last_cmd": _ffmpeg_last_cmd,
             "ffmpeg_last_error": _ffmpeg_last_error,
             "ffmpeg_last_error_ts": float(_ffmpeg_last_error_ts) if _ffmpeg_last_error_ts else None,
+            "pipewire_sources": _pipewire_source_candidates()[:8],
         }
 
 
@@ -172,6 +177,10 @@ def _pipewire_source_candidates() -> list[str]:
         val = str(item or "").strip()
         if val:
             out.append(val)
+    for item in _discover_pipewire_nodes():
+        val = str(item or "").strip()
+        if val:
+            out.append(val)
     # Different ffmpeg builds expect different default aliases.
     out.extend(["default", "0", "pipewire:"])
     uniq: list[str] = []
@@ -179,6 +188,105 @@ def _pipewire_source_candidates() -> list[str]:
         if x not in uniq:
             uniq.append(x)
     return uniq
+
+
+def _discover_pipewire_nodes() -> list[str]:
+    global _pipewire_nodes_cached, _pipewire_nodes_cached_ts
+
+    now = time.time()
+    with _pipewire_nodes_lock:
+        if _pipewire_nodes_cached is not None and (now - _pipewire_nodes_cached_ts) < 5.0:
+            return list(_pipewire_nodes_cached)
+
+    pw_cli = shutil.which("pw-cli")
+    if not pw_cli:
+        with _pipewire_nodes_lock:
+            _pipewire_nodes_cached = []
+            _pipewire_nodes_cached_ts = now
+        return []
+
+    try:
+        proc = subprocess.run(
+            [pw_cli, "ls", "Node"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        txt = str(proc.stdout or "")
+    except Exception:
+        txt = ""
+
+    nodes: list[str] = []
+    current_id: Optional[str] = None
+    current_name = ""
+    current_desc = ""
+    current_media = ""
+
+    def _flush_current() -> None:
+        nonlocal current_id, current_name, current_desc, current_media
+        if not current_id:
+            return
+        meta = f"{current_name} {current_desc} {current_media}".lower()
+        if not meta.strip():
+            return
+        looks_video = "video" in meta
+        looks_screen = any(k in meta for k in ("screen", "monitor", "portal", "xdpw", "screencast", "desktop", "wayland"))
+        looks_camera = any(k in meta for k in ("camera", "webcam"))
+        if looks_video and looks_screen and not looks_camera:
+            nodes.append(current_id)
+
+    for raw in txt.splitlines():
+        line = raw.strip()
+        if line.startswith("id ") and "," in line:
+            _flush_current()
+            try:
+                current_id = line.split("id ", 1)[1].split(",", 1)[0].strip()
+            except Exception:
+                current_id = None
+            current_name = ""
+            current_desc = ""
+            current_media = ""
+            continue
+        if "node.name =" in line:
+            current_name = line.split("=", 1)[1].strip().strip('"')
+            continue
+        if "node.description =" in line:
+            current_desc = line.split("=", 1)[1].strip().strip('"')
+            continue
+        if "media.class =" in line:
+            current_media = line.split("=", 1)[1].strip().strip('"')
+            continue
+
+    _flush_current()
+
+    uniq: list[str] = []
+    for x in nodes:
+        sx = str(x).strip()
+        if sx and sx not in uniq:
+            uniq.append(sx)
+
+    with _pipewire_nodes_lock:
+        _pipewire_nodes_cached = uniq
+        _pipewire_nodes_cached_ts = now
+    return uniq
+
+
+def _gst_pipewire_source_candidates() -> list[str]:
+    out: list[str] = []
+    for src in _pipewire_source_candidates():
+        s = str(src or "").strip()
+        if not s:
+            continue
+        sl = s.lower()
+        if sl in ("default", "pipewire:"):
+            s = ""
+        if s not in out:
+            out.append(s)
+    if "" not in out:
+        out.append("")
+    return out
 
 
 def _x11_input_args(monitor: int, fps: int) -> Optional[list]:
@@ -1080,25 +1188,26 @@ def _gst_mjpeg_stream(fps: int, quality: int, width: int):
     fps = max(5, int(fps))
     q = max(10, min(95, int(quality)))
     w = max(0, int(width))
-    node = str(os.environ.get("CYBERDECK_PIPEWIRE_NODE", "") or "").strip()
+    for node in _gst_pipewire_source_candidates():
+        cmd = ["gst-launch-1.0", "-q", "pipewiresrc"]
+        if node:
+            cmd.append(f"path={node}")
+        cmd += ["do-timestamp=true", "!", "videorate", "!", f"video/x-raw,framerate={fps}/1", "!", "videoconvert"]
+        if w > 0:
+            cmd += ["!", "videoscale", "!", f"video/x-raw,width={w}"]
+        cmd += ["!", "jpegenc", f"quality={q}", "!", "multipartmux", "boundary=frame", "!", "fdsink", "fd=1"]
 
-    cmd = ["gst-launch-1.0", "-q", "pipewiresrc"]
-    # Allow explicit node override; otherwise let plugin choose default.
-    if node and node.lower() not in ("default", "pipewire:"):
-        cmd.append(f"path={node}")
-    cmd += ["do-timestamp=true", "!", "videorate", "!", f"video/x-raw,framerate={fps}/1", "!", "videoconvert"]
-    if w > 0:
-        cmd += ["!", "videoscale", "!", f"video/x-raw,width={w}"]
-    cmd += ["!", "jpegenc", f"quality={q}", "!", "multipartmux", "boundary=frame", "!", "fdsink", "fd=1"]
-
-    return _spawn_stream_process(
-        cmd,
-        "multipart/x-mixed-replace; boundary=frame",
-        settle_s=0.2,
-        stderr_lines=120,
-        exit_tag="gstreamer_exited",
-        first_chunk_timeout=2.5,
-    )
+        stream = _spawn_stream_process(
+            cmd,
+            "multipart/x-mixed-replace; boundary=frame",
+            settle_s=0.2,
+            stderr_lines=120,
+            exit_tag="gstreamer_exited",
+            first_chunk_timeout=2.5,
+        )
+        if stream is not None:
+            return stream
+    return None
 
 
 @router.api_route("/video_h264", methods=["GET", "HEAD"])
