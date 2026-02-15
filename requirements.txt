@@ -1,7 +1,5 @@
-﻿fastapi # Основной бек
-pystray # Трей
-pyinstaller
-nuitka
+﻿fastapi
+pystray
 customtkinter
 packaging
 python-multipart
@@ -9,14 +7,10 @@ aiofiles
 requests
 qrcode
 zeroconf
-
-# Веб сервер
-uvicorn
 uvicorn[standard]
-
-pillow # Для курсора
-mss # Захват экрана
-pyautogui # Взаимодействие с системой
-pynput # Linux/X11 ввод
-evdev # Linux/Wayland ввод (uinput)
-psutil # Взаимодействие с системой
+pillow
+mss
+pyautogui
+pynput
+evdev; platform_system == "Linux"
+psutil

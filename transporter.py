@@ -2,6 +2,7 @@ import argparse
 import http.server
 import os
 import socketserver
+import ssl
 import sys
 import time
 import urllib.parse
@@ -18,10 +19,12 @@ class OneFileHandler(http.server.BaseHTTPRequestHandler):
     server_instance = None
 
     def log_message(self, format, *args):
+        """Log message."""
         if not self.quiet:
             super().log_message(format, *args)
 
     def do_GET(self):
+        """Serve an HTTP GET request."""
         try:
             if not self.file_path or not os.path.exists(self.file_path):
                 self.send_error(404, "File not found")
@@ -56,34 +59,61 @@ class OneFileHandler(http.server.BaseHTTPRequestHandler):
 
             file_size = os.path.getsize(self.file_path)
             encoded_name = urllib.parse.quote(self.filename)
+            range_header = str(self.headers.get("Range") or "").strip()
+            start = 0
+            end = max(0, int(file_size) - 1)
+            status_code = 200
+            if range_header.lower().startswith("bytes="):
+                try:
+                    raw = range_header[6:].split(",", 1)[0].strip()
+                    left, right = raw.split("-", 1)
+                    if left:
+                        start = max(0, int(left))
+                    if right:
+                        end = int(right)
+                    if start >= file_size or end < start:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{file_size}")
+                        self.end_headers()
+                        return
+                    end = min(end, int(file_size) - 1)
+                    status_code = 206
+                except Exception:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return
+            send_len = max(0, end - start + 1)
 
-            self.send_response(200)
+            self.send_response(status_code)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(file_size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(send_len))
+            if status_code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
             self.end_headers()
 
             with open(self.file_path, "rb") as f:
-                while True:
-                    chunk = f.read(self.chunk_size)
+                f.seek(start)
+                left_to_send = send_len
+                while left_to_send > 0:
+                    chunk = f.read(min(self.chunk_size, left_to_send))
                     if not chunk:
                         break
                     try:
                         self.wfile.write(chunk)
+                        left_to_send -= len(chunk)
                         if self.sleep_s:
                             time.sleep(self.sleep_s)
                     except Exception:
                         break
         finally:
-            try:
-                if self.server_instance:
-                    self.server_instance.shutdown()
-                    self.server_instance.server_close()
-            except Exception:
-                pass
+            pass
 
 
 def main(argv: list[str]) -> int:
+    """Run the module entrypoint and start the main application flow."""
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("file_path")
     ap.add_argument("port", type=int)
@@ -93,6 +123,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--token", type=str, default="")
     ap.add_argument("--allow-ip", type=str, default="")
+    ap.add_argument("--tls", action="store_true")
+    ap.add_argument("--cert", type=str, default="")
+    ap.add_argument("--key", type=str, default="")
     args = ap.parse_args(argv)
 
     file_path = os.path.abspath(args.file_path)
@@ -116,9 +149,19 @@ def main(argv: list[str]) -> int:
     socketserver.TCPServer.allow_reuse_address = True
 
     with socketserver.TCPServer(("0.0.0.0", args.port), Handler) as httpd:
+        if bool(args.tls):
+            cert_path = os.path.abspath(str(args.cert or "").strip())
+            key_path = os.path.abspath(str(args.key or "").strip())
+            if not (cert_path and key_path and os.path.exists(cert_path) and os.path.exists(key_path)):
+                print("Transporter Error: TLS requested but cert/key not found")
+                return 2
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         Handler.server_instance = httpd
 
         def watchdog():
+            """Monitor transfer inactivity and stop the HTTP server on timeout."""
             time.sleep(max(5, args.timeout))
             try:
                 httpd.shutdown()
@@ -130,7 +173,8 @@ def main(argv: list[str]) -> int:
         threading.Thread(target=watchdog, daemon=True).start()
 
         if not Handler.quiet:
-            print(f"Serving {filename} on port {args.port} (chunk={Handler.chunk_size}, sleep={Handler.sleep_s})")
+            proto = "https" if bool(args.tls) else "http"
+            print(f"Serving {filename} via {proto} on port {args.port} (chunk={Handler.chunk_size}, sleep={Handler.sleep_s})")
         httpd.serve_forever()
 
     return 0

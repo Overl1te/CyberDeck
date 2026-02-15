@@ -7,6 +7,7 @@ from . import config
 
 
 def setup_logging() -> logging.Logger:
+    """Set up logging."""
     os.makedirs(config.BASE_DIR, exist_ok=True)
     logger = logging.getLogger("cyberdeck")
     logger.setLevel(logging.DEBUG if config.DEBUG else logging.INFO)
@@ -55,6 +56,7 @@ log = setup_logging()
 
 
 def reload_logging() -> logging.Logger:
+    """Reload logger level and handlers from current configuration."""
     logger = logging.getLogger("cyberdeck")
     try:
         logger.handlers.clear()

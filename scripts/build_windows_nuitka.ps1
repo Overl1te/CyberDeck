@@ -6,9 +6,70 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RepoRoot
+$IconIco = Join-Path $RepoRoot "icon.ico"
+
+function Stop-CyberDeckFromDist {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$DistPath
+  )
+
+  $distRoot = ([System.IO.Path]::GetFullPath($DistPath)).TrimEnd('\') + '\'
+  $killed = 0
+
+  try {
+    $procList = Get-CimInstance Win32_Process -Filter "Name='CyberDeck.exe'"
+    foreach ($proc in $procList) {
+      $exePath = [string]$proc.ExecutablePath
+      if (-not $exePath) {
+        continue
+      }
+      if ($exePath.StartsWith($distRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        $killed++
+      }
+    }
+  } catch {
+    # Fallback when CIM path resolution is unavailable.
+    Get-Process -Name "CyberDeck" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+
+  if ($killed -gt 0) {
+    Write-Host ("Stopped {0} running CyberDeck process(es) from dist." -f $killed)
+    Start-Sleep -Milliseconds 700
+  }
+}
+
+function Remove-PathWithRetries {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [int]$Retries = 6
+  )
+
+  for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+    if (-not (Test-Path $Path)) {
+      return $true
+    }
+
+    try {
+      Remove-Item -Recurse -Force $Path -ErrorAction Stop
+    } catch {
+      if ($attempt -ge $Retries) {
+        return $false
+      }
+      Start-Sleep -Milliseconds (350 * $attempt)
+    }
+  }
+
+  return (-not (Test-Path $Path))
+}
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
   throw "python not found in PATH"
+}
+if (-not (Test-Path $IconIco)) {
+  throw "icon.ico not found: $IconIco"
 }
 
 python -m venv .venv
@@ -23,6 +84,15 @@ if (-not (Test-Path $Activate)) {
 python -m pip install -U pip
 pip install -r requirements.txt
 
+$distDir = Join-Path $RepoRoot "dist"
+if (Test-Path $distDir) {
+  Stop-CyberDeckFromDist -DistPath $distDir
+  $cleanOk = Remove-PathWithRetries -Path $distDir
+  if (-not $cleanOk) {
+    throw "Failed to clean '$distDir'. Close processes using that folder and retry."
+  }
+}
+
 $nuitkaArgs = @(
   "launcher.py"
   "--standalone"
@@ -30,10 +100,14 @@ $nuitkaArgs = @(
   "--include-data-dir=static=static"
   "--include-data-file=icon.png=icon.png"
   "--include-data-file=icon.ico=icon.ico"
+  "--include-data-file=logo.gif=logo.gif"
+  "--include-data-file=icon-qr-code.png=icon-qr-code.png"
+  "--windows-icon-from-ico=$IconIco"
   "--include-package=customtkinter"
   "--include-package-data=customtkinter"
-  "--windows-disable-console"
-  "--output-dir=dist-nuitka-win"
+  "--windows-console-mode=disable"
+  "--windows-uac-admin"
+  "--output-dir=dist"
   "--output-filename=CyberDeck.exe"
 )
 
@@ -45,5 +119,15 @@ if ($DryRun) {
 
 python -m nuitka @nuitkaArgs
 
+$builtCandidates = @(
+  (Join-Path $RepoRoot "dist\\launcher.dist\\CyberDeck.exe"),
+  (Join-Path $RepoRoot "dist\\CyberDeck.exe")
+)
+$builtPath = $builtCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
 Write-Host ""
-Write-Host ("Built: {0}" -f (Join-Path $RepoRoot "dist-nuitka-win\CyberDeck.dist\CyberDeck.exe"))
+if ($builtPath) {
+  Write-Host ("Built: {0}" -f $builtPath)
+} else {
+  Write-Host "Build finished, but output executable path was not detected."
+}

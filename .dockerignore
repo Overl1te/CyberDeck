@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+.coverage.*
+build
+dist
+dist-nuitka
+dist-nuitka-win
+Output
+cyberdeck.log
+cyberdeck.log.*
+CyberDeck_Files

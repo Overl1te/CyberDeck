@@ -8,6 +8,8 @@ from .net import get_local_ip
 
 
 def start_mdns() -> Optional[Tuple[object, object]]:
+    """Manage lifecycle transition to start mdns."""
+    # Lifecycle transitions are centralized here to prevent partial-state bugs.
     try:
         from zeroconf import ServiceInfo, Zeroconf
     except Exception:
@@ -42,6 +44,7 @@ def start_mdns() -> Optional[Tuple[object, object]]:
         log.info(f"mDNS broadcast started: {name} -> {ip}:{config.PORT}")
 
         def _cleanup():
+            """Unregister mDNS service and close Zeroconf resources."""
             try:
                 zc.unregister_service(info)
                 zc.close()
@@ -53,4 +56,3 @@ def start_mdns() -> Optional[Tuple[object, object]]:
     except Exception:
         log.exception("mDNS start failed")
         return None
-

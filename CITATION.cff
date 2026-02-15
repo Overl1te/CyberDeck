@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: "CyberDeck"
+message: "If you use CyberDeck in research or publications, please cite this software."
+type: software
+authors:
+  - name: "Overl1te"
+repository-code: "https://github.com/Overl1te/CyberDeck"
+url: "https://github.com/Overl1te/CyberDeck"
+license: "GPL-3.0"
+version: "1.3.0"
+keywords:
+  - remote-control
+  - fastapi
+  - websocket
+  - desktop-launcher
+  - python
+

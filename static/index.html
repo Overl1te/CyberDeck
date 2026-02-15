@@ -42,6 +42,12 @@
         </div>
 
         <a href="https://github.com/Overl1te/CyberDeck-Mobile/releases" class="btn">Скачать приложение</a>
+        <a
+            href="https://pay.cloudtips.ru/p/70ab5e1b"
+            class="btn secondary"
+            target="_blank"
+            rel="noopener noreferrer"
+        >Поддержать проект</a>
     </div>
 
     <script>
@@ -53,6 +59,7 @@
             const scheme = (params.get("scheme") || "").trim();
             const serverId = (params.get("server_id") || "").trim();
             const hostname = (params.get("hostname") || "").trim();
+            const qrToken = (params.get("qr_token") || params.get("nonce") || "").trim();
             const type = (params.get("type") || "cyberdeck_qr_v1").trim();
 
             const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
@@ -73,6 +80,7 @@
                 dl.set("port", port);
                 dl.set("code", code);
                 if (scheme) dl.set("scheme", scheme);
+                if (qrToken) dl.set("qr_token", qrToken);
 
                 const deepLink = "cyberdeck://pair?" + dl.toString();
 

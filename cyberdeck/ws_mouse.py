@@ -1,8 +1,11 @@
 import asyncio
 import ctypes
 import os
+import shutil
+import subprocess
 import sys
 import threading
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -12,6 +15,8 @@ from .auth import get_perm
 from .context import device_manager
 from .input_backend import INPUT_BACKEND
 from .logging_config import log
+from .protocol import protocol_payload
+from .ws_protocol import build_server_hello, extract_text_payload, is_text_event_type
 
 
 router = APIRouter()
@@ -20,11 +25,185 @@ _mouse_remainders_lock = threading.Lock()
 _mouse_remainders = {}
 _virtual_cursor_lock = threading.Lock()
 _virtual_cursor = {}
+_ws_runtime_lock = threading.Lock()
+_ws_runtime = {}
 _IS_WINDOWS = os.name == "nt"
 _IS_WAYLAND = (os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
+_MOUSE_GAIN_DEFAULT = "1.35" if _IS_WAYLAND else "1.0"
+try:
+    _MOUSE_GAIN = float(os.environ.get("CYBERDECK_MOUSE_GAIN", _MOUSE_GAIN_DEFAULT) or _MOUSE_GAIN_DEFAULT)
+except Exception:
+    _MOUSE_GAIN = float(_MOUSE_GAIN_DEFAULT)
+_MOUSE_GAIN = max(0.1, min(8.0, _MOUSE_GAIN))
+try:
+    _MOUSE_MAX_DELTA = int(os.environ.get("CYBERDECK_MOUSE_MAX_DELTA", "160") or "160")
+except Exception:
+    _MOUSE_MAX_DELTA = 160
+_MOUSE_MAX_DELTA = max(8, _MOUSE_MAX_DELTA)
+try:
+    _MOUSE_DEADZONE = float(os.environ.get("CYBERDECK_MOUSE_DEADZONE", "0.2" if _IS_WAYLAND else "0.0") or "0.0")
+except Exception:
+    _MOUSE_DEADZONE = 0.0
+_MOUSE_DEADZONE = max(0.0, min(2.0, _MOUSE_DEADZONE))
+try:
+    _MOUSE_LAG_DAMP_START_S = float(
+        os.environ.get("CYBERDECK_MOUSE_LAG_DAMP_START_S", "0.085" if _IS_WAYLAND else "0.18") or "0.085"
+    )
+except Exception:
+    _MOUSE_LAG_DAMP_START_S = 0.085 if _IS_WAYLAND else 0.18
+_MOUSE_LAG_DAMP_START_S = max(0.01, min(1.0, _MOUSE_LAG_DAMP_START_S))
+try:
+    _MOUSE_LAG_DAMP_MIN = float(os.environ.get("CYBERDECK_MOUSE_LAG_DAMP_MIN", "0.35") or "0.35")
+except Exception:
+    _MOUSE_LAG_DAMP_MIN = 0.35
+_MOUSE_LAG_DAMP_MIN = max(0.1, min(1.0, _MOUSE_LAG_DAMP_MIN))
+_mouse_last_move_ts = {}
+
+
+def _ws_log_enabled() -> bool:
+    """Return whether websocket-level verbose logging is enabled."""
+    return bool(getattr(config, "VERBOSE_WS_LOG", True) or getattr(config, "DEBUG", False))
+
+
+def _ws_diag_init(token: str) -> None:
+    """Initialize per-session websocket diagnostics state."""
+    now = time.time()
+    with _ws_runtime_lock:
+        prev = _ws_runtime.get(token) or {}
+        _ws_runtime[token] = {
+            "connected": True,
+            "connected_ts": now,
+            "disconnected_ts": None,
+            "last_rx_ts": now,
+            "last_tx_ts": now,
+            "messages_rx": 0,
+            "messages_tx": 0,
+            "connect_count": int(prev.get("connect_count", 0)) + 1,
+            "disconnect_count": int(prev.get("disconnect_count", 0)),
+            "heartbeat_required": bool(prev.get("heartbeat_required", False)),
+            "heartbeat_interval_s": int(getattr(config, "WS_HEARTBEAT_INTERVAL_S", 15) or 15),
+            "heartbeat_timeout_s": int(getattr(config, "WS_HEARTBEAT_TIMEOUT_S", 45) or 45),
+            "client_protocol_version": prev.get("client_protocol_version"),
+            "last_rx_type": None,
+            "last_tx_type": None,
+        }
+
+
+def _ws_diag_set(token: str, **patch) -> None:
+    """Patch fields in per-session websocket diagnostics state."""
+    with _ws_runtime_lock:
+        s = _ws_runtime.get(token)
+        if not s:
+            return
+        for k, v in patch.items():
+            s[k] = v
+
+
+def _ws_diag_mark_rx(token: str, msg_type: str) -> None:
+    """Record inbound websocket message metadata in diagnostics state."""
+    now = time.time()
+    with _ws_runtime_lock:
+        s = _ws_runtime.get(token)
+        if not s:
+            return
+        s["last_rx_ts"] = now
+        s["messages_rx"] = int(s.get("messages_rx", 0)) + 1
+        s["last_rx_type"] = str(msg_type or "")
+
+
+def _ws_diag_mark_tx(token: str, msg_type: str) -> None:
+    """Record outbound websocket message metadata in diagnostics state."""
+    now = time.time()
+    with _ws_runtime_lock:
+        s = _ws_runtime.get(token)
+        if not s:
+            return
+        s["last_tx_ts"] = now
+        s["messages_tx"] = int(s.get("messages_tx", 0)) + 1
+        s["last_tx_type"] = str(msg_type or "")
+
+
+def _ws_diag_close(token: str) -> None:
+    """Mark websocket diagnostics state as disconnected."""
+    now = time.time()
+    with _ws_runtime_lock:
+        s = _ws_runtime.get(token)
+        if not s:
+            return
+        s["connected"] = False
+        s["disconnected_ts"] = now
+        s["disconnect_count"] = int(s.get("disconnect_count", 0)) + 1
+
+
+def ws_runtime_diag(token: Optional[str] = None):
+    """Return websocket diagnostics for one token or all active sessions."""
+    with _ws_runtime_lock:
+        if token:
+            s = _ws_runtime.get(token)
+            return dict(s) if isinstance(s, dict) else {}
+        return {str(k): dict(v) for k, v in _ws_runtime.items()}
+
+
+async def _send_json(websocket: WebSocket, token: str, payload: dict) -> None:
+    """Send JSON over websocket and account the outbound frame in diagnostics."""
+    await websocket.send_json(payload)
+    _ws_diag_mark_tx(token, str(payload.get("type") or ""))
+
+
+def _copy_text_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard through platform-specific toolchain."""
+    payload = str(text or "")
+    if not payload:
+        return False
+
+    def _run_with_stdin(cmd: list[str]) -> bool:
+        """Run a command with clipboard payload on stdin and return process success."""
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=payload.encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+                check=False,
+            )
+            return int(proc.returncode) == 0
+        except Exception:
+            return False
+
+    if sys.platform.startswith("linux"):
+        if _IS_WAYLAND and shutil.which("wl-copy"):
+            if _run_with_stdin(["wl-copy", "--type", "text/plain;charset=utf-8"]):
+                return True
+        if shutil.which("xclip"):
+            if _run_with_stdin(["xclip", "-selection", "clipboard", "-in"]):
+                return True
+        if shutil.which("xsel"):
+            if _run_with_stdin(["xsel", "--clipboard", "--input"]):
+                return True
+        return False
+
+    if sys.platform == "darwin":
+        return _run_with_stdin(["pbcopy"])
+
+    return False
+
+
+def _inject_text_fallback(text: str) -> bool:
+    """Fallback text injection path using clipboard paste shortcut."""
+    payload = str(text or "")
+    if not payload:
+        return False
+    if not _copy_text_to_clipboard(payload):
+        return False
+    try:
+        return bool(INPUT_BACKEND.hotkey("ctrl", "v"))
+    except Exception:
+        return False
 
 
 def _safe_screen_size() -> tuple[int, int]:
+    """Return reliable screen size with environment-backed fallback values."""
     try:
         wh = INPUT_BACKEND.screen_size()
         if wh and int(wh[0]) > 0 and int(wh[1]) > 0:
@@ -44,6 +223,7 @@ def _safe_screen_size() -> tuple[int, int]:
 
 
 def _init_virtual_cursor(token: str) -> None:
+    """Initialize virtual cursor state for sessions without absolute pointer support."""
     w, h = _safe_screen_size()
     x = w // 2
     y = h // 2
@@ -61,6 +241,7 @@ def _init_virtual_cursor(token: str) -> None:
 
 
 def _get_virtual_cursor(token: str) -> tuple[int, int, int, int]:
+    """Read virtual cursor state, lazily initializing when missing."""
     with _virtual_cursor_lock:
         pos = _virtual_cursor.get(token)
     if pos is None:
@@ -71,6 +252,7 @@ def _get_virtual_cursor(token: str) -> tuple[int, int, int, int]:
 
 
 def _move_virtual_cursor(token: str, dx: int, dy: int) -> None:
+    """Update virtual cursor coordinates with bounds clamping."""
     x, y, w, h = _get_virtual_cursor(token)
     nx = max(0, min(max(0, w - 1), int(x) + int(dx)))
     ny = max(0, min(max(0, h - 1), int(y) + int(dy)))
@@ -79,6 +261,7 @@ def _move_virtual_cursor(token: str, dx: int, dy: int) -> None:
 
 
 async def _cursor_stream(websocket: WebSocket, token: str):
+    """Continuously push cursor updates over websocket when position changes."""
     min_dt = 1.0 / max(5, int(config.CURSOR_STREAM_FPS))
     last_pos = None
     while True:
@@ -95,7 +278,7 @@ async def _cursor_stream(websocket: WebSocket, token: str):
             else:
                 pos = _get_virtual_cursor(token)
             if pos != last_pos:
-                await websocket.send_json({"type": "cursor", "x": pos[0], "y": pos[1], "w": pos[2], "h": pos[3]})
+                await _send_json(websocket, token, {"type": "cursor", "x": pos[0], "y": pos[1], "w": pos[2], "h": pos[3]})
                 last_pos = pos
         except asyncio.CancelledError:
             break
@@ -106,12 +289,15 @@ async def _cursor_stream(websocket: WebSocket, token: str):
 
 @router.websocket("/ws/mouse")
 async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(None)):
+    """Serve authenticated WebSocket events for remote input control."""
+    allow_query_token = bool(getattr(config, "ALLOW_QUERY_TOKEN", True))
     auth_header = str(websocket.headers.get("authorization") or "").strip()
     bearer = ""
     if auth_header.lower().startswith("bearer "):
         bearer = auth_header[7:].strip()
-    ws_qs_token = str(websocket.query_params.get("token") or "").strip()
-    resolved_token = str(token or "").strip() or ws_qs_token or bearer
+    ws_qs_token = str(websocket.query_params.get("token") or "").strip() if allow_query_token else ""
+    q_token = str(token or "").strip() if allow_query_token else ""
+    resolved_token = q_token or ws_qs_token or bearer
 
     if not resolved_token or not device_manager.get_session(resolved_token):
         await websocket.close(code=4003)
@@ -123,19 +309,58 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
         return
     await websocket.accept()
     device_manager.register_socket(token, websocket)
-    log.info(f"WS connected: {token}")
+    _ws_diag_init(token)
+    if _ws_log_enabled():
+        cli_ip = getattr(getattr(websocket, "client", None), "host", None)
+        ua = str(websocket.headers.get("user-agent") or "").strip()
+        if len(ua) > 120:
+            ua = ua[:120] + "..."
+        log.info("WS connected: token=%s ip=%s ua=%s", token, cli_ip, ua or "-")
+    hb_interval_s = max(5, int(getattr(config, "WS_HEARTBEAT_INTERVAL_S", 15) or 15))
+    hb_timeout_s = max(hb_interval_s * 2, int(getattr(config, "WS_HEARTBEAT_TIMEOUT_S", 45) or 45))
+    proto_push_enabled = str(os.environ.get("CYBERDECK_WS_PROTO_PUSH", "0") or "0").strip() == "1"
+    heartbeat_required = False
+    last_rx_monotonic = time.monotonic()
+
+    async def _heartbeat_loop():
+        """Emit ping frames and close stale sessions when heartbeat acknowledgements stop arriving."""
+        nonlocal last_rx_monotonic
+        while True:
+            await asyncio.sleep(hb_interval_s)
+            if not (proto_push_enabled or heartbeat_required):
+                continue
+            now_ms = int(time.time() * 1000)
+            try:
+                await _send_json(websocket, token, {"type": "ping", "id": str(now_ms), "ts": now_ms})
+            except Exception:
+                break
+            if heartbeat_required and (time.monotonic() - last_rx_monotonic) > hb_timeout_s:
+                try:
+                    await websocket.close(code=1001)
+                except Exception:
+                    pass
+                break
+
+    if proto_push_enabled:
+        try:
+            await _send_json(websocket, token, build_server_hello("hello", hb_interval_s, hb_timeout_s))
+        except Exception:
+            pass
+
     if (not INPUT_BACKEND.can_pointer or not INPUT_BACKEND.can_keyboard) and (
         get_perm(token, "perm_mouse") or get_perm(token, "perm_keyboard")
     ):
         try:
-            await websocket.send_json(
+            await _send_json(
+                websocket,
+                token,
                 {"type": "warning", "code": "wayland_input_limited" if _IS_WAYLAND else "input_backend_limited"}
             )
         except Exception:
             pass
     if not INPUT_BACKEND.can_pointer and not INPUT_BACKEND.can_keyboard:
         try:
-            await websocket.send_json({"type": "error", "code": "input_backend_unavailable"})
+            await _send_json(websocket, token, {"type": "error", "code": "input_backend_unavailable"})
         except Exception:
             pass
         await websocket.close(code=1011)
@@ -146,10 +371,68 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
         if config.CURSOR_STREAM
         else None
     )
+    heartbeat_task: Optional[asyncio.Task] = asyncio.create_task(_heartbeat_loop()) if proto_push_enabled else None
     try:
         while True:
             data = await websocket.receive_json()
+            last_rx_monotonic = time.monotonic()
             t = (data.get("type") or "").lower()
+            _ws_diag_mark_rx(token, t)
+
+            if t == "hello":
+                caps = data.get("capabilities") or {}
+                if not isinstance(caps, dict):
+                    caps = {}
+                heartbeat_required = bool(caps.get("heartbeat_ack") or caps.get("ws_heartbeat_ack"))
+                _ws_diag_set(
+                    token,
+                    heartbeat_required=heartbeat_required,
+                    client_protocol_version=data.get("protocol_version"),
+                )
+                if _ws_log_enabled():
+                    log.info(
+                        "WS hello: token=%s protocol_version=%s heartbeat_required=%s caps=%s",
+                        token,
+                        data.get("protocol_version"),
+                        heartbeat_required,
+                        list(caps.keys()),
+                    )
+                if heartbeat_task is None and heartbeat_required:
+                    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+                try:
+                    await _send_json(
+                        websocket,
+                        token,
+                        {
+                            "type": "hello_ack",
+                            "heartbeat_required": heartbeat_required,
+                            "heartbeat_interval_ms": int(hb_interval_s * 1000),
+                            "heartbeat_timeout_ms": int(hb_timeout_s * 1000),
+                            **protocol_payload(),
+                        },
+                    )
+                except Exception:
+                    pass
+                if not proto_push_enabled:
+                    try:
+                        await _send_json(websocket, token, build_server_hello("hello", hb_interval_s, hb_timeout_s))
+                    except Exception:
+                        pass
+                continue
+
+            if t == "ping":
+                try:
+                    await _send_json(
+                        websocket,
+                        token,
+                        {"type": "pong", "id": data.get("id"), "ts": int(time.time() * 1000)},
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if t == "pong":
+                continue
 
             if t == "move":
                 if not get_perm(token, "perm_mouse"):
@@ -160,13 +443,47 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 except Exception:
                     dx, dy = 0.0, 0.0
 
+                now_move = time.monotonic()
                 with _mouse_remainders_lock:
+                    last_ts = _mouse_last_move_ts.get(token)
+                    _mouse_last_move_ts[token] = now_move
+                    lag_scale = 1.0
+                    if _IS_WAYLAND and last_ts is not None:
+                        dt = max(0.0, now_move - float(last_ts))
+                        if dt > _MOUSE_LAG_DAMP_START_S:
+                            lag_scale = max(
+                                _MOUSE_LAG_DAMP_MIN,
+                                min(1.0, _MOUSE_LAG_DAMP_START_S / max(0.001, dt)),
+                            )
+                    dx *= _MOUSE_GAIN * lag_scale
+                    dy *= _MOUSE_GAIN * lag_scale
+                    if abs(dx) < _MOUSE_DEADZONE:
+                        dx = 0.0
+                    if abs(dy) < _MOUSE_DEADZONE:
+                        dy = 0.0
                     rx, ry = _mouse_remainders.get(token, (0.0, 0.0))
                     dx += rx
                     dy += ry
-                    mx = int(round(dx))
-                    my = int(round(dy))
-                    _mouse_remainders[token] = (dx - mx, dy - my)
+                    mx_raw = int(round(dx))
+                    my_raw = int(round(dy))
+                    mx = mx_raw
+                    my = my_raw
+                    if mx > _MOUSE_MAX_DELTA:
+                        mx = _MOUSE_MAX_DELTA
+                    elif mx < -_MOUSE_MAX_DELTA:
+                        mx = -_MOUSE_MAX_DELTA
+                    if my > _MOUSE_MAX_DELTA:
+                        my = _MOUSE_MAX_DELTA
+                    elif my < -_MOUSE_MAX_DELTA:
+                        my = -_MOUSE_MAX_DELTA
+                    rem_x = dx - mx_raw
+                    rem_y = dy - my_raw
+                    # If clamped, drop overflow so cursor does not keep drifting.
+                    if mx != mx_raw:
+                        rem_x = 0.0
+                    if my != my_raw:
+                        rem_y = 0.0
+                    _mouse_remainders[token] = (rem_x, rem_y)
 
                 if mx or my:
                     INPUT_BACKEND.move_rel(mx, my)
@@ -202,25 +519,32 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                     continue
                 INPUT_BACKEND.mouse_up("left")
 
-            elif t == "text":
+            elif is_text_event_type(t):
                 if not get_perm(token, "perm_keyboard"):
                     continue
-                text = str(data.get("text", ""))
+                text = extract_text_payload(data)
                 if text:
+                    delivered = False
                     if _IS_WINDOWS:
                         try:
                             hwnd = ctypes.windll.user32.GetForegroundWindow()
                             if hwnd:
                                 for char in text:
                                     ctypes.windll.user32.SendMessageW(hwnd, 0x0102, ord(char), 0)
+                                delivered = True
                         except Exception:
                             pass
-                    else:
+                    if not delivered:
                         try:
-                            INPUT_BACKEND.write_text(text)
+                            delivered = bool(INPUT_BACKEND.write_text(text))
                         except Exception:
-                            if config.DEBUG:
-                                log.exception("Keyboard text injection failed")
+                            delivered = False
+                    if not delivered and sys.platform != "win32":
+                        delivered = _inject_text_fallback(text)
+                        if delivered and _ws_log_enabled():
+                            log.info("WS text fallback used: token=%s len=%s", token, len(text))
+                    if (not delivered) and (config.DEBUG or _ws_log_enabled()):
+                        log.warning("WS text injection failed: token=%s len=%s", token, len(text))
 
             elif t == "key":
                 if not get_perm(token, "perm_keyboard"):
@@ -289,18 +613,29 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                     INPUT_BACKEND.hotkey("ctrl", "z")
                 elif act == "redo":
                     INPUT_BACKEND.hotkey("ctrl", "y")
+            elif t:
+                if _ws_log_enabled():
+                    log.info("WS unknown event: token=%s type=%s", token, t)
 
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as e:
+        try:
+            if _ws_log_enabled():
+                log.info("WS disconnect event: token=%s code=%s", token, getattr(e, "code", None))
+        except Exception:
+            pass
     except Exception:
         log.exception("WS error")
     finally:
+        _ws_diag_close(token)
+        if heartbeat_task:
+            heartbeat_task.cancel()
         if cursor_task:
             cursor_task.cancel()
-        device_manager.unregister_socket(token)
+        device_manager.unregister_socket(token, websocket)
         try:
             with _mouse_remainders_lock:
                 _mouse_remainders.pop(token, None)
+                _mouse_last_move_ts.pop(token, None)
         except Exception:
             pass
         try:
@@ -308,4 +643,5 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 _virtual_cursor.pop(token, None)
         except Exception:
             pass
-        log.info(f"WS disconnected: {token}")
+        if _ws_log_enabled():
+            log.info("WS disconnected: token=%s", token)

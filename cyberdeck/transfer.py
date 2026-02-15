@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import http.server
 import os
 import socketserver
+import ssl
 import subprocess
 import sys
 import threading
@@ -26,6 +28,7 @@ TRANSFER_PRESETS = {
 
 
 def pick_transfer_params(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Pick transfer params."""
     preset = str(settings.get("transfer_preset", "balanced")).lower()
     base = TRANSFER_PRESETS.get(preset, TRANSFER_PRESETS["balanced"]).copy()
 
@@ -42,7 +45,29 @@ def pick_transfer_params(settings: Dict[str, Any]) -> Dict[str, Any]:
     return base
 
 
+def _sha256_file(path: str) -> str:
+    """Compute SHA-256 digest for a file on disk."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _resolve_transfer_scheme() -> str:
+    """Resolve transfer scheme."""
+    mode = str(getattr(config, "TRANSFER_SCHEME", "auto") or "auto").strip().lower()
+    if mode in ("http", "https"):
+        return mode
+    scheme = str(getattr(config, "SCHEME", "http") or "http").strip().lower()
+    return scheme if scheme in ("http", "https") else "http"
+
+
 def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, str]:
+    """Trigger file send logic."""
     if not get_perm(device_token, "perm_file_send"):
         return False, "permission_denied:perm_file_send"
     session = device_manager.get_session(device_token)
@@ -62,17 +87,40 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
         filename = os.path.basename(file_path)
         dl_token = uuid.uuid4().hex
         allow_ip = str(getattr(session, "ip", "") or "")
+        transfer_scheme = _resolve_transfer_scheme()
+        tls_enabled = transfer_scheme == "https"
+        tls_cert = str(getattr(config, "TLS_CERT", "") or "").strip()
+        tls_key = str(getattr(config, "TLS_KEY", "") or "").strip()
+        if tls_enabled and not (tls_cert and tls_key and os.path.exists(tls_cert) and os.path.exists(tls_key)):
+            log.warning("Transfer TLS requested but cert/key are unavailable, falling back to HTTP")
+            tls_enabled = False
+            transfer_scheme = "http"
 
         params = pick_transfer_params(session.settings or {})
         chunk = params["chunk"]
         sleep_s = params["sleep"]
+        file_size = int(os.path.getsize(file_path))
+        file_sha256 = _sha256_file(file_path)
 
-        def start_transporter_inprocess(path: str, port: int, timeout_s: int, chunk_sz: int, sleep_each: float, token: str, only_ip: str):
-            served = threading.Event()
+        def start_transporter_inprocess(
+            path: str,
+            port: int,
+            timeout_s: int,
+            chunk_sz: int,
+            sleep_each: float,
+            token: str,
+            only_ip: str,
+            use_tls: bool,
+            cert_path: str,
+            key_path: str,
+        ):
+            """Manage lifecycle transition to start transporter inprocess."""
+            # Lifecycle transitions are centralized here to prevent partial-state bugs.
             target_name = os.path.basename(path)
 
             class OneFileHandler(http.server.BaseHTTPRequestHandler):
                 def do_GET(self):
+                    """Serve transfer status and file download endpoints."""
                     try:
                         parsed = urllib.parse.urlparse(self.path)
                         req_name = urllib.parse.unquote(parsed.path.lstrip("/"))
@@ -106,35 +154,74 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
                                 self.end_headers()
                                 return
 
-                        self.send_response(200)
+                        file_size_local = int(os.path.getsize(path))
+                        range_header = str(self.headers.get("Range") or "").strip()
+                        start = 0
+                        end = max(0, file_size_local - 1)
+                        status_code = 200
+                        if range_header.lower().startswith("bytes="):
+                            try:
+                                raw = range_header[6:].split(",", 1)[0].strip()
+                                left, right = raw.split("-", 1)
+                                if left:
+                                    start = max(0, int(left))
+                                if right:
+                                    end = int(right)
+                                if start >= file_size_local or end < start:
+                                    self.send_response(416)
+                                    self.send_header("Content-Range", f"bytes */{file_size_local}")
+                                    self.end_headers()
+                                    return
+                                end = min(end, file_size_local - 1)
+                                status_code = 206
+                            except Exception:
+                                self.send_response(416)
+                                self.send_header("Content-Range", f"bytes */{file_size_local}")
+                                self.end_headers()
+                                return
+
+                        send_len = max(0, end - start + 1)
+                        self.send_response(status_code)
                         self.send_header("Content-Type", "application/octet-stream")
-                        self.send_header("Content-Length", str(os.path.getsize(path)))
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Content-Length", str(send_len))
+                        if status_code == 206:
+                            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size_local}")
                         enc = urllib.parse.quote(target_name)
                         self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{enc}")
                         self.end_headers()
                         with open(path, "rb") as f:
-                            while True:
-                                data = f.read(chunk_sz)
+                            f.seek(start)
+                            left_to_send = send_len
+                            while left_to_send > 0:
+                                data = f.read(min(chunk_sz, left_to_send))
                                 if not data:
                                     break
                                 self.wfile.write(data)
+                                left_to_send -= len(data)
                                 if sleep_each:
                                     time.sleep(sleep_each)
-                        served.set()
                     except Exception:
                         pass
 
                 def log_message(self, format, *args):
+                    """Silence default HTTP server logs for cleaner console output."""
                     return
 
             def _run():
+                """Execute an internal helper callback used by the surrounding control flow."""
                 try:
                     with socketserver.TCPServer(("", port), OneFileHandler) as httpd:
+                        if use_tls:
+                            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+                            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
                         httpd.timeout = 0.5
 
                         def _shutdown_later():
+                            """Stop the temporary HTTP server after timeout or completion."""
                             end_t = time.time() + timeout_s
-                            while time.time() < end_t and not served.is_set():
+                            while time.time() < end_t:
                                 time.sleep(0.2)
                             try:
                                 httpd.shutdown()
@@ -148,8 +235,19 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
 
             threading.Thread(target=_run, daemon=True).start()
 
-        if getattr(sys, "frozen", False):
-            start_transporter_inprocess(file_path, free_port, 300, chunk, sleep_s, dl_token, allow_ip)
+        if bool(getattr(config, "RUNTIME_PACKAGED", False)):
+            start_transporter_inprocess(
+                file_path,
+                free_port,
+                300,
+                chunk,
+                sleep_s,
+                dl_token,
+                allow_ip,
+                tls_enabled,
+                tls_cert,
+                tls_key,
+            )
         else:
             transporter_path = os.path.join(config.BASE_DIR, "transporter.py")
             if not os.path.exists(transporter_path):
@@ -172,6 +270,8 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
                 "--allow-ip",
                 allow_ip,
             ]
+            if tls_enabled:
+                cmd.extend(["--tls", "--cert", tls_cert, "--key", tls_key])
 
             proc = subprocess.Popen(
                 cmd,
@@ -181,6 +281,7 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
             )
 
             def killer(p):
+                """Force-terminate stale transfer process after hard timeout."""
                 time.sleep(300)
                 try:
                     p.terminate()
@@ -190,9 +291,21 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
             threading.Thread(target=killer, args=(proc,), daemon=True).start()
 
         encoded_name = urllib.parse.quote(filename)
-        download_url = f"http://{local_ip}:{free_port}/{encoded_name}?t={dl_token}"
+        download_url = f"{transfer_scheme}://{local_ip}:{free_port}/{encoded_name}?t={dl_token}"
+        expires_at = int(time.time() + 300)
 
-        msg = {"type": "file_transfer", "filename": filename, "url": download_url, "size": os.path.getsize(file_path)}
+        msg = {
+            "type": "file_transfer",
+            "transfer_id": uuid.uuid4().hex,
+            "filename": filename,
+            "url": download_url,
+            "scheme": transfer_scheme,
+            "tls": bool(tls_enabled),
+            "size": file_size,
+            "sha256": file_sha256,
+            "accept_ranges": True,
+            "expires_at": expires_at,
+        }
 
         log.info(
             f"Transfer start -> {session.device_name} ({session.ip}) | preset={session.settings.get('transfer_preset','balanced')} "

@@ -1,7 +1,7 @@
 ﻿; File is UTF-8.
 
 #define MyAppName "CyberDeck"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Overl1te"
 #define MyAppURL "https://github.com/Overl1te/CyberDeck"
 #define MyAppExeName "CyberDeck.exe"
@@ -10,8 +10,8 @@
 ; Project root = folder where this .iss is located
 #define ProjectDir SourcePath
 
-; Build output folder (PyInstaller --onedir)
-#define DistDir ProjectDir + "dist\\CyberDeck"
+; Build output folder (Nuitka --standalone)
+#define DistDir ProjectDir + "dist\\"
 
 [Setup]
 AppId={#MyAppId}
@@ -76,8 +76,15 @@ Name: "autostart"; Description: "{cm:TaskAutostart}"; GroupDescription: "{cm:Tas
 Name: "firewall"; Description: "{cm:TaskFirewall}"; GroupDescription: "{cm:TaskExtraGroup}"; Flags: checkedonce
 
 [Files]
-; Copy whole onedir output (CyberDeck.exe + _internal + static + icon.png, etc.)
-Source: "{#DistDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Nuitka Windows build layout:
+;   dist\launcher.dist\*
+; Optional fallback for renamed dist folder:
+;   dist\CyberDeck.dist\*
+; Optional flat layout:
+;   dist\CyberDeck.exe
+Source: "{#DistDir}launcher.dist\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#DistDir}CyberDeck.dist\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#DistDir}CyberDeck.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\\{#MyAppName}\\{#MyAppName}"; Filename: "{app}\\{#MyAppExeName}"
@@ -95,8 +102,8 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""CyberDec
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""CyberDeck TCP"" dir=in action=allow protocol=TCP localport=8080 profile=any"; Flags: runhidden; Tasks: firewall; StatusMsg: "{cm:StatusFirewallTCP}"
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""CyberDeck UDP"" dir=in action=allow protocol=UDP localport=5555 profile=any"; Flags: runhidden; Tasks: firewall; StatusMsg: "{cm:StatusFirewallUDP}"
 
-; Launch after install
-Filename: "{app}\\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Launch after install (UAC-aware for binaries built with --windows-uac-admin)
+Filename: "{app}\\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent shellexec; Verb: "runas"
 
 [UninstallRun]
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""CyberDeck TCP"""; Flags: runhidden

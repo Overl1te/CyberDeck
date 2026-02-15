@@ -217,4 +217,5 @@ launcher.*/
 *.xml
 Output/
 *.json
+!cyberdeck_app_config.json
 CyberDeck_Files/

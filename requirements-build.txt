@@ -1,0 +1,4 @@
+﻿-r requirements.txt
+pyinstaller
+nuitka
+zstandard # for Nuitka onefile

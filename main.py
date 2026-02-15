@@ -1,10 +1,12 @@
-"""Точка входа для обратной совместимости.
+"""Compatibility entrypoint.
 
-Лаунчер/PyInstaller ожидают, что `main.app` существует.
-Вся реализация теперь находится в `cyberdeck.server`.
+Launcher/PyInstaller expect `main.app` to exist.
+The server implementation lives in `cyberdeck.server`.
 """
 
 from cyberdeck.server import app, run
+
+__all__ = ["app", "run"]
 
 
 if __name__ == "__main__":
