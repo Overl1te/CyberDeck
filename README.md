@@ -1,20 +1,25 @@
-<div style='text-align: center'>
+<p align="center">
+  <img src="icon.png" width="400" height="400" />
+</p>
 
-  <img src='icon.png' style='border-radius: 50%' width='400px' height='400px' />
+<h1 align="center">CyberDeck Control — удаленное управление ПК</h1>
 
-  # CyberDeck Control — удаленное управление ПК
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
+  <a href="https://github.com/Overlite/CyberDeck-Mobile"><img src="https://img.shields.io/badge/Mobile-CyberDeck--Mobile-00A7E1" alt="Mobile"></a>
+  <a href="README_EN.md"><img src="https://img.shields.io/badge/lang-English-1f6feb" alt="English"></a>
+</p>
 
-  <p>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
-    <a href="https://github.com/Overl1te/CyberDeck-Mobile"><img src="https://img.shields.io/badge/Mobile-CyberDeck--Mobile-00A7E1" alt="Mobile"></a>
-    <a href="README_EN.md"><img src="https://img.shields.io/badge/lang-English-1f6feb" alt="English"></a>
-  </p>
+<p align="center">
+  Управление компьютером со смартфона в локальной сети: подключение по PIN/QR, ввод, видеопоток, передача файлов и разрешений для устройств.
+</p>
 
-  Управление компьютером со смартфона в локальной сети: подключение по PIN/QR, ввод, видеопоток, передача файлов и пермишены для устройств.
-
-  [Функции](#-функции-приложения) • [Сценарий работы](#-сценарий-использования) • [Жесты](#-базовые-жесты) • [FAQ](#-faq)
-
-</div>
+<p align="center">
+  <a href="#функции-приложения">Функции</a> •
+  <a href="#сценарии-использования">Сценарий работы</a> •
+  <a href="#базовые-жесты">Жесты</a> •
+  <a href="#faq">FAQ</a>
+</p>
 
 ---
 
