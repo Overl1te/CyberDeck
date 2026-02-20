@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import patch
 
-import cyberdeck.wayland_setup as wayland_setup
+import cyberdeck.platform.wayland_setup as wayland_setup
 
 
 class WaylandSetupBehaviorTests(unittest.TestCase):
@@ -94,6 +94,22 @@ class WaylandSetupBehaviorTests(unittest.TestCase):
         self.assertEqual(order, "ffmpeg,screenshot,gstreamer,native")
         self.assertEqual(prefer, "1")
 
+    def test_wayland_allow_x11_fallback_accepts_boolean_words(self):
+        """Validate scenario: x11 fallback flag should support bool-like env forms."""
+        with patch.object(wayland_setup, "is_linux_wayland_session", return_value=True), patch.dict(
+            wayland_setup.os.environ,
+            {"DISPLAY": ":0", "CYBERDECK_WAYLAND_ALLOW_X11_FALLBACK": "off"},
+            clear=True,
+        ):
+            self.assertFalse(wayland_setup._wayland_allow_x11_fallback())
+
+        with patch.object(wayland_setup, "is_linux_wayland_session", return_value=True), patch.dict(
+            wayland_setup.os.environ,
+            {"DISPLAY": ":0", "CYBERDECK_WAYLAND_ALLOW_X11_FALLBACK": "yes"},
+            clear=True,
+        ):
+            self.assertTrue(wayland_setup._wayland_allow_x11_fallback())
+
     def test_ensure_wayland_ready_ok_with_noncritical_issues(self):
         """Validate scenario: non-critical issues should keep startup path healthy."""
         with patch.object(wayland_setup, "_apply_runtime_wayland_policy", return_value=[]), patch.object(
@@ -109,3 +125,4 @@ class WaylandSetupBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

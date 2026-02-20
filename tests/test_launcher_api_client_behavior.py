@@ -1,7 +1,7 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch
 
-from cyberdeck.launcher_api_client import LauncherApiClient
+from cyberdeck.launcher.api_client import LauncherApiClient
 
 
 class LauncherApiClientBehaviorTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
         """Validate scenario: test get info calls requests get with expected args."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         c = LauncherApiClient("http://127.0.0.1:8080/api/local", verify=False)
-        with patch("cyberdeck.launcher_api_client.requests.get") as mget:
+        with patch("cyberdeck.launcher.api_client.requests.get") as mget:
             c.get_info(timeout=1.25)
         mget.assert_called_once_with(
             "http://127.0.0.1:8080/api/local/info",
@@ -31,7 +31,7 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
         # Test body is intentionally explicit so regressions are easy to diagnose.
         c = LauncherApiClient("http://127.0.0.1:8080/api/local", verify=True)
         payload = {"token": "abc", "settings": {"perm_stream": True}}
-        with patch("cyberdeck.launcher_api_client.requests.post") as mpost:
+        with patch("cyberdeck.launcher.api_client.requests.post") as mpost:
             c.device_settings(payload, timeout=2.5)
         mpost.assert_called_once_with(
             "http://127.0.0.1:8080/api/local/device_settings",
@@ -44,7 +44,7 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
         """Validate scenario: test regenerate code posts without payload."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         c = LauncherApiClient("http://127.0.0.1:8080/api/local")
-        with patch("cyberdeck.launcher_api_client.requests.post") as mpost:
+        with patch("cyberdeck.launcher.api_client.requests.post") as mpost:
             c.regenerate_code(timeout=3.0)
         mpost.assert_called_once_with(
             "http://127.0.0.1:8080/api/local/regenerate_code",
@@ -56,3 +56,4 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

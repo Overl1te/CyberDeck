@@ -212,10 +212,11 @@ __marimo__/
 
 # Other
 launcher.*/
+dist-*/
 *.dist/
 *.build/
 *.xml
 Output/
-*.json
-!cyberdeck_app_config.json
+launcher_settings.json
+cyberdeck_sessions.json
 CyberDeck_Files/

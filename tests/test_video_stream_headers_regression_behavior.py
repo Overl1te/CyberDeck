@@ -1,7 +1,7 @@
 ﻿import unittest
 
-import cyberdeck.video_ffmpeg as video_ffmpeg_module
-import cyberdeck.video_wayland as video_wayland_module
+import cyberdeck.video.ffmpeg as video_ffmpeg_module
+import cyberdeck.video.wayland as video_wayland_module
 
 
 class VideoStreamHeadersRegressionBehaviorTests(unittest.TestCase):
@@ -24,3 +24,4 @@ class VideoStreamHeadersRegressionBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

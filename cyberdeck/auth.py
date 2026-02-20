@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+﻿from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException, Query, Request
 
@@ -70,3 +70,5 @@ async def get_token(request: Request, token: Optional[str] = Query(None)) -> str
 
 
 TokenDep = Depends(get_token)
+
+

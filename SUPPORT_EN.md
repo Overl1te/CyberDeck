@@ -35,12 +35,15 @@
 ```bash
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
+# if desktop-input coverage is needed:
+pip install -r requirements-desktop-input.txt
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
 Docker check:
 
 ```bash
+docker compose -f docker-compose.tests.yml build
 docker compose -f docker-compose.tests.yml run --rm tests
 ```
 

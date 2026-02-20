@@ -1,6 +1,6 @@
 import unittest
 
-from cyberdeck.stream_adaptation import WidthStabilizer, parse_width_ladder
+from cyberdeck.video.stream_adaptation import WidthStabilizer, parse_width_ladder
 
 
 class StreamAdaptationTests(unittest.TestCase):

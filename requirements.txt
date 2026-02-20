@@ -1,16 +1,2 @@
-﻿fastapi
-pystray
-customtkinter
-packaging
-python-multipart
-aiofiles
-requests
-qrcode
-zeroconf
-uvicorn[standard]
-pillow
-mss
-pyautogui
-pynput
-evdev; platform_system == "Linux"
-psutil
+﻿-r requirements-core.txt
+-r requirements-desktop-input.txt

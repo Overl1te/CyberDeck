@@ -30,16 +30,18 @@
 | Путь | Назначение |
 |---|---|
 | `launcher.py` | Оркестрация лаунчера: UI, запуск сервера, трэй, QR, настройки |
-| `cyberdeck/launcher_ui_home.py` | Экран «Сводка» |
-| `cyberdeck/launcher_ui_devices.py` | Экран «Устройства», пермишены и профили передачи |
-| `cyberdeck/launcher_ui_settings.py` | Экран «Настройки», app config, TLS, runtime-параметры |
+| `cyberdeck/launcher/ui/home.py` | Экран «Сводка» |
+| `cyberdeck/launcher/ui/devices.py` | Экран «Устройства», пермишены и профили передачи |
+| `cyberdeck/launcher/ui/settings.py` | Экран «Настройки», app config, TLS, runtime-параметры |
 | `main.py` | Точка входа сервера |
 | `cyberdeck/server.py` | Сборка FastAPI-приложения и подключение роутеров |
-| `cyberdeck/api_core.py` | Публичный API (handshake/upload/protocol/stats) |
-| `cyberdeck/api_local.py` | Локальный API для лаунчера (`/api/local/*`) |
-| `cyberdeck/api_system.py` | Системные действия и управление звуком |
-| `cyberdeck/ws_mouse.py` | WebSocket-канал ввода |
-| `cyberdeck/video.py` | Потоковое видео и backend-адаптация |
+| `cyberdeck/api/core.py` | Публичный API (handshake/upload/protocol/stats) |
+| `cyberdeck/api/local.py` | Локальный API для лаунчера (`/api/local/*`) |
+| `cyberdeck/api/system.py` | Системные действия и управление звуком |
+| `cyberdeck/ws/mouse.py` | WebSocket-канал ввода |
+| `cyberdeck/video/` | Потоковое видео и backend-адаптация |
+| `cyberdeck/input/` | Выбор и реализация backend-ов ввода |
+| `cyberdeck/platform/wayland_setup.py` | Wayland runtime/setup проверки |
 | `cyberdeck/transfer.py` | Отправка файлов с хоста на устройство |
 | `cyberdeck/sessions.py` | Хранение, TTL и очистка сессий |
 | `tests/` | Набор unit/behavioral тестов |
@@ -69,6 +71,8 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements-dev.txt
+# при тестировании/разработке desktop-ввода:
+pip install -r requirements-desktop-input.txt
 ```
 
 ## Установка и запуск из исходников
@@ -83,6 +87,12 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+```
+
+Установка только core (без desktop-ввода):
+
+```bash
+pip install -r requirements-core.txt
 ```
 
 Запуск приложения (лаунчер):
@@ -132,7 +142,7 @@ python -m unittest discover -s tests -p "test_*.py"
 Точечный прогон:
 
 ```bash
-pytest -q tests/test_launcher_ui_logic.py
+pytest -q tests/test_launcher_shared_behavior.py
 ```
 
 Docker-прогон:
@@ -141,6 +151,8 @@ Docker-прогон:
 docker compose -f docker-compose.tests.yml build
 docker compose -f docker-compose.tests.yml run --rm tests
 ```
+
+Примечание: Docker-тесты используют `requirements-dev.txt` (без `requirements-desktop-input.txt`).
 
 ## Сборка
 

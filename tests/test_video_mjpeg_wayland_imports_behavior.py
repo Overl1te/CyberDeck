@@ -1,8 +1,8 @@
-import unittest
+﻿import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import cyberdeck.video_mjpeg as video_mjpeg
+import cyberdeck.video.mjpeg as video_mjpeg
 
 
 class VideoMjpegWaylandImportsBehaviorTests(unittest.TestCase):
@@ -27,4 +27,5 @@ class VideoMjpegWaylandImportsBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

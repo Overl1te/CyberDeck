@@ -1,4 +1,4 @@
-import json
+﻿import json
 import socket
 import threading
 
@@ -47,3 +47,5 @@ def start_udp_discovery() -> None:
     """Manage lifecycle transition to start udp discovery."""
     # Lifecycle transitions are centralized here to prevent partial-state bugs.
     threading.Thread(target=udp_discovery_service, daemon=True).start()
+
+

@@ -1,28 +1,41 @@
-# CyberDeck Control
+<p align="center">
+  <img src="icon-qr-code.png" width="400" height="400" />
+</p>
 
-<div style='text-align: center'>
+<h1 align="center">CyberDeck Control — Remote PC Management</h1>
 
-  <img src='icon.png' style='border-radius: 50%' width='400px' height='400px' />
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
+  <a href="https://github.com/Overl1te/CyberDeck-Mobile"><img src="https://img.shields.io/badge/Mobile-CyberDeck--Mobile-00A7E1" alt="Mobile"></a>
+  <a href="README.md"><img src="https://img.shields.io/badge/lang-Russian-1f6feb" alt="Russian"></a>
+</p>
 
-  # CyberDeck Control
-
-  <p>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
-    <a href="https://github.com/Overl1te/CyberDeck-Mobile"><img src="https://img.shields.io/badge/Mobile-CyberDeck--Mobile-00A7E1" alt="Mobile"></a>
-    <a href="README_EN.md"><img src="https://img.shields.io/badge/lang-Russian-1f6feb" alt="Russian"></a>
-  </p>
-
+<p align="center">
   Control your PC from a phone over local network: QR/PIN pairing, input control, screen stream, file transfer, and per-device permissions.
+</p>
 
-  [Features](#features) | [Usage flow](#usage-flow) | [Gestures](#basic-gestures) | [FAQ](#faq)
+<p align="center">
+  <a href="#features">Features</a> •
+  <a href="#usage-flow">Usage flow</a> •
+  <a href="#basic-gestures">Gestures</a> •
+  <a href="#faq">FAQ</a>
+</p>
 
-</div>
 
+<p align="center">
+  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=quality&format=svg&theme=midnight&locale=en&card_width=760&animate=true&animation=all&duration=1400" alt="CyberDeck quality card" />
+</p>
+<p align="center">
+  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=repo&format=svg&theme=midnight&locale=en&card_width=760&animate=true&animation=all&duration=1400&langs_count=4" alt="CyberDeck repository stats card" />
+</p>
 
 ---
 
 ## Features
 
+- Current release line:
+  - `CyberDeck Server` / `Launcher`: `v1.3.1`
+  - `CyberDeck-Mobile`: `1.1.1`
 - Pair a device using PIN or QR.
 - Control mouse, keyboard, and media keys remotely.
 - Stream screen video (MJPEG / H.264 / H.265 depending on environment).
@@ -30,6 +43,16 @@
 - Use system actions (power/volume).
 - Manage runtime from launcher with status, devices, and QR.
 - Configure granular permissions per device.
+
+### Release update check
+
+CyberDeck now provides a local release-status endpoint that queries latest GitHub tags:
+
+- Source API (server/launcher): `https://api.github.com/repos/Overl1te/CyberDeck/releases/latest`
+- Source API (mobile): `https://api.github.com/repos/Overl1te/CyberDeck-Mobile/releases/latest`
+- Local endpoint: `GET /api/local/updates` (localhost-only)
+
+The launcher polls this endpoint and shows update status in Home screen.
 
 ### Device permissions
 
@@ -78,6 +101,8 @@ All technical details are in `CONTRIBUTING_EN.md`:
 
 - setup from source;
 - run modes;
+- current package layout (`cyberdeck/api`, `cyberdeck/video`, `cyberdeck/ws`, `cyberdeck/launcher`, `cyberdeck/input`, `cyberdeck/platform`);
+- dependency split (`requirements-core.txt`, `requirements-desktop-input.txt`);
 - API and endpoints;
 - testing;
 - build and packaging.
@@ -99,3 +124,4 @@ A: Streaming path depends on system backends and codec availability.
 
 **License:** GNU GPLv3 (`LICENSE`)  
 **Author:** Overl1te - <https://github.com/Overl1te>
+

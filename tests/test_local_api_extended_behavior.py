@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-import cyberdeck.api_local as api_local
+import cyberdeck.api.local as api_local
 
 
 class _Client:
@@ -34,7 +34,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         """Validate scenario: test local trigger file calls transfer logic."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         req = api_local.LocalFileRequest(token="tok", file_path="c:/tmp/file.txt")
-        with patch("cyberdeck.api_local.trigger_file_send_logic", return_value=(True, "ok")) as m:
+        with patch("cyberdeck.api.local.trigger_file_send_logic", return_value=(True, "ok")) as m:
             out = api_local.local_trigger_file(req, _Req("127.0.0.1"))
         self.assertEqual(out, {"ok": True, "msg": "ok"})
         m.assert_called_once_with("tok", "c:/tmp/file.txt")
@@ -42,7 +42,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
     def test_local_qr_payload_contains_single_use_token_and_url(self):
         """Validate scenario: test local qr payload contains single use token and url."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
-        with patch("cyberdeck.api_local.get_local_ip", return_value="10.1.1.50"), patch.object(
+        with patch("cyberdeck.api.local.get_local_ip", return_value="10.1.1.50"), patch.object(
             api_local.qr_token_store, "issue", return_value="qr-abc"
         ), patch.object(
             api_local.config, "SCHEME", "https"
@@ -57,7 +57,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         ), patch.object(
             api_local.config, "PAIRING_CODE", "1234"
         ), patch(
-            "cyberdeck.api_local.time.time", return_value=1700000000
+            "cyberdeck.api.local.time.time", return_value=1700000000
         ):
             out = api_local.local_qr_payload(_Req("localhost"))
 
@@ -68,6 +68,32 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         self.assertIn("https://10.1.1.50:8443/?", out["url"])
         self.assertIn("qr_token=qr-abc", out["url"])
 
+    def test_local_info_uses_safe_port_defaults_for_invalid_port(self):
+        """Validate scenario: test local info uses safe port defaults for invalid port."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        with patch("cyberdeck.api.local.get_local_ip", return_value="10.1.1.70"), patch.object(
+            api_local.config,
+            "SCHEME",
+            "https",
+        ), patch.object(
+            api_local.config,
+            "PORT",
+            "bad-port",
+        ), patch.object(
+            api_local.device_manager,
+            "get_all_devices",
+            return_value=[],
+        ), patch(
+            "cyberdeck.api.local.protocol_payload",
+            return_value={"protocol": "v1"},
+        ):
+            out = api_local.local_info(_Req("127.0.0.1"))
+
+        self.assertEqual(out["ip"], "10.1.1.70")
+        self.assertEqual(out["scheme"], "https")
+        self.assertEqual(out["port"], 443)
+        self.assertEqual(out["protocol"], "v1")
+
     def test_local_stats_reads_psutil_snapshot(self):
         """Validate scenario: test local stats reads psutil snapshot."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
@@ -75,14 +101,14 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         fake_proc = MagicMock()
         fake_proc.memory_info.return_value = SimpleNamespace(rss=123456)
 
-        with patch("cyberdeck.api_local.psutil.cpu_percent", return_value=12.5), patch(
-            "cyberdeck.api_local.psutil.virtual_memory", return_value=fake_vm
+        with patch("cyberdeck.api.local.psutil.cpu_percent", return_value=12.5), patch(
+            "cyberdeck.api.local.psutil.virtual_memory", return_value=fake_vm
         ), patch(
-            "cyberdeck.api_local.psutil.boot_time", return_value=100.0
+            "cyberdeck.api.local.psutil.boot_time", return_value=100.0
         ), patch(
-            "cyberdeck.api_local.psutil.Process", return_value=fake_proc
+            "cyberdeck.api.local.psutil.Process", return_value=fake_proc
         ), patch(
-            "cyberdeck.api_local.time.time", return_value=130.0
+            "cyberdeck.api.local.time.time", return_value=130.0
         ):
             out = api_local.local_stats(_Req("::1"))
 
@@ -161,10 +187,10 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         """Validate scenario: test regenerate code resets pin limiter and expiry."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         fake_uuid = SimpleNamespace(int=98765432109876)
-        with patch("cyberdeck.api_local.uuid.uuid4", return_value=fake_uuid), patch.object(
+        with patch("cyberdeck.api.local.uuid.uuid4", return_value=fake_uuid), patch.object(
             api_local.config, "PAIRING_TTL_S", 60
         ), patch(
-            "cyberdeck.api_local.time.time", return_value=1000.0
+            "cyberdeck.api.local.time.time", return_value=1000.0
         ), patch.object(
             api_local.pin_limiter, "reset"
         ) as mreset:
@@ -188,7 +214,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
     def test_local_qr_payload_falls_back_to_base_url_when_encoding_fails(self):
         """Validate scenario: test local qr payload falls back to base url when encoding fails."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
-        with patch("cyberdeck.api_local.get_local_ip", return_value="10.1.1.60"), patch.object(
+        with patch("cyberdeck.api.local.get_local_ip", return_value="10.1.1.60"), patch.object(
             api_local.qr_token_store,
             "issue",
             return_value="qr-fallback",
@@ -201,11 +227,31 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
             "PORT",
             8080,
         ), patch(
-            "cyberdeck.api_local.urllib.parse.urlencode",
+            "cyberdeck.api.local.urllib.parse.urlencode",
             side_effect=ValueError("boom"),
         ):
             out = api_local.local_qr_payload(_Req("127.0.0.1"))
         self.assertEqual(out["url"], "http://10.1.1.60:8080/")
+
+    def test_local_qr_payload_uses_default_port_when_config_port_is_invalid(self):
+        """Validate scenario: test local qr payload uses default port when config port is invalid."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        with patch("cyberdeck.api.local.get_local_ip", return_value="10.1.1.61"), patch.object(
+            api_local.qr_token_store,
+            "issue",
+            return_value="qr-invalid-port",
+        ), patch.object(
+            api_local.config,
+            "SCHEME",
+            "http",
+        ), patch.object(
+            api_local.config,
+            "PORT",
+            "not-a-port",
+        ):
+            out = api_local.local_qr_payload(_Req("127.0.0.1"))
+        self.assertEqual(out["payload"]["port"], 80)
+        self.assertIn("http://10.1.1.61:80/?", out["url"])
 
     def test_qr_login_requires_qr_token(self):
         """Validate scenario: test qr login requires qr token."""
@@ -252,6 +298,46 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
             out = api_local.local_set_device_settings(req, _Req("::1"))
         self.assertEqual(out, {"ok": True})
 
+    def test_local_updates_returns_release_status_payload(self):
+        """Validate scenario: local updates endpoint should proxy normalized release status payload."""
+        fake_payload = {
+            "checked_at": 1700000002,
+            "server": {"current_version": "v1.3.1", "latest_tag": "v1.3.1", "has_update": False},
+            "launcher": {"current_version": "v1.3.1", "latest_tag": "v1.3.1", "has_update": False},
+            "mobile": {"current_version": "1.1.1", "latest_tag": "v1.1.1", "has_update": False},
+            "sources": {},
+        }
+        with patch("cyberdeck.api.local.build_update_status", return_value=fake_payload) as mocked:
+            out = api_local.local_updates(_Req("127.0.0.1"), force_refresh=1)
+        self.assertEqual(out, fake_payload)
+        self.assertTrue(mocked.called)
+
+    def test_local_stats_tolerates_psutil_errors(self):
+        """Validate scenario: test local stats tolerates psutil errors."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        with patch(
+            "cyberdeck.api.local.psutil.cpu_percent",
+            side_effect=RuntimeError("cpu-error"),
+        ), patch(
+            "cyberdeck.api.local.psutil.virtual_memory",
+            side_effect=RuntimeError("ram-error"),
+        ), patch(
+            "cyberdeck.api.local.psutil.boot_time",
+            side_effect=RuntimeError("boot-error"),
+        ), patch(
+            "cyberdeck.api.local.psutil.Process",
+            side_effect=RuntimeError("rss-error"),
+        ), patch(
+            "cyberdeck.api.local.time.time",
+            return_value=123.0,
+        ):
+            out = api_local.local_stats(_Req("localhost"))
+
+        self.assertEqual(out["cpu"], 0.0)
+        self.assertEqual(out["ram"], 0.0)
+        self.assertEqual(out["uptime_s"], 0)
+        self.assertEqual(out["process_ram"], 0)
+
     def test_local_device_disconnect_returns_404_for_unknown_token(self):
         """Validate scenario: test local device disconnect returns 404 for unknown token."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
@@ -274,7 +360,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
             "cyberdeck.context.running_loop",
             object(),
         ), patch(
-            "cyberdeck.api_local.asyncio.run_coroutine_threadsafe",
+            "cyberdeck.api.local.asyncio.run_coroutine_threadsafe",
             return_value=None,
         ) as mrun:
             out = api_local.local_device_disconnect(req, _Req("127.0.0.1"))
@@ -342,7 +428,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
             "cyberdeck.context.running_loop",
             object(),
         ), patch(
-            "cyberdeck.api_local.asyncio.run_coroutine_threadsafe",
+            "cyberdeck.api.local.asyncio.run_coroutine_threadsafe",
             side_effect=RuntimeError("close-error"),
         ):
             out = api_local.local_revoke_all(req, _Req("127.0.0.1"))
@@ -354,7 +440,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         """Validate scenario: test regenerate code handles bad ttl and reset error."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         fake_uuid = SimpleNamespace(int=1111222233334444)
-        with patch("cyberdeck.api_local.uuid.uuid4", return_value=fake_uuid), patch.object(
+        with patch("cyberdeck.api.local.uuid.uuid4", return_value=fake_uuid), patch.object(
             api_local.config,
             "PAIRING_TTL_S",
             "bad",
@@ -371,3 +457,4 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

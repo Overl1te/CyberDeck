@@ -1,7 +1,7 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch
 
-import cyberdeck.input_backend as input_backend
+import cyberdeck.input.backend as input_backend
 
 
 class InputBackendSelectionBehaviorTests(unittest.TestCase):
@@ -120,6 +120,38 @@ class InputBackendSelectionBehaviorTests(unittest.TestCase):
             backend = input_backend._build_backend()
 
         self.assertIsInstance(backend, FakeX11Backend)
+        self.assertTrue(backend.configured)
+
+    def test_backend_configure_failure_falls_back_to_null_backend(self):
+        """Validate scenario: configure error should not abort startup and should fallback to null backend."""
+
+        class BrokenBackend:
+            name = "broken_backend"
+
+            def _ensure(self) -> bool:
+                return True
+
+            def configure(self) -> None:
+                raise RuntimeError("configure_failed")
+
+        class FakeNullBackend:
+            name = "fake_null"
+
+            def __init__(self) -> None:
+                self.configured = False
+
+            def configure(self) -> None:
+                self.configured = True
+
+        with (
+            patch.object(input_backend, "_session_kind", return_value="windows"),
+            patch.object(input_backend, "_PyAutoGuiBackend", BrokenBackend),
+            patch.object(input_backend, "_NullBackend", FakeNullBackend),
+            patch.object(input_backend, "_is_linux_platform", return_value=False),
+        ):
+            backend = input_backend._build_backend()
+
+        self.assertIsInstance(backend, FakeNullBackend)
         self.assertTrue(backend.configured)
 
 

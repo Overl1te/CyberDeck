@@ -1,0 +1,13 @@
+fastapi
+pystray
+customtkinter
+packaging
+python-multipart
+aiofiles
+requests
+qrcode
+zeroconf
+uvicorn[standard]
+pillow
+mss
+psutil

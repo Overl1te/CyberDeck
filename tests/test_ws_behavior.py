@@ -7,8 +7,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from cyberdeck import config, context
 from cyberdeck.sessions import DeviceSession
-from cyberdeck.ws_mouse import router as ws_router
-import cyberdeck.ws_mouse as ws_mouse
+from cyberdeck.ws.mouse import router as ws_router
+import cyberdeck.ws.mouse as ws_mouse
 
 
 class _FakeInputBackend:
@@ -21,6 +21,7 @@ class _FakeInputBackend:
     def __init__(self):
         """Initialize _FakeInputBackend state and collaborator references."""
         self.text_payloads = []
+        self.moves = []
 
     def position(self):
         """Return the current pointer position."""
@@ -32,6 +33,7 @@ class _FakeInputBackend:
 
     def move_rel(self, dx: int, dy: int) -> bool:
         """Move the pointer by relative delta."""
+        self.moves.append((int(dx), int(dy)))
         return True
 
     def click(self, button: str = "left", double: bool = False) -> bool:
@@ -101,6 +103,7 @@ class WsBehaviorTests(unittest.TestCase):
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
         self.fake_backend.text_payloads.clear()
+        self.fake_backend.moves.clear()
 
     @staticmethod
     def _headers(token: str) -> dict:
@@ -186,6 +189,32 @@ class WsBehaviorTests(unittest.TestCase):
             with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)):
                 pass
         self.assertEqual(ctx.exception.code, 4003)
+
+    def test_ws_move_abs_accepts_normalized_coordinates(self):
+        """Validate scenario: absolute move should map normalized coordinates onto the virtual screen."""
+        token = "tok-move-abs-norm"
+        self._add_session(token)
+
+        with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+            ws.send_json({"type": "move_abs", "x": 1.0, "y": 0.0})
+            ws.send_json({"type": "ping", "id": "p1"})
+            ws.receive_json()
+            self.assertEqual(ws_mouse._get_virtual_cursor(token), (1919, 0, 1920, 1080))
+
+        self.assertEqual(self.fake_backend.moves[-1], (959, -540))
+
+    def test_ws_move_abs_accepts_pixel_coordinates(self):
+        """Validate scenario: absolute move should also accept pixel coordinates for compatibility."""
+        token = "tok-move-abs-px"
+        self._add_session(token)
+
+        with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+            ws.send_json({"type": "move_abs", "x": 100, "y": 50})
+            ws.send_json({"type": "ping", "id": "p1"})
+            ws.receive_json()
+            self.assertEqual(ws_mouse._get_virtual_cursor(token), (100, 50, 1920, 1080))
+
+        self.assertEqual(self.fake_backend.moves[-1], (-860, -490))
 
     def test_ws_reconnect_keeps_newer_socket(self):
         """Validate scenario: test ws reconnect keeps newer socket."""

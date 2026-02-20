@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import hashlib
 import http.server
 import os
@@ -317,3 +317,5 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
     except Exception as e:
         log.exception("Trigger transfer failed")
         return False, str(e)
+
+

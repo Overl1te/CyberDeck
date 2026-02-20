@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
@@ -8,7 +8,8 @@ from . import config
 
 def setup_logging() -> logging.Logger:
     """Set up logging."""
-    os.makedirs(config.BASE_DIR, exist_ok=True)
+    log_dir = os.path.dirname(os.path.abspath(str(config.LOG_FILE)))
+    os.makedirs(log_dir, exist_ok=True)
     logger = logging.getLogger("cyberdeck")
     logger.setLevel(logging.DEBUG if config.DEBUG else logging.INFO)
 
@@ -79,3 +80,5 @@ def reload_logging() -> logging.Logger:
             pass
 
     return setup_logging()
+
+

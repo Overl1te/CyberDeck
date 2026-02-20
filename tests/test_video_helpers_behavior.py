@@ -1,9 +1,9 @@
-import os
+﻿import os
 import unittest
 from unittest.mock import patch
 
 import cyberdeck.video as video
-import cyberdeck.video_mjpeg as video_mjpeg
+import cyberdeck.video.mjpeg as video_mjpeg
 
 
 class _InlineThread:
@@ -176,6 +176,53 @@ class VideoHelpersBehaviorTests(unittest.TestCase):
 
         self.assertFalse(status["ffmpeg"])
 
+    def test_mjpeg_backend_status_accepts_boolean_words_for_disable_flag(self):
+        """Validate scenario: disable flag should support bool-like env values, not only 1/0."""
+        with patch.object(video_mjpeg, "_ffmpeg_available", return_value=True), patch.object(
+            video_mjpeg, "_build_ffmpeg_input_arg_sets", return_value=[["-f", "x11grab"]]
+        ), patch.object(
+            video_mjpeg, "video_streamer"
+        ) as mstream, patch.dict(
+            video_mjpeg.os.environ, {"CYBERDECK_DISABLE_FFMPEG_MJPEG": "yes"}, clear=False
+        ):
+            mstream.disabled_reason.return_value = "wayland_session"
+            mstream.is_native_healthy.return_value = False
+            status = video_mjpeg._mjpeg_backend_status(1, 20)
+
+        self.assertFalse(status["ffmpeg"])
+
+    def test_wayland_force_x11grab_accepts_boolean_words(self):
+        """Validate scenario: force-x11grab env should accept bool-like values."""
+        with patch.object(video_mjpeg.os, "name", "posix"), patch.dict(
+            os.environ, {"CYBERDECK_FORCE_WAYLAND_X11GRAB": "yes"}, clear=False
+        ), patch.object(
+            video_mjpeg, "_is_wayland_session", return_value=True
+        ), patch.object(
+            video_mjpeg, "_ffmpeg_available", return_value=True
+        ), patch.object(
+            video_mjpeg, "_build_ffmpeg_input_arg_sets", return_value=[["-f", "x11grab"]]
+        ), patch.object(
+            video_mjpeg, "_ffmpeg_supports_pipewire", return_value=False
+        ), patch.object(
+            video_mjpeg, "_ffmpeg_supports_x11grab", return_value=True
+        ), patch.object(
+            video_mjpeg, "_gst_available", return_value=True
+        ), patch.object(
+            video_mjpeg, "_gst_supports_pipewire", return_value=True
+        ), patch.object(
+            video_mjpeg, "_grim_available", return_value=False
+        ), patch.object(
+            video_mjpeg, "_screenshot_tool_available", return_value=False
+        ), patch.object(
+            video_mjpeg, "video_streamer"
+        ) as mstream:
+            mstream.disabled_reason.return_value = "wayland_session"
+            mstream.is_native_healthy.return_value = False
+            status = video_mjpeg._mjpeg_backend_status(1, 20)
+
+        self.assertTrue(status["ffmpeg"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

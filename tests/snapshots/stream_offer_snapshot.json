@@ -1,0 +1,91 @@
+{
+  "recommended": "h264_ts",
+  "candidates": [
+    {
+      "id": "h264_ts",
+      "codec": "h264",
+      "container": "mpegts",
+      "mime": "video/mp2t",
+      "url": "/video_h264?bitrate_k=3200&fps=30&gop=60&low_latency=0&max_w=1280&monitor=1&preset=veryfast&token=snap-token"
+    },
+    {
+      "id": "mjpeg",
+      "codec": "mjpeg",
+      "container": "multipart",
+      "mime": "multipart/x-mixed-replace; boundary=frame",
+      "url": "/video_feed?backend=native&cursor=0&fps=30&low_latency=0&max_w=1280&monitor=1&quality=55&token=snap-token",
+      "backend": "native"
+    },
+    {
+      "id": "mjpeg_ffmpeg",
+      "codec": "mjpeg",
+      "container": "multipart",
+      "mime": "multipart/x-mixed-replace; boundary=frame",
+      "url": "/video_feed?backend=ffmpeg&cursor=0&fps=30&low_latency=0&max_w=1280&monitor=1&quality=55&token=snap-token",
+      "backend": "ffmpeg"
+    },
+    {
+      "id": "h265_ts",
+      "codec": "h265",
+      "container": "mpegts",
+      "mime": "video/mp2t",
+      "url": "/video_h265?bitrate_k=2560&fps=30&gop=60&low_latency=0&max_w=1280&monitor=1&preset=veryfast&token=snap-token"
+    }
+  ],
+  "fallback_policy": "ordered_candidates",
+  "reconnect_hint_ms": 700,
+  "adaptive_hint": {
+    "rtt_high_ms": 220,
+    "rtt_critical_ms": 340,
+    "fps_drop_threshold": 0.62,
+    "decrease_step": {
+      "fps": 2,
+      "max_w": 64,
+      "quality": 5
+    },
+    "increase_step": {
+      "fps": 1,
+      "max_w": 64,
+      "quality": 2
+    },
+    "width_ladder": [
+      1920,
+      1280,
+      960
+    ],
+    "min_switch_interval_ms": 8000,
+    "hysteresis_ratio": 0.18,
+    "min_width_floor": 1024,
+    "prefer_low_latency_default": true,
+    "prefer_quality_before_resize": true,
+    "recommended_stream_cursor": 0
+  },
+  "support": {
+    "capture_input": true,
+    "h264_encoder": true,
+    "h265_encoder": true,
+    "mjpeg_native": true,
+    "mjpeg_ffmpeg": true,
+    "mjpeg_gstreamer": false,
+    "mjpeg_grim": false,
+    "mjpeg_order": [
+      "native",
+      "ffmpeg"
+    ]
+  },
+  "diag": {
+    "ffmpeg_available": true
+  },
+  "protocol_version": 2,
+  "min_supported_protocol_version": 1,
+  "server_version": "v1.3.1",
+  "features": {
+    "stream_offer_v2": true,
+    "stream_backend_select": true,
+    "stream_diag": true,
+    "ws_cursor": true,
+    "ws_heartbeat": true,
+    "file_transfer_resume": true,
+    "file_transfer_checksum": true
+  }
+}

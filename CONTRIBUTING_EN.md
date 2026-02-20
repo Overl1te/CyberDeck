@@ -30,16 +30,18 @@ This document explains project architecture and contribution workflow to keep ch
 | Path | Purpose |
 |---|---|
 | `launcher.py` | Launcher orchestration: UI, server lifecycle, tray, QR, settings |
-| `cyberdeck/launcher_ui_home.py` | Home view |
-| `cyberdeck/launcher_ui_devices.py` | Devices view, permissions, transfer presets |
-| `cyberdeck/launcher_ui_settings.py` | Settings view, app config, TLS, runtime params |
+| `cyberdeck/launcher/ui/home.py` | Home view |
+| `cyberdeck/launcher/ui/devices.py` | Devices view, permissions, transfer presets |
+| `cyberdeck/launcher/ui/settings.py` | Settings view, app config, TLS, runtime params |
 | `main.py` | Server entry point |
 | `cyberdeck/server.py` | FastAPI app composition and router wiring |
-| `cyberdeck/api_core.py` | Public API (handshake/upload/protocol/stats) |
-| `cyberdeck/api_local.py` | Local launcher API (`/api/local/*`) |
-| `cyberdeck/api_system.py` | System actions and volume control |
-| `cyberdeck/ws_mouse.py` | Input WebSocket channel |
-| `cyberdeck/video.py` | Streaming endpoints and backend adaptation |
+| `cyberdeck/api/core.py` | Public API (handshake/upload/protocol/stats) |
+| `cyberdeck/api/local.py` | Local launcher API (`/api/local/*`) |
+| `cyberdeck/api/system.py` | System actions and volume control |
+| `cyberdeck/ws/mouse.py` | Input WebSocket channel |
+| `cyberdeck/video/` | Streaming endpoints and backend adaptation |
+| `cyberdeck/input/` | Input backend selection and implementations |
+| `cyberdeck/platform/wayland_setup.py` | Wayland runtime/setup checks |
 | `cyberdeck/transfer.py` | Host-to-device file transfer |
 | `cyberdeck/sessions.py` | Session persistence, TTL, cleanup |
 | `tests/` | Unit/behavioral test suite |
@@ -69,6 +71,8 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements-dev.txt
+# for desktop-input development/testing:
+pip install -r requirements-desktop-input.txt
 ```
 
 ## Setup and run from source
@@ -83,6 +87,12 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+```
+
+Core-only installation (without desktop-input backends):
+
+```bash
+pip install -r requirements-core.txt
 ```
 
 Run application (launcher):
@@ -132,7 +142,7 @@ python -m unittest discover -s tests -p "test_*.py"
 Focused run:
 
 ```bash
-pytest -q tests/test_launcher_ui_logic.py
+pytest -q tests/test_launcher_shared_behavior.py
 ```
 
 Docker run:
@@ -141,6 +151,8 @@ Docker run:
 docker compose -f docker-compose.tests.yml build
 docker compose -f docker-compose.tests.yml run --rm tests
 ```
+
+Note: Docker tests intentionally use `requirements-dev.txt` (without `requirements-desktop-input.txt`).
 
 ## Build
 

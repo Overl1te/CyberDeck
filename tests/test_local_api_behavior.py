@@ -1,4 +1,4 @@
-import os
+﻿import os
 import tempfile
 import unittest
 
@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from cyberdeck import config
 from cyberdeck import context
-from cyberdeck.api_local import _require_localhost, router as local_router
+from cyberdeck.api.local import _require_localhost, router as local_router
 from cyberdeck.qr_auth import qr_token_store
 
 
@@ -48,9 +48,12 @@ class LocalApiBehaviorTests(unittest.TestCase):
         # Test body is intentionally explicit so regressions are easy to diagnose.
         _require_localhost(_Req("127.0.0.1"))
         _require_localhost(_Req("::1"))
+        _require_localhost(_Req("::ffff:127.0.0.1"))
         _require_localhost(_Req("localhost"))
         with self.assertRaises(HTTPException):
             _require_localhost(_Req("192.168.1.10"))
+        with self.assertRaises(HTTPException):
+            _require_localhost(_Req("::ffff:192.168.1.10"))
 
     def test_qr_login_consumes_single_use_token(self):
         """Validate scenario: test qr login consumes single use token."""
@@ -80,3 +83,4 @@ class LocalApiBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

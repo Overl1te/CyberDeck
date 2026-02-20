@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import unittest
 from unittest.mock import patch
@@ -76,6 +77,54 @@ class ServerBehaviorTests(unittest.TestCase):
         with patch("cyberdeck.server.socket.socket", return_value=fake):
             ok = self.server._port_available(8080)
         self.assertFalse(ok)
+
+    def test_run_parses_wayland_auto_setup_boolean_words(self):
+        """Validate scenario: run should parse CYBERDECK_WAYLAND_AUTO_SETUP using bool-like words."""
+        with patch.dict(os.environ, {"CYBERDECK_WAYLAND_AUTO_SETUP": "off"}, clear=False), patch.object(
+            self.server, "is_linux_wayland_session", return_value=True
+        ), patch.object(
+            self.server, "ensure_wayland_ready", return_value=(True, [], False, "already_ready")
+        ) as mready, patch.object(
+            self.server, "start_mdns", return_value=None
+        ), patch.object(
+            self.server, "_port_available", return_value=True
+        ), patch.object(
+            self.server.config, "PORT_AUTO", False
+        ), patch.object(
+            self.server.config, "MDNS_ENABLED", False
+        ), patch.object(
+            self.server.uvicorn, "run", return_value=None
+        ):
+            self.server.run()
+
+        self.assertTrue(mready.called)
+        kwargs = mready.call_args.kwargs
+        self.assertIn("auto_install", kwargs)
+        self.assertFalse(kwargs["auto_install"])
+
+    def test_run_treats_yes_as_enabled_wayland_auto_setup(self):
+        """Validate scenario: run should treat 'yes' as enabled auto setup."""
+        with patch.dict(os.environ, {"CYBERDECK_WAYLAND_AUTO_SETUP": "yes"}, clear=False), patch.object(
+            self.server, "is_linux_wayland_session", return_value=True
+        ), patch.object(
+            self.server, "ensure_wayland_ready", return_value=(True, [], False, "already_ready")
+        ) as mready, patch.object(
+            self.server, "start_mdns", return_value=None
+        ), patch.object(
+            self.server, "_port_available", return_value=True
+        ), patch.object(
+            self.server.config, "PORT_AUTO", False
+        ), patch.object(
+            self.server.config, "MDNS_ENABLED", False
+        ), patch.object(
+            self.server.uvicorn, "run", return_value=None
+        ):
+            self.server.run()
+
+        self.assertTrue(mready.called)
+        kwargs = mready.call_args.kwargs
+        self.assertIn("auto_install", kwargs)
+        self.assertTrue(kwargs["auto_install"])
 
 
 if __name__ == "__main__":

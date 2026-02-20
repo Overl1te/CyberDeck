@@ -1,11 +1,12 @@
-import unittest
+﻿import unittest
 from types import SimpleNamespace
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import cyberdeck.api_system as api_system
+import cyberdeck.api.system as api_system
 from cyberdeck import context
 from cyberdeck.sessions import DeviceSession
 
@@ -48,7 +49,7 @@ class ApiSystemBehaviorTests(unittest.TestCase):
         # Test body is intentionally explicit so regressions are easy to diagnose.
         p_fail = MagicMock(returncode=1)
         p_ok = MagicMock(returncode=0)
-        with patch("cyberdeck.api_system.subprocess.run", side_effect=[p_fail, p_ok]) as mrun:
+        with patch("cyberdeck.api.system.subprocess.run", side_effect=[p_fail, p_ok]) as mrun:
             ok = api_system._run_first_ok([["cmd1"], ["cmd2"]])
         self.assertTrue(ok)
         self.assertEqual(mrun.call_count, 2)
@@ -57,9 +58,25 @@ class ApiSystemBehaviorTests(unittest.TestCase):
         """Validate scenario: test run first ok returns false when all fail."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         p_fail = MagicMock(returncode=5)
-        with patch("cyberdeck.api_system.subprocess.run", return_value=p_fail):
+        with patch("cyberdeck.api.system.subprocess.run", return_value=p_fail):
             ok = api_system._run_first_ok([["a"], ["b"]])
         self.assertFalse(ok)
+
+    def test_run_first_ok_continues_after_timeout_and_uses_timeout_kwarg(self):
+        """Validate scenario: command timeout should not abort fallback chain."""
+        p_ok = MagicMock(returncode=0)
+        with patch(
+            "cyberdeck.api.system.subprocess.run",
+            side_effect=[subprocess.TimeoutExpired(cmd=["a"], timeout=api_system._COMMAND_TIMEOUT_S), p_ok],
+        ) as mrun:
+            ok = api_system._run_first_ok([["a"], ["b"]])
+
+        self.assertTrue(ok)
+        self.assertEqual(mrun.call_count, 2)
+        first_kwargs = mrun.call_args_list[0].kwargs
+        second_kwargs = mrun.call_args_list[1].kwargs
+        self.assertEqual(first_kwargs.get("timeout"), api_system._COMMAND_TIMEOUT_S)
+        self.assertEqual(second_kwargs.get("timeout"), api_system._COMMAND_TIMEOUT_S)
 
     def test_shutdown_linux_success(self):
         """Validate scenario: test shutdown linux success."""
@@ -152,7 +169,7 @@ class ApiSystemBehaviorTests(unittest.TestCase):
     def test_run_background_ok_handles_spawn_errors(self):
         """Validate scenario: test run background ok handles spawn errors."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
-        with patch("cyberdeck.api_system.subprocess.Popen", side_effect=OSError("boom")):
+        with patch("cyberdeck.api.system.subprocess.Popen", side_effect=OSError("boom")):
             self.assertFalse(api_system._run_background_ok(["noop"]))
 
     def test_linux_logoff_cmds_includes_session_terminate_when_session_id_present(self):
@@ -251,3 +268,4 @@ class ApiSystemBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

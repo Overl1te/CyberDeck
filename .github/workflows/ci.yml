@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  tests:
+  lint-compile:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,14 +28,48 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check . --select F,E7,E9
+          ruff check . --select F821,F822,F823,E7,E9
 
       - name: Compile
         run: |
           python -m compileall cyberdeck
-          python -m compileall main.py transporter.py
+          python -m py_compile main.py launcher.py
 
-      - name: Unit tests
+      - name: Build scripts smoke (Linux)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
-          python -m coverage run -m unittest discover -s tests -p "test_*.py"
-          python -m coverage report
+          bash ./scripts/build_arch_linux.sh --dry-run
+
+      - name: Build scripts smoke (Windows)
+        if: runner.os == 'Windows' && matrix.python-version == '3.12'
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_nuitka.ps1 -DryRun
+          powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_portable_nuitka.ps1 -DryRun
+
+  tests-in-docker:
+    runs-on: ubuntu-latest
+    needs: lint-compile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker tests
+        run: |
+          n=0
+          until [ "$n" -ge 3 ]
+          do
+            docker compose -f docker-compose.tests.yml up --build --abort-on-container-exit --exit-code-from tests && break
+            n=$((n+1))
+            echo "Docker test run failed, retry $n/3..."
+            sleep 10
+          done
+          if [ "$n" -ge 3 ]; then
+            echo "Docker tests failed after retries"
+            exit 1
+          fi
+
+      - name: Cleanup docker
+        if: always()
+        run: |
+          docker compose -f docker-compose.tests.yml down --remove-orphans

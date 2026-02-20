@@ -1,0 +1,9 @@
+{
+  "allow_query_token": false,
+  "upload_max_bytes": 0,
+  "upload_allowed_ext": "",
+  "verbose_http_log": true,
+  "verbose_ws_log": true,
+  "verbose_stream_log": true,
+  "mdns_enabled": true
+}

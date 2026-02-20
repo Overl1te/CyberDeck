@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse
 import unittest
@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from cyberdeck import config, context
-from cyberdeck.api_core import router as core_router
+from cyberdeck.api.core import router as core_router
 from cyberdeck.sessions import DeviceSession
 from cyberdeck.video import router as video_router
 import cyberdeck.video as video
@@ -168,3 +168,4 @@ class ContractSnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,6 +1,6 @@
-import unittest
+﻿import unittest
 
-from cyberdeck.ws_protocol import (
+from cyberdeck.ws.protocol import (
     build_server_hello,
     extract_text_payload,
     is_text_event_type,
@@ -42,3 +42,4 @@ class WsTextBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

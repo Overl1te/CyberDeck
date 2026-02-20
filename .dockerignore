@@ -8,7 +8,7 @@ __pycache__
 .coverage
 .coverage.*
 build
-dist
+dis*
 dist-nuitka
 dist-nuitka-win
 Output

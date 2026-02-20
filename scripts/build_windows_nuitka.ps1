@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RepoRoot
 $IconIco = Join-Path $RepoRoot "icon.ico"
+$RequirementsBuild = Join-Path $RepoRoot "requirements-build.txt"
 
 function Stop-CyberDeckFromDist {
   param(
@@ -71,26 +72,8 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path $IconIco)) {
   throw "icon.ico not found: $IconIco"
 }
-
-python -m venv .venv
-
-$Activate = Join-Path $RepoRoot ".venv\Scripts\Activate.ps1"
-if (-not (Test-Path $Activate)) {
-  throw "Venv activation script not found: $Activate"
-}
-
-. $Activate
-
-python -m pip install -U pip
-pip install -r requirements.txt
-
-$distDir = Join-Path $RepoRoot "dist"
-if (Test-Path $distDir) {
-  Stop-CyberDeckFromDist -DistPath $distDir
-  $cleanOk = Remove-PathWithRetries -Path $distDir
-  if (-not $cleanOk) {
-    throw "Failed to clean '$distDir'. Close processes using that folder and retry."
-  }
+if (-not (Test-Path $RequirementsBuild)) {
+  throw "requirements-build.txt not found: $RequirementsBuild"
 }
 
 $nuitkaArgs = @(
@@ -115,6 +98,27 @@ if ($DryRun) {
   Write-Host "Dry run. Nuitka command:"
   Write-Host ("python -m nuitka {0}" -f ($nuitkaArgs -join " "))
   exit 0
+}
+
+python -m venv .venv
+
+$Activate = Join-Path $RepoRoot ".venv\Scripts\Activate.ps1"
+if (-not (Test-Path $Activate)) {
+  throw "Venv activation script not found: $Activate"
+}
+
+. $Activate
+
+python -m pip install -U pip
+pip install -r requirements-build.txt
+
+$distDir = Join-Path $RepoRoot "dist"
+if (Test-Path $distDir) {
+  Stop-CyberDeckFromDist -DistPath $distDir
+  $cleanOk = Remove-PathWithRetries -Path $distDir
+  if (-not $cleanOk) {
+    throw "Failed to clean '$distDir'. Close processes using that folder and retry."
+  }
 }
 
 python -m nuitka @nuitkaArgs

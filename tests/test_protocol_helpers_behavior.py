@@ -1,9 +1,9 @@
-import time
+﻿import time
 import unittest
 
 from cyberdeck import config
 from cyberdeck.protocol import protocol_features, protocol_payload
-from cyberdeck.ws_protocol import extract_text_payload, is_text_event_type
+from cyberdeck.ws.protocol import extract_text_payload, is_text_event_type
 
 
 class ProtocolHelpersBehaviorTests(unittest.TestCase):
@@ -62,3 +62,4 @@ class ProtocolHelpersBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

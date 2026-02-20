@@ -1,11 +1,11 @@
-import unittest
+﻿import unittest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import cyberdeck.api_system as api_system
+import cyberdeck.api.system as api_system
 from cyberdeck import context
-from cyberdeck.api_core import router as core_router
+from cyberdeck.api.core import router as core_router
 from cyberdeck.sessions import DeviceSession
 from cyberdeck.video import router as video_router
 
@@ -92,3 +92,4 @@ class PermissionsEnforcementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

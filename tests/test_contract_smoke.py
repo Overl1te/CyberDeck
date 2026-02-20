@@ -1,4 +1,4 @@
-import os
+﻿import os
 import tempfile
 import unittest
 
@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from cyberdeck import config
 from cyberdeck import context
-from cyberdeck.api_core import router as core_router
+from cyberdeck.api.core import router as core_router
 from cyberdeck.video import router as video_router
 
 
@@ -88,3 +88,4 @@ class ContractSmokeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

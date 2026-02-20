@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 import os
 import tempfile
 import unittest
@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from cyberdeck import config
 from cyberdeck import context
-from cyberdeck.api_core import router as core_router
+from cyberdeck.api.core import router as core_router
 from cyberdeck.video import router as video_router
 
 
@@ -107,7 +107,7 @@ class ApiBehaviorTests(unittest.TestCase):
         old_exp = getattr(config, "PAIRING_EXPIRES_AT", None)
         try:
             config.PAIRING_EXPIRES_AT = 1.0
-            with patch("cyberdeck.api_core.time.time", return_value=2.0):
+            with patch("cyberdeck.api.core.time.time", return_value=2.0):
                 r = self.client.post(
                     "/api/handshake",
                     json={"code": "1234", "device_id": "expired-1", "device_name": "Expired"},
@@ -120,7 +120,7 @@ class ApiBehaviorTests(unittest.TestCase):
     def test_handshake_rejects_rate_limited_client(self):
         """Validate scenario: test handshake rejects rate limited client."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
-        with patch("cyberdeck.api_core.pin_limiter.check", return_value=(False, 4.2)):
+        with patch("cyberdeck.api.core.pin_limiter.check", return_value=(False, 4.2)):
             r = self.client.post(
                 "/api/handshake",
                 json={"code": "1234", "device_id": "rate-limit-1", "device_name": "Rate Limited"},
@@ -132,8 +132,8 @@ class ApiBehaviorTests(unittest.TestCase):
     def test_handshake_rejects_invalid_pairing_code(self):
         """Validate scenario: test handshake rejects invalid pairing code."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
-        with patch("cyberdeck.api_core.pin_limiter.check", return_value=(True, 0)), patch(
-            "cyberdeck.api_core.pin_limiter.record_failure"
+        with patch("cyberdeck.api.core.pin_limiter.check", return_value=(True, 0)), patch(
+            "cyberdeck.api.core.pin_limiter.record_failure"
         ) as mfail:
             r = self.client.post(
                 "/api/handshake",
@@ -143,6 +143,35 @@ class ApiBehaviorTests(unittest.TestCase):
         self.assertIn("Invalid Code", r.text)
         mfail.assert_called_once()
 
+    def test_stats_tolerates_psutil_errors(self):
+        """Validate scenario: test stats tolerates psutil errors."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        token = self._token()
+        with patch("cyberdeck.api.core.psutil.cpu_percent", side_effect=RuntimeError("cpu-error")), patch(
+            "cyberdeck.api.core.psutil.virtual_memory",
+            side_effect=RuntimeError("ram-error"),
+        ):
+            r = self.client.get("/api/stats", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body.get("cpu"), 0.0)
+        self.assertEqual(body.get("ram"), 0.0)
+
+    def test_diag_tolerates_psutil_errors(self):
+        """Validate scenario: test diag tolerates psutil errors."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        token = self._token()
+        with patch("cyberdeck.api.core.psutil.cpu_percent", side_effect=RuntimeError("cpu-error")), patch(
+            "cyberdeck.api.core.psutil.virtual_memory",
+            side_effect=RuntimeError("ram-error"),
+        ):
+            r = self.client.get("/api/diag", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body.get("cpu"), 0.0)
+        self.assertEqual(body.get("ram"), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

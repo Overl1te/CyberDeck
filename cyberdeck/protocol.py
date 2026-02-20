@@ -1,4 +1,4 @@
-"""Server protocol metadata shared across HTTP and WebSocket endpoints."""
+﻿"""Server protocol metadata shared across HTTP and WebSocket endpoints."""
 
 import time
 from typing import Any, Dict
@@ -28,3 +28,5 @@ def protocol_payload() -> Dict[str, Any]:
         "server_time_ms": int(time.time() * 1000),
         "features": protocol_features(),
     }
+
+

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import threading
 import time
@@ -26,6 +26,7 @@ class DeviceSession:
     settings: Dict[str, Any] = field(default_factory=dict)
     created_ts: float = field(default_factory=lambda: time.time())
     last_seen_ts: float = field(default_factory=lambda: time.time())
+    last_ws_seen_ts: float = field(default_factory=lambda: 0.0)
 
 
 class DeviceManager:
@@ -104,6 +105,7 @@ class DeviceManager:
                 "settings": s.settings,
                 "created_ts": float(getattr(s, "created_ts", 0.0) or 0.0),
                 "last_seen_ts": float(getattr(s, "last_seen_ts", 0.0) or 0.0),
+                "last_ws_seen_ts": float(getattr(s, "last_ws_seen_ts", 0.0) or 0.0),
             }
             for t, s in self.sessions.items()
         }
@@ -183,6 +185,7 @@ class DeviceManager:
                             settings=i.get("settings") or {},
                             created_ts=float(i.get("created_ts") or time.time()),
                             last_seen_ts=float(i.get("last_seen_ts") or time.time()),
+                            last_ws_seen_ts=float(i.get("last_ws_seen_ts") or i.get("last_seen_ts") or 0.0),
                         )
             with self._lock:
                 self.sessions = loaded
@@ -226,6 +229,7 @@ class DeviceManager:
         with self._lock:
             if token in self.sessions:
                 self.sessions[token].websocket = ws
+                self.sessions[token].last_ws_seen_ts = time.time()
                 self._touch(self.sessions[token])
 
     def unregister_socket(self, token: str, ws: Optional[WebSocket] = None) -> None:
@@ -236,6 +240,7 @@ class DeviceManager:
                 if ws is not None and cur is not ws:
                     return
                 self.sessions[token].websocket = None
+                self.sessions[token].last_ws_seen_ts = time.time()
                 self._touch(self.sessions[token])
 
     def delete_session(self, token: str) -> bool:
@@ -277,16 +282,28 @@ class DeviceManager:
         # Read-path helpers should avoid mutating shared state where possible.
         with self._lock:
             out = []
+            now = time.time()
+            try:
+                grace_s = max(0.0, float(getattr(config, "DEVICE_ONLINE_GRACE_S", 0.0) or 0.0))
+            except Exception:
+                grace_s = 0.0
             for t, s in self.sessions.items():
+                try:
+                    last_ws = float(getattr(s, "last_ws_seen_ts", 0.0) or 0.0)
+                except Exception:
+                    last_ws = 0.0
+                online = bool(s.websocket) or (grace_s > 0.0 and (now - last_ws) <= grace_s)
                 out.append(
                     {
                         "name": s.device_name,
                         "ip": s.ip,
                         "token": t,
-                        "online": bool(s.websocket),
+                        "online": bool(online),
                         "settings": s.settings,
                         "created_ts": float(getattr(s, "created_ts", 0.0) or 0.0),
                         "last_seen_ts": float(getattr(s, "last_seen_ts", 0.0) or 0.0),
                     }
                 )
             return out
+
+

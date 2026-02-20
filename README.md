@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon.png" width="400" height="400" />
+  <img src="icon-qr-code.png" width="400" height="400" />
 </p>
 
 <h1 align="center">CyberDeck Control — удаленное управление ПК</h1>
@@ -10,6 +10,7 @@
   <a href="README_EN.md"><img src="https://img.shields.io/badge/lang-English-1f6feb" alt="English"></a>
 </p>
 
+
 <p align="center">
   Управление компьютером со смартфона в локальной сети: подключение по PIN/QR, ввод, видеопоток, передача файлов и разрешений для устройств.
 </p>
@@ -19,6 +20,13 @@
   <a href="#сценарии-использования">Сценарий работы</a> •
   <a href="#базовые-жесты">Жесты</a> •
   <a href="#faq">FAQ</a>
+</p>
+
+<p align="center">
+  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=quality&format=svg&theme=midnight&locale=ru&card_width=760&animate=true&animation=all&duration=1400" alt="CyberDeck repository stats card" />
+</p>
+<p align="center">
+  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=repo&format=svg&theme=midnight&locale=ru&card_width=760&animate=true&animation=all&duration=1400&langs_count=4" alt="CyberDeck quality card" />
 </p>
 
 ---
@@ -78,6 +86,9 @@
 
 Вся техническая часть перенесена в `CONTRIBUTING.md`:
 
+- актуальная структура модулей: `cyberdeck/api`, `cyberdeck/video`, `cyberdeck/ws`, `cyberdeck/launcher`, `cyberdeck/input`, `cyberdeck/platform`;
+- разделение зависимостей: `requirements-core.txt` и `requirements-desktop-input.txt`;
+
 - установка из исходников;
 - запуск в разных режимах;
 - API и эндпоинты;
@@ -101,3 +112,4 @@
 
 **Лицензия:** GNU GPLv3 (`LICENSE`)  
 **Автор:** Overl1te — <https://github.com/Overl1te>
+

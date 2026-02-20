@@ -1,4 +1,4 @@
-"""In-memory one-time token storage for QR login flow."""
+﻿"""In-memory one-time token storage for QR login flow."""
 
 import threading
 import time
@@ -69,3 +69,5 @@ class QrTokenStore:
 
 
 qr_token_store = QrTokenStore()
+
+

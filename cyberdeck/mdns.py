@@ -1,4 +1,4 @@
-import atexit
+﻿import atexit
 import socket
 from typing import Optional, Tuple
 
@@ -56,3 +56,5 @@ def start_mdns() -> Optional[Tuple[object, object]]:
     except Exception:
         log.exception("mDNS start failed")
         return None
+
+

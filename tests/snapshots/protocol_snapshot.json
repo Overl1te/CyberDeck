@@ -1,0 +1,14 @@
+{
+  "protocol_version": 2,
+  "min_supported_protocol_version": 1,
+  "server_version": "v1.3.1",
+  "features": {
+    "stream_offer_v2": true,
+    "stream_backend_select": true,
+    "stream_diag": true,
+    "ws_cursor": true,
+    "ws_heartbeat": true,
+    "file_transfer_resume": true,
+    "file_transfer_checksum": true
+  }
+}

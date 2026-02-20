@@ -1,13 +1,14 @@
-import os
+﻿import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from cyberdeck import config
 from cyberdeck import context
-from cyberdeck.api_core import router as core_router
+from cyberdeck.api.core import router as core_router
 
 
 class UploadConstraintsTests(unittest.TestCase):
@@ -143,6 +144,36 @@ class UploadConstraintsTests(unittest.TestCase):
         self.assertEqual(name, "evil.txt")
         self.assertTrue(os.path.exists(os.path.join(config.FILES_DIR, name)))
 
+    def test_upload_normalizes_windows_style_path_filename(self):
+        """Validate scenario: test upload normalizes windows style path filename."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        token = self._token()
+        r = self.client.post(
+            "/api/file/upload",
+            files={"file": ("..\\evil-win.txt", b"abc", "text/plain")},
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        name = str(r.json().get("filename"))
+        self.assertEqual(name, "evil-win.txt")
+        self.assertTrue(os.path.exists(os.path.join(config.FILES_DIR, name)))
+
+    def test_upload_accepts_allowed_extension_without_dot_prefix(self):
+        """Validate scenario: test upload accepts allowed extension without dot prefix."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        token = self._token()
+        old_ext = list(config.UPLOAD_ALLOWED_EXT)
+        try:
+            config.UPLOAD_ALLOWED_EXT = ["txt"]
+            ok = self.client.post(
+                "/api/file/upload",
+                files={"file": ("payload.TXT", b"x", "text/plain")},
+                headers=self._auth_headers(token),
+            )
+            self.assertEqual(ok.status_code, 200, ok.text)
+        finally:
+            config.UPLOAD_ALLOWED_EXT = old_ext
+
     def test_upload_truncates_very_long_filename(self):
         """Validate scenario: test upload truncates very long filename."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
@@ -173,6 +204,23 @@ class UploadConstraintsTests(unittest.TestCase):
         after = {x for x in os.listdir(config.FILES_DIR) if ".part-" in x}
         self.assertEqual(before, after)
 
+    def test_upload_internal_error_returns_500_and_cleans_temp_part_file(self):
+        """Validate scenario: test upload internal error returns 500 and cleans temp part file."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        token = self._token()
+        before = {x for x in os.listdir(config.FILES_DIR) if ".part-" in x}
+        with patch("cyberdeck.api.core.os.replace", side_effect=OSError("disk-full")):
+            failed = self.client.post(
+                "/api/file/upload",
+                files={"file": ("will-fail.txt", b"payload", "text/plain")},
+                headers=self._auth_headers(token),
+            )
+        self.assertEqual(failed.status_code, 500, failed.text)
+        self.assertIn("upload_failed", failed.text)
+        after = {x for x in os.listdir(config.FILES_DIR) if ".part-" in x}
+        self.assertEqual(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()
+

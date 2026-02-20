@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import sys
 import tempfile
@@ -13,7 +13,7 @@ if "pystray" not in sys.modules:
     pystray_stub.Icon = lambda *args, **kwargs: None
     sys.modules["pystray"] = pystray_stub
 
-import cyberdeck.launcher_shared as ls
+import cyberdeck.launcher.shared as ls
 
 
 class _OwnerWithTr:
@@ -33,7 +33,7 @@ class LauncherSharedBehaviorTests(unittest.TestCase):
         """Validate scenario: test tr any uses owner translator and fallback."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         self.assertEqual(ls._tr_any(_OwnerWithTr(), "k", x="1"), "k:1")
-        with patch("cyberdeck.launcher_shared.i18n_tr", return_value="fallback"):
+        with patch("cyberdeck.launcher.shared.i18n_tr", return_value="fallback"):
             self.assertEqual(ls._tr_any(_OwnerBrokenTr(), "k2"), "fallback")
 
     def test_tray_unavailable_reason_linux_wayland(self):
@@ -76,9 +76,9 @@ class LauncherSharedBehaviorTests(unittest.TestCase):
         """Validate scenario: test set autostart linux creates and removes desktop file."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         with tempfile.TemporaryDirectory() as td, patch.object(sys, "platform", "linux"), patch(
-            "cyberdeck.launcher_shared.is_windows", return_value=False
+            "cyberdeck.launcher.shared.is_windows", return_value=False
         ), patch.dict(os.environ, {"HOME": td}, clear=False), patch(
-            "cyberdeck.launcher_shared.os.path.expanduser", return_value=td
+            "cyberdeck.launcher.shared.os.path.expanduser", return_value=td
         ):
             ls.set_autostart(True, ["python", "main.py"])
             desktop = os.path.join(td, ".config", "autostart", "CyberDeck.desktop")
@@ -106,7 +106,7 @@ class LauncherSharedBehaviorTests(unittest.TestCase):
         )
         sys.modules["winreg"] = fake_winreg  # imported lazily inside function
         try:
-            with patch("cyberdeck.launcher_shared.is_windows", return_value=True):
+            with patch("cyberdeck.launcher.shared.is_windows", return_value=True):
                 ls.set_autostart(True, "cmd")
                 ls.set_autostart(False, "cmd")
         finally:
@@ -152,3 +152,4 @@ class LauncherSharedBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

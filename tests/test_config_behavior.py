@@ -12,10 +12,19 @@ class ConfigBehaviorTests(unittest.TestCase):
         self._state = {
             "PORT": config.PORT,
             "PORT_AUTO": config.PORT_AUTO,
+            "UDP_PORT": config.UDP_PORT,
             "MDNS_ENABLED": config.MDNS_ENABLED,
+            "CURSOR_STREAM": config.CURSOR_STREAM,
+            "CURSOR_STREAM_FPS": config.CURSOR_STREAM_FPS,
             "DEBUG": config.DEBUG,
             "CONSOLE_LOG": config.CONSOLE_LOG,
             "LOG_ENABLED": config.LOG_ENABLED,
+            "SESSION_TTL_S": config.SESSION_TTL_S,
+            "SESSION_IDLE_TTL_S": config.SESSION_IDLE_TTL_S,
+            "MAX_SESSIONS": config.MAX_SESSIONS,
+            "PIN_WINDOW_S": config.PIN_WINDOW_S,
+            "PIN_MAX_FAILS": config.PIN_MAX_FAILS,
+            "PIN_BLOCK_S": config.PIN_BLOCK_S,
             "STREAM_MONITOR": config.STREAM_MONITOR,
             "PROTOCOL_VERSION": config.PROTOCOL_VERSION,
             "MIN_SUPPORTED_PROTOCOL_VERSION": config.MIN_SUPPORTED_PROTOCOL_VERSION,
@@ -59,7 +68,10 @@ class ConfigBehaviorTests(unittest.TestCase):
         env = {
             "CYBERDECK_PORT": "9090",
             "CYBERDECK_PORT_AUTO": "0",
+            "CYBERDECK_UDP_PORT": "5656",
             "CYBERDECK_MDNS": "0",
+            "CYBERDECK_CURSOR_STREAM": "0",
+            "CYBERDECK_CURSOR_FPS": "60",
             "CYBERDECK_DEBUG": "1",
             "CYBERDECK_CONSOLE": "1",
             "CYBERDECK_LOG": "1",
@@ -91,7 +103,10 @@ class ConfigBehaviorTests(unittest.TestCase):
 
         self.assertEqual(config.PORT, 9090)
         self.assertFalse(config.PORT_AUTO)
+        self.assertEqual(config.UDP_PORT, 5656)
         self.assertFalse(config.MDNS_ENABLED)
+        self.assertFalse(config.CURSOR_STREAM)
+        self.assertEqual(config.CURSOR_STREAM_FPS, 60)
         self.assertTrue(config.DEBUG)
         self.assertTrue(config.CONSOLE_LOG)
         self.assertTrue(config.LOG_ENABLED)
@@ -116,6 +131,96 @@ class ConfigBehaviorTests(unittest.TestCase):
         self.assertEqual(config.PIN_STATE_STALE_S, 111)
         self.assertEqual(config.PIN_STATE_MAX_IPS, 222)
         self.assertEqual(config.PAIRING_CODE, "9876")
+
+    def test_reload_from_env_supports_common_boolean_values(self):
+        """Validate scenario: test reload from env supports common boolean values."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        with patch.dict(
+            os.environ,
+            {
+                "CYBERDECK_PORT_AUTO": "false",
+                "CYBERDECK_MDNS": "no",
+                "CYBERDECK_CURSOR_STREAM": "off",
+                "CYBERDECK_DEBUG": "true",
+                "CYBERDECK_CONSOLE": "yes",
+                "CYBERDECK_LOG": "on",
+                "CYBERDECK_VERBOSE_STREAM_LOG": "false",
+                "CYBERDECK_VERBOSE_WS_LOG": "off",
+                "CYBERDECK_VERBOSE_HTTP_LOG": "0",
+                "CYBERDECK_CORS_ORIGINS": "http://a.test",
+                "CYBERDECK_CORS_ALLOW_CREDENTIALS": "yes",
+                "CYBERDECK_ALLOW_QUERY_TOKEN": "true",
+                "CYBERDECK_TLS": "yes",
+                "CYBERDECK_TLS_CERT": "/tmp/cert.pem",
+                "CYBERDECK_TLS_KEY": "/tmp/key.pem",
+            },
+            clear=False,
+        ):
+            config.reload_from_env()
+
+        self.assertFalse(config.PORT_AUTO)
+        self.assertFalse(config.MDNS_ENABLED)
+        self.assertFalse(config.CURSOR_STREAM)
+        self.assertTrue(config.DEBUG)
+        self.assertTrue(config.CONSOLE_LOG)
+        self.assertTrue(config.LOG_ENABLED)
+        self.assertFalse(config.VERBOSE_STREAM_LOG)
+        self.assertFalse(config.VERBOSE_WS_LOG)
+        self.assertFalse(config.VERBOSE_HTTP_LOG)
+        self.assertTrue(config.CORS_ALLOW_CREDENTIALS)
+        self.assertTrue(config.ALLOW_QUERY_TOKEN)
+        self.assertTrue(config.TLS_ENABLED)
+        self.assertEqual(config.SCHEME, "https")
+
+    def test_reload_from_env_keeps_previous_numbers_on_invalid_values(self):
+        """Validate scenario: test reload from env keeps previous numbers on invalid values."""
+        # Test body is intentionally explicit so regressions are easy to diagnose.
+        with patch.dict(
+            os.environ,
+            {
+                "CYBERDECK_PORT": "oops",
+                "CYBERDECK_UDP_PORT": "nan",
+                "CYBERDECK_CURSOR_FPS": "bad",
+                "CYBERDECK_STREAM_MONITOR": "not-a-number",
+                "CYBERDECK_PROTOCOL_VERSION": "v2",
+                "CYBERDECK_MIN_PROTOCOL_VERSION": "",
+                "CYBERDECK_WS_HEARTBEAT_INTERVAL_S": "fifteen",
+                "CYBERDECK_WS_HEARTBEAT_TIMEOUT_S": "slow",
+                "CYBERDECK_SESSION_TTL_S": "x",
+                "CYBERDECK_SESSION_IDLE_TTL_S": "y",
+                "CYBERDECK_MAX_SESSIONS": "z",
+                "CYBERDECK_PIN_WINDOW_S": "broken",
+                "CYBERDECK_PIN_MAX_FAILS": "broken",
+                "CYBERDECK_PIN_BLOCK_S": "broken",
+                "CYBERDECK_PAIRING_TTL_S": "broken",
+                "CYBERDECK_QR_TOKEN_TTL_S": "broken",
+                "CYBERDECK_UPLOAD_MAX_BYTES": "broken",
+                "CYBERDECK_PIN_STATE_STALE_S": "broken",
+                "CYBERDECK_PIN_STATE_MAX_IPS": "broken",
+            },
+            clear=False,
+        ), patch("cyberdeck.config.time.time", return_value=100.0):
+            config.reload_from_env()
+
+        self.assertEqual(config.PORT, self._state["PORT"])
+        self.assertEqual(config.UDP_PORT, self._state["UDP_PORT"])
+        self.assertEqual(config.CURSOR_STREAM_FPS, self._state["CURSOR_STREAM_FPS"])
+        self.assertEqual(config.STREAM_MONITOR, self._state["STREAM_MONITOR"])
+        self.assertEqual(config.PROTOCOL_VERSION, self._state["PROTOCOL_VERSION"])
+        self.assertEqual(config.MIN_SUPPORTED_PROTOCOL_VERSION, self._state["MIN_SUPPORTED_PROTOCOL_VERSION"])
+        self.assertEqual(config.WS_HEARTBEAT_INTERVAL_S, self._state["WS_HEARTBEAT_INTERVAL_S"])
+        self.assertEqual(config.WS_HEARTBEAT_TIMEOUT_S, self._state["WS_HEARTBEAT_TIMEOUT_S"])
+        self.assertEqual(config.SESSION_TTL_S, self._state["SESSION_TTL_S"])
+        self.assertEqual(config.SESSION_IDLE_TTL_S, self._state["SESSION_IDLE_TTL_S"])
+        self.assertEqual(config.MAX_SESSIONS, self._state["MAX_SESSIONS"])
+        self.assertEqual(config.PIN_WINDOW_S, self._state["PIN_WINDOW_S"])
+        self.assertEqual(config.PIN_MAX_FAILS, self._state["PIN_MAX_FAILS"])
+        self.assertEqual(config.PIN_BLOCK_S, self._state["PIN_BLOCK_S"])
+        self.assertEqual(config.PAIRING_TTL_S, self._state["PAIRING_TTL_S"])
+        self.assertEqual(config.QR_TOKEN_TTL_S, self._state["QR_TOKEN_TTL_S"])
+        self.assertEqual(config.UPLOAD_MAX_BYTES, self._state["UPLOAD_MAX_BYTES"])
+        self.assertEqual(config.PIN_STATE_STALE_S, self._state["PIN_STATE_STALE_S"])
+        self.assertEqual(config.PIN_STATE_MAX_IPS, self._state["PIN_STATE_MAX_IPS"])
 
     def test_reload_from_env_disables_credentials_when_wildcard_origin(self):
         """Validate scenario: test reload from env disables credentials when wildcard origin."""

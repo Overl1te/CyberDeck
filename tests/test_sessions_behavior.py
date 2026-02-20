@@ -8,6 +8,19 @@ from cyberdeck.sessions import DeviceManager, DeviceSession
 
 
 class SessionsBehaviorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Prepare shared fixtures for the test class."""
+        cls._old_session_file = config.SESSION_FILE
+        cls._tmp = tempfile.TemporaryDirectory()
+        config.SESSION_FILE = os.path.join(cls._tmp.name, "cyberdeck_sessions.json")
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up shared fixtures for the test class."""
+        config.SESSION_FILE = cls._old_session_file
+        cls._tmp.cleanup()
+
     def test_unregister_socket_does_not_drop_newer_ws(self):
         """Validate scenario: test unregister socket does not drop newer ws."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
@@ -84,6 +97,26 @@ class SessionsBehaviorTests(unittest.TestCase):
         devices = dm.get_all_devices()
         self.assertEqual(len(devices), 1)
         self.assertTrue(devices[0]["online"])
+
+    def test_get_all_devices_uses_online_grace_after_socket_drop(self):
+        """Validate scenario: online state should not flap immediately after websocket reconnect gap."""
+        dm = DeviceManager()
+        token = dm.authorize("dev-4", "Device D", "10.0.0.5")
+        ws = object()
+        old_grace = config.DEVICE_ONLINE_GRACE_S
+        try:
+            config.DEVICE_ONLINE_GRACE_S = 2.5
+            with patch("cyberdeck.sessions.time.time", return_value=100.0):
+                dm.register_socket(token, ws)  # type: ignore[arg-type]
+            with patch("cyberdeck.sessions.time.time", return_value=101.0):
+                dm.unregister_socket(token, ws)  # type: ignore[arg-type]
+                devices = dm.get_all_devices()
+            self.assertTrue(devices[0]["online"])
+            with patch("cyberdeck.sessions.time.time", return_value=104.0):
+                devices2 = dm.get_all_devices()
+            self.assertFalse(devices2[0]["online"])
+        finally:
+            config.DEVICE_ONLINE_GRACE_S = old_grace
 
     def test_load_sessions_prunes_test_records_and_expired_records(self):
         """Validate scenario: test load sessions prunes test records and expired records."""
