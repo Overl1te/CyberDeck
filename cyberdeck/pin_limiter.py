@@ -106,6 +106,24 @@ class PinLimiter:
         with self._lock:
             self._by_ip.clear()
 
+    def stats(self) -> dict:
+        """Return redacted limiter statistics for diagnostics."""
+        with self._lock:
+            now = float(time.time())
+            blocked = 0
+            active = 0
+            for st in self._by_ip.values():
+                active += 1
+                if float(getattr(st, "blocked_until", 0.0) or 0.0) > now:
+                    blocked += 1
+            return {
+                "tracked_ips": int(active),
+                "blocked_ips": int(blocked),
+                "window_s": int(max(1, int(getattr(config, "PIN_WINDOW_S", 60) or 60))),
+                "max_fails": int(max(1, int(getattr(config, "PIN_MAX_FAILS", 8) or 8))),
+                "block_s": int(max(1, int(getattr(config, "PIN_BLOCK_S", 300) or 300))),
+            }
+
 
 pin_limiter = PinLimiter()
 

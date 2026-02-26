@@ -3,51 +3,225 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#050505">
     <title>CyberDeck Server</title>
+    <link rel="icon" href="./icon-qr-code.png" type="image/png">
     <style>
-        body { background-color: #050505; color: #00FF9D; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
-        h1 { font-size: 3rem; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 2px; }
-        p { color: #888; margin-bottom: 30px; font-size: 1.2rem; }
-        .card { background: #121212; padding: 40px; border-radius: 20px; border: 1px solid #333; box-shadow: 0 0 20px rgba(0, 255, 157, 0.1); max-width: 400px; }
-        .btn { display: inline-block; background: #00FF9D; color: #000; padding: 15px 30px; text-decoration: none; font-weight: bold; border-radius: 8px; margin-top: 20px; transition: transform 0.2s; }
-        .btn:hover { transform: scale(1.05); }
-        .kv { margin: 10px 0; color: #fff; font-size: 1.05rem; }
-        .code { font-size: 2rem; font-weight: 800; letter-spacing: 0.2rem; color: #00FF9D; margin-top: 6px; }
-        .muted { color: #888; font-size: 0.95rem; }
-        .btn.secondary { background: transparent; color: #00FF9D; border: 1px solid #00FF9D; }
+        :root {
+            --bg: #050505;
+            --surface: #121212;
+            --surface-border: #333;
+            --brand: #00FF9D;
+            --text: #fff;
+            --muted: #888;
+            --radius: 20px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100svh;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: var(--bg);
+            color: var(--brand);
+            font-family: "Segoe UI", sans-serif;
+            text-align: center;
+        }
+
+        h1 {
+            margin: 0 0 10px;
+            font-size: clamp(2rem, 7vw, 3rem);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        p {
+            color: var(--muted);
+            margin: 0 0 30px;
+            font-size: 1.1rem;
+        }
+
+        .card {
+            width: min(92vw, 420px);
+            padding: clamp(24px, 6vw, 40px);
+            border-radius: var(--radius);
+            border: 1px solid var(--surface-border);
+            background: var(--surface);
+            box-shadow: 0 0 20px rgba(0, 255, 157, 0.1);
+        }
+
+        .connect {
+            margin: 16px 0;
+        }
+
+        .kv {
+            margin: 10px 0;
+            color: var(--text);
+            font-size: 1.05rem;
+        }
+
+        .address {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+            word-break: break-word;
+        }
+
+        .code {
+            margin-top: 6px;
+            font-size: clamp(1.5rem, 7vw, 2rem);
+            font-weight: 800;
+            letter-spacing: 0.2rem;
+            color: var(--brand);
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+
+        .hint-text {
+            margin-top: 10px;
+        }
+
+        .generic {
+            color: var(--text);
+            margin: 20px 0;
+        }
+
+        .row-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .mini-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--surface-border);
+            background: transparent;
+            color: var(--text);
+            cursor: pointer;
+            font: inherit;
+            font-size: 0.9rem;
+        }
+
+        .mini-btn:hover {
+            border-color: var(--brand);
+            color: var(--brand);
+        }
+
+        .mini-btn:focus-visible {
+            outline: 2px solid #fff;
+            outline-offset: 2px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            margin-top: 14px;
+            padding: 14px 20px;
+            border-radius: 10px;
+            border: 1px solid transparent;
+            background: var(--brand);
+            color: #000;
+            text-decoration: none;
+            font-weight: 700;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 0 0 3px rgba(0, 255, 157, 0.2);
+        }
+
+        .btn:focus-visible {
+            outline: 2px solid #fff;
+            outline-offset: 2px;
+        }
+
+        .btn.secondary {
+            background: transparent;
+            color: var(--brand);
+            border-color: var(--brand);
+        }
+
+        .btn.secondary:hover {
+            background: rgba(0, 255, 157, 0.1);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .expired {
+            color: #ff8080;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .btn {
+                transition: none;
+            }
+
+            .btn:hover {
+                transform: none;
+                box-shadow: none;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="card">
         <h1>CyberDeck</h1>
-        <p id="subtitle">Сервер запущен и работает.</p>
+        <p id="subtitle" role="status" aria-live="polite">Сервер CyberDeck активен.</p>
 
-        <div id="connect" style="display:none; margin: 16px 0;">
-            <div class="kv">Подключение к ПК:</div>
-            <div class="kv"><span id="ip">—</span>:<span id="port">—</span></div>
-            <div class="muted">PIN-код:</div>
+        <div id="connect" class="connect hidden">
+            <div class="kv">Адрес подключения:</div>
+            <div class="kv address"><span id="ip">—</span>:<span id="port">—</span></div>
+            <div class="row-actions">
+                <button id="copyAddressBtn" type="button" class="mini-btn">Копировать адрес</button>
+                <button id="copyPinBtn" type="button" class="mini-btn">Копировать PIN</button>
+            </div>
+            <div class="muted">PIN для входа:</div>
             <div class="code" id="code">—</div>
-            <div class="muted" style="margin-top: 10px;">
-                Открой CyberDeck Mobile и введи адрес и PIN.
+            <div id="ttl" class="muted hint-text hidden"></div>
+            <div class="muted hint-text">
+                Открой CyberDeck Mobile и введи адрес с PIN.
             </div>
 
-            <a id="openAppBtn" href="#" class="btn secondary" style="display:none;">Открыть в приложении</a>
-            <div id="openHint" class="muted" style="margin-top: 10px; display:none;">
-                Если приложение не открылось автоматически — нажми кнопку выше.
+            <a id="openAppBtn" href="#" class="btn secondary hidden">Открыть CyberDeck</a>
+            <div id="openHint" class="muted hint-text hidden">
+                Если приложение не открылось автоматически, нажми кнопку выше.
             </div>
         </div>
 
-        <div id="generic" style="color: #fff; margin: 20px 0;">
-            Для управления этим ПК используйте мобильное приложение.
+        <div id="generic" class="generic">
+            Для управления этим ПК подключитесь через мобильное приложение.
         </div>
 
-        <a href="https://github.com/Overl1te/CyberDeck-Mobile/releases" class="btn">Скачать приложение</a>
+        <a
+            href="https://github.com/Overl1te/CyberDeck-Mobile/releases"
+            class="btn"
+            target="_blank"
+            rel="noopener noreferrer"
+        >Скачать CyberDeck Mobile</a>
         <a
             href="https://pay.cloudtips.ru/p/70ab5e1b"
             class="btn secondary"
             target="_blank"
             rel="noopener noreferrer"
-        >Поддержать проект</a>
+        >Поддержать CyberDeck</a>
     </div>
 
     <script>
@@ -61,16 +235,90 @@
             const hostname = (params.get("hostname") || "").trim();
             const qrToken = (params.get("qr_token") || params.get("nonce") || "").trim();
             const type = (params.get("type") || "cyberdeck_qr_v1").trim();
+            const openMode = (params.get("open") || "").trim().toLowerCase();
+            const autoMode = (params.get("auto") || "1").trim();
+            const appPkg = (params.get("app_pkg") || "com.example.cyberdeck_mobile.cyberdeck_mobile").trim();
+            const expRaw = (params.get("exp") || params.get("expires_at") || "").trim();
+            const expTs = /^\d+(\.\d+)?$/.test(expRaw) ? Number(expRaw) : 0;
+            const AUTO_OPEN_DELAY_MS = 60;
+            const APP_OPEN_CHECK_MS = 900;
 
             const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+            const elements = {
+                connect: document.getElementById("connect"),
+                generic: document.getElementById("generic"),
+                subtitle: document.getElementById("subtitle"),
+                ip: document.getElementById("ip"),
+                port: document.getElementById("port"),
+                code: document.getElementById("code"),
+                openAppBtn: document.getElementById("openAppBtn"),
+                openHint: document.getElementById("openHint"),
+                ttl: document.getElementById("ttl"),
+                copyAddressBtn: document.getElementById("copyAddressBtn"),
+                copyPinBtn: document.getElementById("copyPinBtn")
+            };
 
-            if (ip && port && code) {
-                document.getElementById("connect").style.display = "block";
-                document.getElementById("generic").style.display = "none";
-                document.getElementById("subtitle").textContent = "Открой в браузере — и подключайся.";
-                document.getElementById("ip").textContent = ip;
-                document.getElementById("port").textContent = port;
-                document.getElementById("code").textContent = code;
+            function isValidAddress(value) {
+                return value.length > 0 &&
+                    value.length <= 255 &&
+                    !/\s/.test(value) &&
+                    /^[0-9A-Za-z.\-:[\]]+$/.test(value);
+            }
+
+            function isValidPort(value) {
+                if (!/^\d{1,5}$/.test(value)) return false;
+                const numericPort = Number(value);
+                return numericPort >= 1 && numericPort <= 65535;
+            }
+
+            function isValidCode(value) {
+                return /^[A-Za-z0-9]{3,16}$/.test(value);
+            }
+
+            function setTemporaryText(el, text) {
+                if (!el) return;
+                const old = String(el.textContent || "");
+                el.textContent = text;
+                setTimeout(() => {
+                    el.textContent = old;
+                }, 1400);
+            }
+
+            async function copyText(value) {
+                const text = String(value || "").trim();
+                if (!text) return false;
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        return true;
+                    }
+                } catch (_e) {}
+                try {
+                    const ta = document.createElement("textarea");
+                    ta.value = text;
+                    ta.style.position = "fixed";
+                    ta.style.opacity = "0";
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    const ok = document.execCommand("copy");
+                    ta.remove();
+                    return !!ok;
+                } catch (_e) {
+                    return false;
+                }
+            }
+
+            const hasConnectionData = ip || port || code;
+            const isConnectionDataValid = isValidAddress(ip) && isValidPort(port) && isValidCode(code);
+
+            if (isConnectionDataValid) {
+                elements.connect.classList.remove("hidden");
+                elements.generic.classList.add("hidden");
+                elements.subtitle.textContent = "Данные для подключения готовы.";
+                elements.ip.textContent = ip;
+                elements.port.textContent = port;
+                elements.code.textContent = code;
 
                 const dl = new URLSearchParams();
                 dl.set("type", type);
@@ -83,35 +331,117 @@
                 if (qrToken) dl.set("qr_token", qrToken);
 
                 const deepLink = "cyberdeck://pair?" + dl.toString();
+                const intentFallbackUrl = new URL(window.location.href);
+                intentFallbackUrl.searchParams.set("open", "app");
+                intentFallbackUrl.searchParams.set("auto", "0");
+                const androidIntentLink =
+                    "intent://pair?" +
+                    dl.toString() +
+                    "#Intent;scheme=cyberdeck;action=android.intent.action.VIEW;" +
+                    (appPkg ? ("package=" + appPkg + ";") : "") +
+                    "S.browser_fallback_url=" + encodeURIComponent(intentFallbackUrl.toString()) +
+                    ";end";
+                const shouldShowOpenControls = isMobile || openMode === "app";
+                let isExpired = false;
 
-                const btn = document.getElementById("openAppBtn");
-                const hint = document.getElementById("openHint");
+                const addressText = ip + ":" + port;
+                elements.copyAddressBtn.addEventListener("click", async () => {
+                    const ok = await copyText(addressText);
+                    setTemporaryText(elements.copyAddressBtn, ok ? "Скопировано" : "Ошибка");
+                });
+                elements.copyPinBtn.addEventListener("click", async () => {
+                    const ok = await copyText(code);
+                    setTemporaryText(elements.copyPinBtn, ok ? "Скопировано" : "Ошибка");
+                });
 
-                btn.href = deepLink;
-                btn.style.display = "inline-block";
-                hint.style.display = "block";
+                function setExpiredState() {
+                    isExpired = true;
+                    elements.subtitle.textContent = "PIN истёк. Пересканируй QR-код.";
+                    elements.subtitle.classList.add("expired");
+                    elements.ttl.textContent = "Срок PIN истёк.";
+                    elements.ttl.classList.remove("hidden");
+                    elements.ttl.classList.add("expired");
+                    elements.code.textContent = "—";
+                    elements.openAppBtn.classList.add("hidden");
+                    elements.openHint.classList.remove("hidden");
+                    elements.openHint.textContent = "Код истёк. Открой новый QR-код в лаунчере.";
+                }
+
+                function renderTtl() {
+                    if (!expTs) return;
+                    const remain = Math.max(0, Math.floor(expTs - (Date.now() / 1000)));
+                    elements.ttl.classList.remove("hidden");
+                    if (remain <= 0) {
+                        setExpiredState();
+                        return;
+                    }
+                    elements.ttl.classList.remove("expired");
+                    elements.ttl.textContent = "PIN действителен: " + remain + "с";
+                }
+
+                if (expTs > 0) {
+                    renderTtl();
+                    const timer = setInterval(() => {
+                        renderTtl();
+                        if (isExpired) clearInterval(timer);
+                    }, 1000);
+                }
+
+                if (shouldShowOpenControls && !isExpired) {
+                    const ua = navigator.userAgent || "";
+                    const isAndroid = /Android/i.test(ua);
+                    elements.openAppBtn.href = isAndroid ? androidIntentLink : deepLink;
+                    elements.openAppBtn.classList.remove("hidden");
+                    elements.openHint.classList.remove("hidden");
+                    elements.openHint.textContent = "Если не открылось автоматически, нажми кнопку.";
+                }
 
                 function tryOpenApp() {
                     // Many browsers (especially iOS Safari) may block automatic deep-linking without a user gesture.
-                    // We still try once on page load for the "instant redirect" behavior.
                     let didHide = false;
                     const onHide = () => { didHide = true; };
                     document.addEventListener("visibilitychange", onHide, { once: true });
 
-                    // Attempt deep link
-                    window.location.href = deepLink;
+                    const ua = navigator.userAgent || "";
+                    const isIOS = /iPhone|iPad|iPod/i.test(ua);
+                    const isAndroid = /Android/i.test(ua);
 
-                    // Fallback: if app didn't open, keep the page. Do not auto-redirect to store.
+                    if (isIOS) {
+                        window.location.href = deepLink;
+                    } else if (isAndroid) {
+                        // Android handles intent:// more reliably than iframe cyberdeck://.
+                        window.location.href = androidIntentLink;
+                        setTimeout(() => {
+                            if (!didHide) window.location.href = deepLink;
+                        }, 280);
+                    } else {
+                        window.location.href = deepLink;
+                    }
+
                     setTimeout(() => {
                         if (!didHide) {
-                            // no-op: user can tap the button or install the app
+                            elements.openHint.textContent = "Приложение не найдено или запуск заблокирован браузером. Нажми кнопку выше либо установи CyberDeck Mobile.";
+                            elements.openHint.classList.remove("hidden");
+                            elements.subtitle.textContent = "Открыт веб-режим (fallback).";
                         }
-                    }, 1500);
+                    }, APP_OPEN_CHECK_MS);
                 }
 
-                if (isMobile) {
-                    setTimeout(tryOpenApp, 200);
+                if (shouldShowOpenControls && !isExpired) {
+                    elements.openAppBtn.addEventListener("click", (event) => {
+                        event.preventDefault();
+                        elements.subtitle.textContent = "Пробуем открыть CyberDeck Mobile...";
+                        tryOpenApp();
+                    });
                 }
+
+                if (isMobile && openMode === "app" && autoMode !== "0" && !isExpired) {
+                    elements.subtitle.textContent = "Открываем CyberDeck Mobile...";
+                    setTimeout(tryOpenApp, AUTO_OPEN_DELAY_MS);
+                }
+            } else if (hasConnectionData) {
+                elements.subtitle.textContent = "Ссылка подключения повреждена.";
+                elements.generic.textContent = "Проверь QR-код и открой ссылку снова.";
             }
         })();
     </script>

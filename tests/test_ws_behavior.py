@@ -99,6 +99,7 @@ class WsBehaviorTests(unittest.TestCase):
     def setUp(self):
         """Prepare test preconditions for each test case."""
         context.device_manager.sessions = {}
+        context.input_guard.set_locked(False, reason="test_reset", actor="tests")
         ws_mouse._ws_runtime.clear()
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
@@ -253,6 +254,23 @@ class WsBehaviorTests(unittest.TestCase):
         s4 = context.device_manager.get_session(token)
         self.assertIsNotNone(s4)
         self.assertIsNone(s4.websocket)
+
+    def test_ws_blocks_input_events_when_input_lock_is_enabled(self):
+        """Validate scenario: remote input lock should prevent mouse/keyboard actions."""
+        token = "tok-input-lock"
+        self._add_session(token)
+        context.input_guard.set_locked(True, reason="unit_test", actor="tests")
+
+        with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+            ws.send_json({"type": "move", "dx": 10, "dy": 5})
+            warning = ws.receive_json()
+            self.assertEqual(warning.get("type"), "warning")
+            self.assertEqual(warning.get("code"), "remote_input_locked")
+            ws.send_json({"type": "ping", "id": "probe"})
+            pong = ws.receive_json()
+            self.assertEqual(pong.get("type"), "pong")
+
+        self.assertEqual(self.fake_backend.moves, [])
 
 
 if __name__ == "__main__":

@@ -10,9 +10,10 @@ from pydantic import BaseModel
 
 from .. import config
 from ..auth import TokenDep, require_perm
-from ..context import device_manager
+from ..context import device_manager, local_events
 from ..input import INPUT_BACKEND
 from ..logging_config import log
+from ..pairing import pairing_meta, rotate_pairing_code
 from ..pin_limiter import pin_limiter
 from ..protocol import protocol_payload
 
@@ -123,11 +124,68 @@ def handshake(req: HandshakeRequest, request: Request):
         raise HTTPException(403, detail="Invalid Code")
 
     pin_limiter.record_success(ip)
-    token = device_manager.authorize(req.device_id, req.device_name, ip)
-    log.info(f"Handshake OK: {req.device_name} ({req.device_id}) -> {ip}")
+    approval_required = bool(getattr(config, "DEVICE_APPROVAL_REQUIRED", False))
+    token = device_manager.authorize(req.device_id, req.device_name, ip, approved=(not approval_required))
+    session = device_manager.get_session(token, include_pending=True)
+    approved = bool(getattr(session, "approved", True)) if session else (not approval_required)
+    if approved:
+        local_events.emit(
+            "device_connected",
+            title="CyberDeck",
+            message=f"Device connected: {req.device_name}",
+            payload={"token": token, "device_id": req.device_id, "name": req.device_name, "ip": ip},
+        )
+    else:
+        local_events.emit(
+            "device_pending",
+            title="CyberDeck",
+            message=f"Device approval required: {req.device_name}",
+            payload={"token": token, "device_id": req.device_id, "name": req.device_name, "ip": ip},
+        )
+    rotated = False
+    if bool(getattr(config, "PAIRING_SINGLE_USE", False)):
+        try:
+            rotate_pairing_code()
+            pin_limiter.reset()
+            rotated = True
+            local_events.emit(
+                "pairing_rotated",
+                title="CyberDeck",
+                message="Pairing code rotated after successful authorization",
+                payload={"source": "handshake", "device_id": req.device_id, "name": req.device_name},
+            )
+        except Exception:
+            rotated = False
+    log.info("Handshake OK: %s (%s) -> %s | approved=%s", req.device_name, req.device_id, ip, approved)
     return {
         "status": "ok",
+        "approved": bool(approved),
+        "approval_pending": bool(not approved),
         "token": token,
+        "server_name": config.HOSTNAME,
+        "pairing_rotated": bool(rotated),
+        **pairing_meta(),
+        **protocol_payload(),
+    }
+
+
+@router.get("/api/pairing_status")
+def pairing_status(token: Optional[str] = None):
+    """Return approval status for a handshake/QR token, including pending sessions."""
+    tok = str(token or "").strip()
+    if not tok:
+        raise HTTPException(400, detail="token_required")
+    session = device_manager.get_session(tok, include_pending=True)
+    if not session:
+        raise HTTPException(404, detail="session_not_found")
+    approved = bool(getattr(session, "approved", True))
+    return {
+        "status": "ok",
+        "token": tok,
+        "approved": approved,
+        "approval_pending": bool(not approved),
+        "device_id": str(getattr(session, "device_id", "") or ""),
+        "device_name": str(getattr(session, "device_name", "") or ""),
         "server_name": config.HOSTNAME,
         **protocol_payload(),
     }
@@ -219,6 +277,22 @@ async def upload_file(request: Request, file: UploadFile = File(...), token: str
             raise HTTPException(400, detail="upload_checksum_mismatch")
         # Atomic move prevents clients from observing partially written files.
         os.replace(tmp_path, file_path)
+        uploader = device_manager.get_session(token, include_pending=True)
+        uploader_name = str(getattr(uploader, "device_name", "") or "Unknown device")
+        uploader_ip = str(getattr(uploader, "ip", "") or "")
+        local_events.emit(
+            "file_received",
+            title="CyberDeck",
+            message=f"File received: {final_name}",
+            payload={
+                "filename": final_name,
+                "size": int(total),
+                "sha256": actual,
+                "from_token": token,
+                "from_name": uploader_name,
+                "from_ip": uploader_ip,
+            },
+        )
         return {"status": "ok", "filename": final_name, "size": int(total), "sha256": actual}
     except HTTPException:
         _cleanup_tmp_upload(tmp_path)

@@ -74,6 +74,25 @@ class VideoHelpersBehaviorTests(unittest.TestCase):
             out = video._mjpeg_backend_order("gstreamer", status)
         self.assertEqual(out, ["gstreamer", "native", "ffmpeg"])
 
+    def test_mjpeg_backend_order_on_gnome_wayland_prefers_realtime_paths(self):
+        """Validate scenario: GNOME Wayland auto-order should not prioritize screenshot over realtime backends."""
+        status = {
+            "native": True,
+            "ffmpeg": True,
+            "gstreamer": True,
+            "screenshot": True,
+        }
+        with patch.dict(os.environ, {}, clear=False), patch.object(
+            video_mjpeg, "_is_wayland_session", return_value=True
+        ), patch.object(
+            video_mjpeg, "_is_gnome_session", return_value=True
+        ), patch.object(
+            video_mjpeg, "_prefer_gst_over_ffmpeg_mjpeg", return_value=False
+        ):
+            out = video._mjpeg_backend_order("auto", status)
+
+        self.assertEqual(out[:3], ["ffmpeg", "gstreamer", "screenshot"])
+
     def test_spawn_stream_process_returns_none_on_spawn_error(self):
         """Validate scenario: test spawn stream process returns none on spawn error."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

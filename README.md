@@ -95,6 +95,11 @@
 - тестирование;
 - сборка и упаковка.
 
+Практические гайды:
+
+- Docker runtime: `docs/DOCKER.md`
+- Диагностика стрима/аудио/паринга: `docs/STREAMING_TROUBLESHOOTING.md`
+
 ---
 
 ## ❓ FAQ

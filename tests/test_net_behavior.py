@@ -1,4 +1,6 @@
 import unittest
+import os
+import socket
 from unittest.mock import patch
 
 from cyberdeck import net
@@ -41,12 +43,27 @@ class _FakeSocket:
         return False
 
 
+class _FakeAddr:
+    def __init__(self, family, address: str):
+        """Initialize fake psutil address entry used by net helper tests."""
+        self.family = family
+        self.address = address
+
+
+class _FakeStat:
+    def __init__(self, isup: bool = True):
+        """Initialize fake psutil interface stat entry."""
+        self.isup = bool(isup)
+
+
 class NetBehaviorTests(unittest.TestCase):
     def test_get_local_ip_returns_socket_address_on_success(self):
         """Validate scenario: test get local ip returns socket address on success."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         fake = _FakeSocket(ip="10.0.0.42", raise_connect=False)
-        with patch("cyberdeck.net.socket.socket", return_value=fake):
+        with patch.dict(os.environ, {"CYBERDECK_IGNORE_VPN": "0"}, clear=False), patch(
+            "cyberdeck.net.socket.socket", return_value=fake
+        ):
             ip = net.get_local_ip()
         self.assertEqual(ip, "10.0.0.42")
         self.assertEqual(fake.connected_to, ("10.255.255.255", 1))
@@ -56,10 +73,43 @@ class NetBehaviorTests(unittest.TestCase):
         """Validate scenario: test get local ip falls back to loopback on error."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         fake = _FakeSocket(raise_connect=True)
-        with patch("cyberdeck.net.socket.socket", return_value=fake):
+        with patch.dict(os.environ, {"CYBERDECK_IGNORE_VPN": "0"}, clear=False), patch(
+            "cyberdeck.net.socket.socket", return_value=fake
+        ):
             ip = net.get_local_ip()
         self.assertEqual(ip, "127.0.0.1")
         self.assertTrue(fake.closed)
+
+    def test_get_local_ip_prefers_non_vpn_iface_when_ignore_vpn_enabled(self):
+        """Validate scenario: ignore-vpn mode should prefer non-tunnel interface addresses."""
+        fake = _FakeSocket(ip="100.64.2.10", raise_connect=False)
+        addrs = {
+            "NordLynx": [_FakeAddr(socket.AF_INET, "100.64.2.10")],
+            "Ethernet": [_FakeAddr(socket.AF_INET, "192.168.1.77")],
+        }
+        stats = {"NordLynx": _FakeStat(True), "Ethernet": _FakeStat(True)}
+        with patch.dict(os.environ, {"CYBERDECK_IGNORE_VPN": "1"}, clear=False), patch(
+            "cyberdeck.net.socket.socket", return_value=fake
+        ), patch("cyberdeck.net.psutil.net_if_addrs", return_value=addrs), patch(
+            "cyberdeck.net.psutil.net_if_stats", return_value=stats
+        ):
+            ip = net.get_local_ip()
+        self.assertEqual(ip, "192.168.1.77")
+
+    def test_get_local_ip_keeps_route_ip_when_only_vpn_candidates_exist(self):
+        """Validate scenario: ignore-vpn mode falls back to route IP when no LAN candidate exists."""
+        fake = _FakeSocket(ip="100.64.10.9", raise_connect=False)
+        addrs = {
+            "tailscale0": [_FakeAddr(socket.AF_INET, "100.64.10.9")],
+        }
+        stats = {"tailscale0": _FakeStat(True)}
+        with patch.dict(os.environ, {"CYBERDECK_IGNORE_VPN": "1"}, clear=False), patch(
+            "cyberdeck.net.socket.socket", return_value=fake
+        ), patch("cyberdeck.net.psutil.net_if_addrs", return_value=addrs), patch(
+            "cyberdeck.net.psutil.net_if_stats", return_value=stats
+        ):
+            ip = net.get_local_ip()
+        self.assertEqual(ip, "100.64.10.9")
 
     def test_find_free_port_binds_ephemeral_port(self):
         """Validate scenario: test find free port binds ephemeral port."""

@@ -64,7 +64,7 @@ def _read_latest_release_payload(repo_slug: str, timeout_s: float) -> dict[str, 
         api_url,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "CyberDeck-UpdateChecker/1.3.1",
+            "User-Agent": "CyberDeck-UpdateChecker/1.3.2",
         },
     )
     with request.urlopen(req, timeout=float(timeout_s)) as response:
@@ -203,4 +203,3 @@ def build_update_status(
         "launcher": _status_from_release(current_launcher_version, server_release),
         "mobile": _status_from_release(current_mobile_version, mobile_release),
     }
-

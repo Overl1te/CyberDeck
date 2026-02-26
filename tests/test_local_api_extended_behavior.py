@@ -24,6 +24,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         """Prepare test preconditions for each test case."""
         self._old_pairing_code = api_local.config.PAIRING_CODE
         self._old_pairing_expires_at = getattr(api_local.config, "PAIRING_EXPIRES_AT", None)
+        api_local.input_guard.set_locked(False, reason="test_reset", actor="tests")
 
     def tearDown(self):
         """Clean up resources created by each test case."""
@@ -187,10 +188,10 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         """Validate scenario: test regenerate code resets pin limiter and expiry."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         fake_uuid = SimpleNamespace(int=98765432109876)
-        with patch("cyberdeck.api.local.uuid.uuid4", return_value=fake_uuid), patch.object(
+        with patch("cyberdeck.pairing.uuid.uuid4", return_value=fake_uuid), patch.object(
             api_local.config, "PAIRING_TTL_S", 60
         ), patch(
-            "cyberdeck.api.local.time.time", return_value=1000.0
+            "cyberdeck.pairing.time.time", return_value=1000.0
         ), patch.object(
             api_local.pin_limiter, "reset"
         ) as mreset:
@@ -440,7 +441,7 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         """Validate scenario: test regenerate code handles bad ttl and reset error."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
         fake_uuid = SimpleNamespace(int=1111222233334444)
-        with patch("cyberdeck.api.local.uuid.uuid4", return_value=fake_uuid), patch.object(
+        with patch("cyberdeck.pairing.uuid.uuid4", return_value=fake_uuid), patch.object(
             api_local.config,
             "PAIRING_TTL_S",
             "bad",
@@ -453,6 +454,74 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
 
         self.assertEqual(out["new_code"], "1111")
         self.assertIsNone(api_local.config.PAIRING_EXPIRES_AT)
+
+    def test_local_trusted_devices_filters_pending_sessions(self):
+        """Validate scenario: trusted devices endpoint should return only approved sessions."""
+        rows = [
+            {
+                "token": "tok-ok",
+                "name": "Trusted",
+                "ip": "10.0.0.2",
+                "approved": True,
+                "last_seen_ts": 100.0,
+                "created_ts": 50.0,
+                "settings": {"alias": "Phone", "note": "Desk"},
+            },
+            {
+                "token": "tok-pending",
+                "name": "Pending",
+                "ip": "10.0.0.3",
+                "approved": False,
+                "last_seen_ts": 120.0,
+                "created_ts": 60.0,
+                "settings": {},
+            },
+        ]
+        with patch.object(api_local.device_manager, "get_all_devices", return_value=rows):
+            out = api_local.local_trusted_devices(_Req("127.0.0.1"))
+        self.assertEqual(out["total"], 1)
+        self.assertEqual(out["trusted_devices"][0]["token"], "tok-ok")
+        self.assertEqual(out["trusted_devices"][0]["alias"], "Phone")
+
+    def test_local_device_rename_updates_alias_and_note(self):
+        """Validate scenario: rename endpoint should persist alias and note patch."""
+        req = api_local.LocalRenameRequest(token="tok-rename", alias="My Phone", note="Work")
+        session = SimpleNamespace(device_name="Phone", device_id="dev-rename")
+        with patch("cyberdeck.api.local._get_session", return_value=session), patch.object(
+            api_local.device_manager,
+            "update_settings",
+            return_value=True,
+        ) as mupd:
+            out = api_local.local_device_rename(req, _Req("127.0.0.1"))
+        self.assertEqual(out["ok"], True)
+        self.assertEqual(out["alias"], "My Phone")
+        mupd.assert_called_once_with("tok-rename", {"alias": "My Phone", "note": "Work"})
+
+    def test_local_input_lock_sets_security_state(self):
+        """Validate scenario: input lock endpoint should store and return lock snapshot."""
+        req = api_local.LocalInputLockRequest(locked=True, reason="test_lock", actor="tests")
+        snapshot = {"locked": True, "reason": "test_lock", "actor": "tests", "updated_ts": 1.0}
+        with patch.object(api_local.input_guard, "set_locked", return_value=snapshot) as mlock:
+            out = api_local.local_input_lock(req, _Req("127.0.0.1"))
+        self.assertEqual(out["ok"], True)
+        self.assertEqual(out["security"]["locked"], True)
+        mlock.assert_called_once()
+
+    def test_local_panic_mode_revokes_sessions_and_locks_input(self):
+        """Validate scenario: panic endpoint should revoke sessions and lock remote input."""
+        req = api_local.LocalPanicRequest(keep_token="tok-keep", lock_input=True, reason="panic")
+        snapshot = {"locked": True, "reason": "panic", "actor": "panic_mode", "updated_ts": 2.0}
+        with patch("cyberdeck.api.local._revoke_tokens", return_value=3) as mrev, patch.object(
+            api_local.input_guard,
+            "set_locked",
+            return_value=snapshot,
+        ) as mlock:
+            out = api_local.local_panic_mode(req, _Req("127.0.0.1"))
+        self.assertEqual(out["ok"], True)
+        self.assertEqual(out["revoked"], 3)
+        self.assertEqual(out["kept"], "tok-keep")
+        mrev.assert_called_once_with(keep_token="tok-keep")
+        mlock.assert_called_once()
 
 
 if __name__ == "__main__":

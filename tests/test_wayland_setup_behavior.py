@@ -6,6 +6,14 @@ import cyberdeck.platform.wayland_setup as wayland_setup
 
 
 class WaylandSetupBehaviorTests(unittest.TestCase):
+    def test_wayland_setup_script_names_prioritize_fedora_for_dnf(self):
+        """Validate scenario: dnf hosts should prioritize the Fedora setup script first."""
+        with patch.object(wayland_setup, "_linux_pkg_manager", return_value="dnf"):
+            names = wayland_setup._wayland_setup_script_names()
+
+        self.assertTrue(names)
+        self.assertEqual(names[0], "setup_fedora_wayland.sh")
+
     def test_check_wayland_requirements_accepts_x11grab_fallback(self):
         """Validate scenario: X11 fallback should satisfy stream backend requirement on Wayland."""
         with patch.object(wayland_setup, "is_linux_wayland_session", return_value=True), patch.object(
@@ -93,6 +101,28 @@ class WaylandSetupBehaviorTests(unittest.TestCase):
         self.assertIn("CYBERDECK_MJPEG_BACKEND_ORDER=ffmpeg,screenshot,gstreamer,native", applied)
         self.assertEqual(order, "ffmpeg,screenshot,gstreamer,native")
         self.assertEqual(prefer, "1")
+
+    def test_runtime_wayland_policy_prefers_realtime_backends_over_screenshot(self):
+        """Validate scenario: when gstreamer+ffmpeg are usable, screenshot should stay as fallback."""
+        with patch.object(wayland_setup, "is_linux_wayland_session", return_value=True), patch.object(
+            wayland_setup, "_ffmpeg_supports_pipewire", return_value=False
+        ), patch.object(
+            wayland_setup, "_ffmpeg_supports_x11grab", return_value=True
+        ), patch.object(
+            wayland_setup, "_wayland_allow_x11_fallback", return_value=True
+        ), patch.object(
+            wayland_setup, "_gst_supports_pipewire", return_value=True
+        ), patch.object(
+            wayland_setup, "_wayland_screenshot_available", return_value=True
+        ), patch.object(
+            wayland_setup.shutil, "which", return_value="/usr/bin/ffmpeg"
+        ), patch.dict(
+            wayland_setup.os.environ, {"DISPLAY": ":0"}, clear=True
+        ):
+            _ = wayland_setup._apply_runtime_wayland_policy()
+            order = wayland_setup.os.environ.get("CYBERDECK_MJPEG_BACKEND_ORDER")
+
+        self.assertEqual(order, "gstreamer,ffmpeg,screenshot,native")
 
     def test_wayland_allow_x11_fallback_accepts_boolean_words(self):
         """Validate scenario: x11 fallback flag should support bool-like env forms."""

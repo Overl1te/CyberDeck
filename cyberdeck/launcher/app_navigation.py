@@ -14,19 +14,21 @@ class AppNavigationMixin:
             """Switch to selected frame."""
             self.select_frame(name)
 
-        btn = ctk.CTkButton(
+        btn = CyberBtn(
             self.sidebar,
-            text=text,
+            text=str(text or ""),
             fg_color="transparent",
             text_color=COLOR_TEXT_DIM,
-            hover_color=COLOR_PANEL,
+            border_width=0,
+            border_color=COLOR_BORDER,
+            hover_color=COLOR_PANEL_ALT,
             anchor="w",
             font=FONT_UI_BOLD,
             corner_radius=8,
-            height=36,
+            height=40,
             command=cmd,
         )
-        btn.grid(row=row, column=0, sticky="ew", padx=12, pady=6)
+        btn.grid(row=row, column=0, sticky="ew", padx=14, pady=5)
         return btn
 
     def _ui_theme(self) -> Any:
@@ -86,12 +88,15 @@ class AppNavigationMixin:
         )
         app_restart_keys = (
             "allow_query_token",
+            "pairing_single_use",
+            "ignore_vpn",
             "upload_max_bytes",
             "upload_allowed_ext",
             "verbose_http_log",
             "verbose_ws_log",
             "verbose_stream_log",
             "mdns_enabled",
+            "device_approval_required",
         )
         launcher_restart_keys = ("hotkey_enabled",)
         old_language = str(self.settings.get("language", "ru"))
@@ -116,6 +121,8 @@ class AppNavigationMixin:
         self.settings["autostart"] = bool(self.sw_autostart.get())
         self.settings["hotkey_enabled"] = bool(self.sw_hotkey.get())
         self.settings["debug"] = bool(self.sw_debug.get())
+        if hasattr(self, "sw_system_notifications"):
+            self.settings["system_notifications"] = bool(self.sw_system_notifications.get())
 
         self.settings["preferred_port"] = max(1, _get_int(self.ent_preferred_port, DEFAULT_PORT))
         self.settings["pairing_ttl_min"] = max(0, _get_int(self.ent_pairing_ttl, 0))
@@ -138,6 +145,10 @@ class AppNavigationMixin:
 
         if hasattr(self, "sw_allow_query_token"):
             self.app_config["allow_query_token"] = bool(self.sw_allow_query_token.get())
+        if hasattr(self, "sw_pairing_single_use"):
+            self.app_config["pairing_single_use"] = bool(self.sw_pairing_single_use.get())
+        if hasattr(self, "sw_ignore_vpn"):
+            self.app_config["ignore_vpn"] = bool(self.sw_ignore_vpn.get())
         if hasattr(self, "ent_upload_max_bytes"):
             self.app_config["upload_max_bytes"] = max(0, _get_int(self.ent_upload_max_bytes, 0))
         if hasattr(self, "ent_upload_allowed_ext"):
@@ -150,18 +161,39 @@ class AppNavigationMixin:
             self.app_config["verbose_stream_log"] = bool(self.sw_verbose_stream_log.get())
         if hasattr(self, "sw_mdns_enabled"):
             self.app_config["mdns_enabled"] = bool(self.sw_mdns_enabled.get())
+        if hasattr(self, "sw_device_approval_required"):
+            self.app_config["device_approval_required"] = bool(self.sw_device_approval_required.get())
         self._normalize_app_config()
 
         if self.settings["tls_enabled"] and (not self.settings["tls_cert_path"] or not self.settings["tls_key_path"]):
             try:
-                messagebox.showerror("CyberDeck", self.tr("tls_invalid"))
+                self.tls_enabled = True
+                self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
+                self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
+                self._ensure_tls_material()
+                self.settings["tls_enabled"] = bool(self.tls_enabled)
+                self.settings["tls_cert_path"] = str(self.tls_cert_path or "")
+                self.settings["tls_key_path"] = str(self.tls_key_path or "")
             except Exception:
                 pass
-            self.settings["tls_enabled"] = False
-            try:
-                self.sw_tls.deselect()
-            except Exception:
-                pass
+            if self.settings["tls_enabled"] and self.settings["tls_cert_path"] and self.settings["tls_key_path"]:
+                try:
+                    self.ent_tls_cert.delete(0, "end")
+                    self.ent_tls_cert.insert(0, self.settings["tls_cert_path"])
+                    self.ent_tls_key.delete(0, "end")
+                    self.ent_tls_key.insert(0, self.settings["tls_key_path"])
+                except Exception:
+                    pass
+            else:
+                try:
+                    messagebox.showerror(self.tr("app_name"), self.tr("tls_invalid"))
+                except Exception:
+                    pass
+                self.settings["tls_enabled"] = False
+                try:
+                    self.sw_tls.deselect()
+                except Exception:
+                    pass
 
         self.start_in_tray = bool(self.settings.get("start_in_tray"))
         self.show_on_start = bool(self.settings.get("show_on_start", True))
@@ -169,11 +201,14 @@ class AppNavigationMixin:
         self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
         self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
         self.tls_ca_path = str(self.settings.get("tls_ca_path") or "").strip()
-        self.api_scheme = "https" if self.tls_enabled else "http"
-        if self.tls_enabled:
-            self.requests_verify = self.tls_ca_path if self.tls_ca_path else False
+        if hasattr(self, "_refresh_api_transport"):
+            self._refresh_api_transport()
         else:
-            self.requests_verify = True
+            self.api_scheme = "https" if self.tls_enabled else "http"
+            if self.tls_enabled:
+                self.requests_verify = self.tls_ca_path if self.tls_ca_path else False
+            else:
+                self.requests_verify = True
         self.api_url = f"{self.api_scheme}://127.0.0.1:{self.port}/api/local"
         self.api_client.configure(self.api_url, self.requests_verify)
         self.apply_settings()
@@ -223,17 +258,32 @@ class AppNavigationMixin:
         self.settings_frame.grid_forget()
 
         for btn in (self.btn_home, self.btn_devices, self.btn_settings):
-            btn.configure(text_color=COLOR_TEXT_DIM, fg_color="transparent")
+            btn.configure(text_color=COLOR_TEXT_DIM, fg_color="transparent", border_width=0, border_color=COLOR_BORDER)
 
         if name == "home":
             self.home_frame.grid(row=0, column=1, sticky="nsew")
-            self.btn_home.configure(text_color=COLOR_ACCENT, fg_color=COLOR_PANEL_ALT)
+            self.btn_home.configure(
+                text_color=COLOR_TEXT,
+                fg_color=COLOR_PANEL_ALT,
+                border_width=1,
+                border_color=COLOR_ACCENT,
+            )
         elif name == "devices":
             self.devices_frame.grid(row=0, column=1, sticky="nsew")
-            self.btn_devices.configure(text_color=COLOR_ACCENT, fg_color=COLOR_PANEL_ALT)
+            self.btn_devices.configure(
+                text_color=COLOR_TEXT,
+                fg_color=COLOR_PANEL_ALT,
+                border_width=1,
+                border_color=COLOR_ACCENT,
+            )
         else:
             self.settings_frame.grid(row=0, column=1, sticky="nsew")
-            self.btn_settings.configure(text_color=COLOR_ACCENT, fg_color=COLOR_PANEL_ALT)
+            self.btn_settings.configure(
+                text_color=COLOR_TEXT,
+                fg_color=COLOR_PANEL_ALT,
+                border_width=1,
+                border_color=COLOR_ACCENT,
+            )
 
     def setup_tray(self) -> Any:
         """Initialize system tray menu actions and icon behavior."""
@@ -288,9 +338,184 @@ class AppNavigationMixin:
 
     def show_help(self) -> Any:
         """Show help."""
-        text = str(self.tr("about_text", version=LAUNCHER_VERSION) or "").strip()
+        existing = getattr(self, "_help_window", None)
+        if existing:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+
+        text = str(self.tr("help_text", version=LAUNCHER_VERSION) or "").strip()
+        commands_text = str(self.tr("help_commands") or "").strip()
         try:
-            messagebox.showinfo(self.tr("help_title"), text)
+            win = ctk.CTkToplevel(self)
+            self._help_window = win
+            win.title(self.tr("help_title"))
+            win.geometry("920x620")
+            win.minsize(760, 500)
+            win.configure(fg_color=COLOR_BG)
+            win.transient(self)
+            win.protocol("WM_DELETE_WINDOW", self._close_help_window)
+
+            try:
+                self.update_idletasks()
+                win.update_idletasks()
+                w = int(win.winfo_width() or 920)
+                h = int(win.winfo_height() or 620)
+                x = int(self.winfo_x() + max(0, (self.winfo_width() - w) / 2))
+                y = int(self.winfo_y() + max(0, (self.winfo_height() - h) / 2))
+                win.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                pass
+
+            shell = ctk.CTkFrame(
+                win,
+                fg_color=COLOR_PANEL,
+                corner_radius=12,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            shell.pack(fill="both", expand=True, padx=14, pady=14)
+            shell.grid_columnconfigure(1, weight=1)
+            shell.grid_rowconfigure(1, weight=1)
+
+            header = ctk.CTkFrame(shell, fg_color=COLOR_PANEL_ALT, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
+            header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+            ctk.CTkLabel(
+                header,
+                text=self.tr("help_title"),
+                font=FONT_HEADER,
+                text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=14, pady=(10, 0))
+            ctk.CTkLabel(
+                header,
+                text=self.tr("help_subtitle", version=LAUNCHER_VERSION),
+                font=FONT_SMALL,
+                text_color=COLOR_TEXT_DIM,
+            ).pack(anchor="w", padx=14, pady=(2, 10))
+
+            sidebar = ctk.CTkFrame(
+                shell,
+                width=245,
+                fg_color=COLOR_PANEL_ALT,
+                corner_radius=10,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            sidebar.grid(row=1, column=0, sticky="nsew", padx=(12, 8), pady=(0, 12))
+            sidebar.grid_propagate(False)
+            ctk.CTkLabel(
+                sidebar,
+                text=self.tr("help_quick_actions"),
+                font=FONT_UI_BOLD,
+                text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=12, pady=(12, 8))
+
+            CyberBtn(
+                sidebar,
+                text=self.tr("nav_support"),
+                command=self.open_support_page,
+                height=34,
+            ).pack(fill="x", padx=12, pady=(0, 6))
+            CyberBtn(
+                sidebar,
+                text=self.tr("open_app_config"),
+                command=self.open_app_config_file,
+                height=34,
+            ).pack(fill="x", padx=12, pady=6)
+            CyberBtn(
+                sidebar,
+                text=self.tr("help_copy_commands"),
+                command=self._copy_help_commands,
+                height=34,
+                fg_color=COLOR_PANEL,
+                hover_color=COLOR_PANEL_ALT,
+            ).pack(fill="x", padx=12, pady=(6, 10))
+
+            ctk.CTkLabel(
+                sidebar,
+                text=self.tr("help_commands_title"),
+                font=FONT_UI_BOLD,
+                text_color=COLOR_TEXT_DIM,
+            ).pack(anchor="w", padx=12, pady=(4, 6))
+
+            cmd_box = ctk.CTkTextbox(
+                sidebar,
+                height=130,
+                fg_color=COLOR_BG,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                corner_radius=8,
+                text_color=COLOR_TEXT,
+                font=FONT_SMALL,
+                wrap="word",
+            )
+            cmd_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+            cmd_box.insert("1.0", commands_text)
+            cmd_box.configure(state="disabled")
+
+            body = ctk.CTkFrame(shell, fg_color="transparent")
+            body.grid(row=1, column=1, sticky="nsew", padx=(8, 12), pady=(0, 12))
+            body.grid_rowconfigure(0, weight=1)
+            body.grid_columnconfigure(0, weight=1)
+
+            text_box = ctk.CTkTextbox(
+                body,
+                fg_color=COLOR_PANEL_ALT,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                corner_radius=10,
+                text_color=COLOR_TEXT,
+                font=FONT_UI,
+                wrap="word",
+            )
+            text_box.grid(row=0, column=0, sticky="nsew")
+            text_box.insert("1.0", text)
+            text_box.configure(state="disabled")
+
+            actions = ctk.CTkFrame(shell, fg_color="transparent")
+            actions.grid(row=2, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
+            CyberBtn(
+                actions,
+                text=self.tr("help_close"),
+                command=self._close_help_window,
+                width=140,
+                height=34,
+            ).pack(side="right")
+
+            win.focus_force()
+            win.lift()
+        except Exception:
+            try:
+                messagebox.showinfo(self.tr("help_title"), text)
+            except Exception:
+                pass
+
+    def _close_help_window(self) -> Any:
+        """Close help window if it exists."""
+        win = getattr(self, "_help_window", None)
+        self._help_window = None
+        if not win:
+            return
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    def _copy_help_commands(self) -> Any:
+        """Copy diagnostics/test commands from help sidebar."""
+        payload = str(self.tr("help_commands") or "").strip()
+        if not payload:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            self.update_idletasks()
+            self.show_toast(self.tr("help_commands_copied"), level="success")
         except Exception:
             pass
 

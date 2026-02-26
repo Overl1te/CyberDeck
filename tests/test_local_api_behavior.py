@@ -43,6 +43,10 @@ class LocalApiBehaviorTests(unittest.TestCase):
         config.SESSION_FILE = cls._old_session_file
         cls._tmp.cleanup()
 
+    def setUp(self):
+        """Prepare test preconditions for each test case."""
+        context.input_guard.set_locked(False, reason="test_reset", actor="tests")
+
     def test_loopback_guard_accepts_ipv4_ipv6_and_localhost(self):
         """Validate scenario: test loopback guard accepts ipv4 ipv6 and localhost."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

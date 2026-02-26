@@ -1,8 +1,8 @@
-<p align="center">
+﻿<p align="center">
   <img src="icon-qr-code.png" width="400" height="400" />
 </p>
 
-<h1 align="center">CyberDeck Control — Remote PC Management</h1>
+<h1 align="center">CyberDeck Control вЂ” Remote PC Management</h1>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> •
-  <a href="#usage-flow">Usage flow</a> •
-  <a href="#basic-gestures">Gestures</a> •
+  <a href="#features">Features</a> вЂў
+  <a href="#usage-flow">Usage flow</a> вЂў
+  <a href="#basic-gestures">Gestures</a> вЂў
   <a href="#faq">FAQ</a>
 </p>
 
@@ -34,8 +34,8 @@
 ## Features
 
 - Current release line:
-  - `CyberDeck Server` / `Launcher`: `v1.3.1`
-  - `CyberDeck-Mobile`: `1.1.1`
+  - `CyberDeck Server` / `Launcher`: `v1.3.2`
+  - `CyberDeck-Mobile`: `1.1.2`
 - Pair a device using PIN or QR.
 - Control mouse, keyboard, and media keys remotely.
 - Stream screen video (MJPEG / H.264 / H.265 depending on environment).
@@ -107,6 +107,11 @@ All technical details are in `CONTRIBUTING_EN.md`:
 - testing;
 - build and packaging.
 
+Additional practical guides:
+
+- Docker runtime: `docs/DOCKER.md`
+- Stream/audio/pairing troubleshooting: `docs/STREAMING_TROUBLESHOOTING.md`
+
 ---
 
 ## FAQ
@@ -124,4 +129,5 @@ A: Streaming path depends on system backends and codec availability.
 
 **License:** GNU GPLv3 (`LICENSE`)  
 **Author:** Overl1te - <https://github.com/Overl1te>
+
 

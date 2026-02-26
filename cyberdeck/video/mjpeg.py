@@ -154,8 +154,12 @@ def _mjpeg_backend_order(preferred: str, status: Dict[str, bool]) -> list[str]:
     if parsed_env:
         base = parsed_env
     elif _is_wayland_session() and _is_gnome_session():
-        # Prefer non-x11grab paths first on Wayland to avoid compositor-specific blank capture.
-        base = ["screenshot", "gstreamer", "ffmpeg", "native"]
+        # GNOME screenshot path is reliable but often low-fps/blurred.
+        # Keep realtime pipelines first and leave screenshot as fallback.
+        if _prefer_gst_over_ffmpeg_mjpeg():
+            base = ["gstreamer", "ffmpeg", "screenshot", "native"]
+        else:
+            base = ["ffmpeg", "gstreamer", "screenshot", "native"]
     elif _prefer_gst_over_ffmpeg_mjpeg():
         base = ["gstreamer", "screenshot", "ffmpeg", "native"]
     else:

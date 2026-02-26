@@ -132,6 +132,71 @@ class AppRuntimeMixin:
         except Exception:
             pass
 
+    def _boot_mark_waiting(self) -> Any:
+        """Update boot overlay while local API is still unavailable."""
+        if not bool(getattr(self, "_boot_overlay_visible", False)):
+            return
+        if bool(getattr(self, "_boot_server_ready_announced", False)):
+            return
+        try:
+            self._set_boot_stage(
+                "server_wait",
+                progress=0.96,
+                detail=self.tr("boot_detail_server_wait"),
+                visual_key="server",
+            )
+        except Exception:
+            pass
+
+    def _boot_mark_ready(self) -> Any:
+        """Finalize boot overlay when local API responds successfully."""
+        if not bool(getattr(self, "_boot_overlay_visible", False)):
+            return
+        if bool(getattr(self, "_boot_server_ready_announced", False)):
+            return
+        self._boot_server_ready_announced = True
+        try:
+            self._set_boot_stage(
+                "server_wait",
+                progress=1.0,
+                detail=self.tr("boot_detail_finalizing"),
+                visual_key="server",
+            )
+        except Exception:
+            pass
+        elapsed = max(0.0, time.time() - float(getattr(self, "_boot_started_ts", 0.0) or 0.0))
+        min_visible = max(0.0, float(BOOT_OVERLAY_MIN_VISIBLE_S or 0.0))
+        current = max(
+            float(getattr(self, "_boot_progress_value", 0.0) or 0.0),
+            float(getattr(self, "_boot_progress_target", 0.0) or 0.0),
+        )
+        remaining = max(0.0, 1.0 - min(1.0, current))
+        fill_wait = 0.0
+        try:
+            tick_s = max(0.001, float(int(BOOT_PROGRESS_TICK_MS)) / 1000.0)
+            exp_rate = max(0.01, float(BOOT_PROGRESS_EXP_RATE))
+            exp_min = max(0.0001, float(BOOT_PROGRESS_EXP_MIN_STEP))
+            exp_max = max(exp_min, float(BOOT_PROGRESS_EXP_MAX_STEP))
+            step = max(exp_min, remaining * exp_rate)
+            step = max(float(BOOT_PROGRESS_TARGET_STEP), min(exp_max, step))
+            fill_wait = (remaining / max(0.0001, step)) * tick_s
+        except Exception:
+            fill_wait = 0.0
+        wait_s = max(0.36, (min_visible - elapsed), fill_wait + 0.12)
+        def _finish_boot() -> Any:
+            try:
+                self._set_boot_stage(
+                    "server_ready",
+                    progress=1.0,
+                    detail=self.tr("boot_detail_server_ready"),
+                    visual_key="ready",
+                )
+            except Exception:
+                pass
+            self._hide_boot_overlay()
+
+        self._safe_after(int(wait_s * 1000), _finish_boot)
+
     def _safe_after(self, delay_ms: int, callback: Any) -> Any:
         """Schedule a Tk callback only if the root window is alive."""
         try:
@@ -179,6 +244,356 @@ class AppRuntimeMixin:
     def language_code_from_label(self, label: str) -> str:
         """Resolve language code from the selected localized label."""
         return i18n_language_code(label)
+
+    def _notify_system(self, title: str, message: str) -> Any:
+        """Best-effort system notification with tray/OS fallback."""
+        if not bool(self.settings.get("system_notifications", True)):
+            return
+        app_name = self.tr("app_name")
+        ttl = str(title or app_name).strip() or app_name
+        msg = str(message or "").strip()
+        if not msg:
+            return
+        try:
+            if getattr(self, "tray", None):
+                self.tray.notify(msg, ttl)
+                return
+        except Exception:
+            pass
+        try:
+            from plyer import notification as plyer_notification  # type: ignore
+
+            plyer_notification.notify(title=ttl, message=msg, app_name=app_name, timeout=4)
+            return
+        except Exception:
+            pass
+        try:
+            if sys.platform.startswith("linux"):
+                subprocess.Popen(["notify-send", ttl, msg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            if sys.platform == "darwin":
+                safe_t = ttl.replace('"', "'")
+                safe_m = msg.replace('"', "'")
+                script = f'display notification "{safe_m}" with title "{safe_t}"'
+                subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def _handle_local_event(self, event: dict[str, Any]) -> Any:
+        """Handle one local server event and route toast/system notifications."""
+        if not isinstance(event, dict):
+            return
+        et = str(event.get("type") or "").strip().lower()
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_id = int(event.get("id") or 0)
+        if et == "device_connected":
+            token = str(payload.get("token") or "")
+            if token and token in self._notified_device_tokens:
+                return
+            if token:
+                self._notified_device_tokens.add(token)
+            name = str(payload.get("name") or payload.get("device_name") or self.tr("unknown_device"))
+            text = self.tr("notify_device_connected", name=name)
+            self.show_toast(text, level="success")
+            self._notify_system(self.tr("app_name"), text)
+            return
+        if et == "device_disconnected":
+            name = str(payload.get("name") or payload.get("device_name") or self.tr("unknown_device"))
+            self.show_toast(self.tr("notify_device_disconnected", name=name), level="info")
+            return
+        if et == "file_received":
+            if event_id in self._notified_upload_events:
+                return
+            self._notified_upload_events.add(event_id)
+            filename = str(payload.get("filename") or "file")
+            text = self.tr("notify_file_received", filename=filename)
+            self.show_toast(text, level="info")
+            self._notify_system(self.tr("app_name"), text)
+            return
+        if et == "input_lock_changed":
+            sec = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+            self.security_state = {
+                "locked": bool(sec.get("locked", False)),
+                "reason": str(sec.get("reason", "") or ""),
+                "actor": str(sec.get("actor", "system") or "system"),
+                "updated_ts": float(sec.get("updated_ts", 0.0) or 0.0),
+            }
+            self.show_toast(self.tr("notify_input_lock_changed"), level="info")
+            return
+        if et == "panic_mode":
+            revoked = int(payload.get("revoked", 0) or 0)
+            sec = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+            self.security_state = {
+                "locked": bool(sec.get("locked", True)),
+                "reason": str(sec.get("reason", "panic_mode") or "panic_mode"),
+                "actor": str(sec.get("actor", "panic_mode") or "panic_mode"),
+                "updated_ts": float(sec.get("updated_ts", 0.0) or 0.0),
+            }
+            msg = self.tr("notify_panic_mode_revoked", count=revoked)
+            self.show_toast(msg, level="warning")
+            self._notify_system(self.tr("app_name"), msg)
+            return
+        if et == "device_pending":
+            self._notify_system(
+                self.tr("app_name"),
+                str(event.get("message") or self.tr("notify_device_approval_required")),
+            )
+            self._prompt_pending_approval()
+
+    def _approve_device_async(self, token: str, allow: bool) -> Any:
+        """Call local approval API and refresh launcher state."""
+        def _bg() -> None:
+            try:
+                resp = self.api_client.device_approve(token, allow=allow, timeout=3.0)
+                if int(getattr(resp, "status_code", 0) or 0) != 200:
+                    raise RuntimeError(f"http {getattr(resp, 'status_code', '?')}")
+                if allow:
+                    self.ui_call(lambda: self.show_toast(self.tr("device_approved"), level="success"))
+                else:
+                    self.ui_call(lambda: self.show_toast(self.tr("device_denied"), level="info"))
+            except Exception as e:
+                self._pending_prompted_tokens.discard(str(token or ""))
+                self.ui_call(lambda e=e: self.show_toast(self.tr("approval_error", msg=e), level="error"))
+            finally:
+                self._approval_dialog_active = False
+                self.ui_call(lambda: self.request_sync(150))
+                self.ui_call(self._prompt_pending_approval)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _approval_button_labels(self) -> tuple[str, str]:
+        """Return localized labels for approval dialog actions."""
+        return self.tr("approval_allow"), self.tr("approval_deny")
+
+    def _approval_dialog_copy(self) -> dict[str, str]:
+        """Return localized copy used by the custom approval dialog."""
+        return {
+            "title": self.tr("approval_prompt_title"),
+            "subtitle": self.tr("approval_subtitle"),
+            "device_label": self.tr("approval_device_label"),
+            "ip_label": self.tr("approval_ip_label"),
+            "session_label": self.tr("approval_session_label"),
+            "hint": self.tr("approval_hint"),
+        }
+
+    def _close_approval_dialog(self) -> Any:
+        """Close and forget active custom approval dialog window."""
+        win = getattr(self, "_approval_dialog_window", None)
+        self._approval_dialog_window = None
+        if not win:
+            return
+        try:
+            win.grab_release()
+        except Exception:
+            pass
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    def _show_approval_dialog(self, token: str, name: str, ip: str) -> bool:
+        """Show themed approval dialog. Return True if custom dialog was created."""
+        try:
+            self._close_approval_dialog()
+            copy = self._approval_dialog_copy()
+            allow_text, deny_text = self._approval_button_labels()
+
+            win = ctk.CTkToplevel(self)
+            self._approval_dialog_window = win
+            width = 640
+            height = 350
+            win.title(copy["title"])
+            win.geometry(f"{width}x{height}")
+            win.resizable(False, False)
+            win.transient(self)
+            win.configure(fg_color=COLOR_BG)
+            win.lift()
+
+            try:
+                win.grab_set()
+            except Exception:
+                pass
+
+            try:
+                self.update_idletasks()
+                win.update_idletasks()
+                x = int(self.winfo_x() + max(0, (self.winfo_width() - width) / 2))
+                y = int(self.winfo_y() + max(0, (self.winfo_height() - height) / 2))
+                win.geometry(f"{width}x{height}+{x}+{y}")
+            except Exception:
+                pass
+
+            panel = ctk.CTkFrame(
+                win,
+                fg_color=COLOR_PANEL,
+                corner_radius=14,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            panel.pack(fill="both", expand=True, padx=12, pady=12)
+
+            top = ctk.CTkFrame(panel, fg_color="transparent")
+            top.pack(fill="x", padx=16, pady=(14, 8))
+
+            badge = ctk.CTkLabel(
+                top,
+                text="NEW",
+                width=54,
+                height=30,
+                corner_radius=8,
+                fg_color=COLOR_WARN,
+                text_color="#04110A",
+                font=("Consolas", 12, "bold"),
+            )
+            badge.pack(side="left", padx=(0, 12))
+
+            title_col = ctk.CTkFrame(top, fg_color="transparent")
+            title_col.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                title_col,
+                text=copy["title"],
+                font=("Consolas", 17, "bold"),
+                text_color=COLOR_TEXT,
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                title_col,
+                text=copy["subtitle"],
+                justify="left",
+                font=FONT_SMALL,
+                text_color=COLOR_TEXT_DIM,
+            ).pack(anchor="w", pady=(2, 0))
+
+            details = ctk.CTkFrame(
+                panel,
+                fg_color=COLOR_PANEL_ALT,
+                corner_radius=10,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            details.pack(fill="x", padx=16, pady=(2, 12))
+
+            row_dev = ctk.CTkFrame(details, fg_color="transparent")
+            row_dev.pack(fill="x", padx=12, pady=(10, 4))
+            ctk.CTkLabel(
+                row_dev,
+                text=copy["device_label"],
+                font=FONT_SMALL,
+                text_color=COLOR_TEXT_DIM,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row_dev,
+                text=name,
+                font=FONT_UI_BOLD,
+                text_color=COLOR_TEXT,
+            ).pack(side="right")
+
+            row_ip = ctk.CTkFrame(details, fg_color="transparent")
+            row_ip.pack(fill="x", padx=12, pady=(0, 10))
+            ctk.CTkLabel(
+                row_ip,
+                text=copy["ip_label"],
+                font=FONT_SMALL,
+                text_color=COLOR_TEXT_DIM,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row_ip,
+                text=ip,
+                font=FONT_UI_BOLD,
+                text_color=COLOR_TEXT,
+            ).pack(side="right")
+
+            row_session = ctk.CTkFrame(details, fg_color="transparent")
+            row_session.pack(fill="x", padx=12, pady=(0, 10))
+            ctk.CTkLabel(
+                row_session,
+                text=copy["session_label"],
+                font=FONT_SMALL,
+                text_color=COLOR_TEXT_DIM,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row_session,
+                text=f"{token[:8]}...",
+                font=("Consolas", 13, "bold"),
+                text_color=COLOR_ACCENT,
+            ).pack(side="right")
+
+            ctk.CTkLabel(
+                panel,
+                text=copy["hint"],
+                font=FONT_UI,
+                text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=16, pady=(0, 8))
+
+            btn_row = ctk.CTkFrame(panel, fg_color="transparent")
+            btn_row.pack(fill="x", padx=16, pady=(0, 14))
+            btn_row.grid_columnconfigure(0, weight=1)
+            btn_row.grid_columnconfigure(1, weight=1)
+
+            def _decide(allow: bool) -> None:
+                self._close_approval_dialog()
+                self._approve_device_async(token, allow=allow)
+
+            CyberBtn(
+                btn_row,
+                text=allow_text,
+                command=lambda: _decide(True),
+                height=36,
+                fg_color=COLOR_ACCENT,
+                text_color="#04110A",
+                hover_color=COLOR_ACCENT_HOVER,
+                border_color=COLOR_ACCENT,
+            ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+            CyberBtn(
+                btn_row,
+                text=deny_text,
+                command=lambda: _decide(False),
+                height=36,
+                fg_color="transparent",
+                border_color=COLOR_FAIL,
+                text_color=COLOR_FAIL,
+                hover_color=COLOR_PANEL_ALT,
+            ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+            win.bind("<Escape>", lambda _e: _decide(False))
+            win.bind("<Return>", lambda _e: _decide(True))
+            win.protocol("WM_DELETE_WINDOW", lambda: _decide(False))
+            return True
+        except Exception:
+            self._close_approval_dialog()
+            return False
+
+    def _prompt_pending_approval(self) -> Any:
+        """Show one approval dialog for the oldest unseen pending device."""
+        if self._approval_dialog_active:
+            return
+        pending = self.pending_devices if isinstance(self.pending_devices, list) else []
+        for row in pending:
+            if not isinstance(row, dict):
+                continue
+            token = str(row.get("token") or "").strip()
+            if not token:
+                continue
+            if token in self._pending_prompted_tokens:
+                continue
+            self._pending_prompted_tokens.add(token)
+            self._approval_dialog_active = True
+            name = str(row.get("name") or row.get("device_id") or self.tr("unknown_device"))
+            ip = str(row.get("ip") or "-")
+            shown = self._show_approval_dialog(token, name, ip)
+            if shown:
+                return
+            try:
+                allow = bool(
+                    messagebox.askyesno(
+                        self.tr("approval_prompt_title"),
+                        self.tr("approval_prompt_text", name=name, ip=ip),
+                    )
+                )
+            except Exception:
+                allow = False
+            self._approve_device_async(token, allow=allow)
+            return
 
     def _rebuild_ui_for_language(self) -> Any:
         """Refresh visible UI text after language switch."""
@@ -256,8 +671,11 @@ class AppRuntimeMixin:
                 fn = self._ui_queue.get_nowait()
                 try:
                     fn()
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        self.append_log(f"[launcher] ui callback error: {e}\n")
+                    except Exception:
+                        pass
         except Exception:
             pass
         try:
@@ -275,16 +693,33 @@ class AppRuntimeMixin:
 
         def _fetch() -> None:
             """Fetch launcher status snapshot from local API."""
+            was_online = bool(getattr(self, "server_online", False))
             try:
                 resp = self.api_client.get_info(timeout=1)
                 if resp.status_code == 200:
                     data = resp.json()
                     self.server_online = True
+                    self.ui_call(self._boot_mark_ready)
+                    if not was_online:
+                        # Server recovered/restarted: force immediate QR rebuild.
+                        self._qr_last_fetch_ts = 0.0
+                        self._qr_next_fetch_ts = 0.0
+                        self._qr_last_state_signature = None
                     try:
                         self.server_id = str(data.get("server_id") or "")
                     except Exception:
                         self.server_id = ""
                     self.pairing_code = data.get("pairing_code", "ERR")
+                    try:
+                        raw_exp = data.get("pairing_expires_in_s", None)
+                        self.pairing_expires_in_s = int(raw_exp) if raw_exp is not None else None
+                    except Exception:
+                        self.pairing_expires_in_s = None
+                    try:
+                        self.pairing_ttl_s = int(data.get("pairing_ttl_s", 0) or 0)
+                    except Exception:
+                        self.pairing_ttl_s = 0
+                    self.pairing_single_use = bool(data.get("pairing_single_use", False))
                     self.server_ip = data.get("ip", "0.0.0.0")
                     try:
                         new_port = int(data.get("port", self.port))
@@ -295,13 +730,21 @@ class AppRuntimeMixin:
                         self.port = int(new_port)
                         self.api_url = f"{self.api_scheme}://127.0.0.1:{self.port}/api/local"
                         self.api_client.configure(self.api_url, self.requests_verify)
-                    self.server_version = data.get("version", "unknown")
+                    self.server_version = data.get("version", self.tr("unknown_value"))
                     try:
                         self.server_hostname = str(data.get("hostname") or "")
                     except Exception:
                         self.server_hostname = ""
                     self.log_file = data.get("log_file", self.log_file)
                     self.devices_data = data.get("devices", [])
+                    self.pending_devices = data.get("pending_devices", [])
+                    sec = data.get("security") if isinstance(data.get("security"), dict) else {}
+                    self.security_state = {
+                        "locked": bool(sec.get("locked", False)),
+                        "reason": str(sec.get("reason", "") or ""),
+                        "actor": str(sec.get("actor", "system") or "system"),
+                        "updated_ts": float(sec.get("updated_ts", 0.0) or 0.0),
+                    }
                     now_mono = time.monotonic()
                     if now_mono >= float(getattr(self, "_next_update_pull_ts", 0.0) or 0.0):
                         try:
@@ -314,11 +757,32 @@ class AppRuntimeMixin:
                         except Exception:
                             self._next_update_pull_ts = now_mono + 45.0
                     self._update_status_line = self._build_update_status_line()
+                    try:
+                        events_resp = self.api_client.get_events(since_id=self._last_local_event_id, limit=80, timeout=1.3)
+                        if events_resp.status_code == 200:
+                            payload = events_resp.json() or {}
+                            events = payload.get("events") if isinstance(payload.get("events"), list) else []
+                            try:
+                                latest_id = int(payload.get("latest_id") or self._last_local_event_id)
+                            except Exception:
+                                latest_id = self._last_local_event_id
+                            if self._last_local_event_id < 0:
+                                self._last_local_event_id = latest_id
+                                events = []
+                            for evt in events:
+                                self.ui_call(lambda evt=evt: self._handle_local_event(evt))
+                            if latest_id > self._last_local_event_id:
+                                self._last_local_event_id = latest_id
+                    except Exception:
+                        pass
                     self.ui_call(self._maybe_show_update_popup)
+                    self.ui_call(self._prompt_pending_approval)
                 else:
                     self.server_online = False
+                    self.ui_call(self._boot_mark_waiting)
             except Exception:
                 self.server_online = False
+                self.ui_call(self._boot_mark_waiting)
             finally:
                 self._sync_inflight = False
                 self.ui_call(self.update_gui_data)
@@ -335,7 +799,7 @@ class AppRuntimeMixin:
                 return alias
         except Exception:
             pass
-        return d.get("name", "unknown")
+        return d.get("name", self.tr("unknown_device"))
 
     def _iter_visible_devices(self) -> Any:
         """Iterate over visible devices."""
@@ -353,11 +817,21 @@ class AppRuntimeMixin:
     def _device_row_key(self, d: dict, online: bool, is_sel: bool) -> Any:
         """Build a stable key used to track a device row widget."""
         settings = d.get("settings") or {}
+        try:
+            last_seen_ts = float(d.get("last_seen_ts") or 0.0)
+            if last_seen_ts > 0:
+                age_bucket = int(max(0.0, time.time() - last_seen_ts) // 60)
+            else:
+                age_bucket = -1
+        except Exception:
+            age_bucket = -1
         return (
             self._device_display_name(d),
             d.get("ip", "?"),
             bool(online),
+            bool(d.get("approved", True)),
             settings.get("transfer_preset", "balanced"),
+            int(age_bucket),
             bool(is_sel),
         )
 
@@ -373,19 +847,19 @@ class AppRuntimeMixin:
         row = ctk.CTkFrame(
             self.device_list,
             fg_color=COLOR_PANEL_ALT,
-            corner_radius=10,
+            corner_radius=12,
             border_width=1,
             border_color=COLOR_BORDER,
         )
 
         content = ctk.CTkFrame(row, fg_color="transparent")
-        content.pack(fill="x", expand=True, padx=8, pady=8)
+        content.pack(fill="x", expand=True, padx=10, pady=9)
 
         dot = ctk.CTkFrame(
             content,
-            width=10,
-            height=10,
-            corner_radius=5,
+            width=12,
+            height=12,
+            corner_radius=6,
             fg_color="#444",
         )
         dot.pack(side="left", padx=(2, 10), pady=6)
@@ -409,7 +883,7 @@ class AppRuntimeMixin:
         )
         lbl_sub.pack(anchor="w")
 
-        lbl_check = ctk.CTkLabel(content, text="OK", text_color=COLOR_ACCENT, font=FONT_UI_BOLD)
+        lbl_check = ctk.CTkLabel(content, text=self.tr("device_active"), text_color=COLOR_ACCENT, font=FONT_SMALL)
 
         for w in (row, dot, info, lbl_title, lbl_sub):
             self._bind_device_select(w, token)
@@ -435,15 +909,46 @@ class AppRuntimeMixin:
             fg_color=COLOR_PANEL if is_sel else COLOR_PANEL_ALT,
             border_color=COLOR_ACCENT if is_sel else COLOR_BORDER,
         )
-        dot.configure(fg_color=COLOR_ACCENT if online else "#444")
+        approved = bool(d.get("approved", True))
+        if not approved:
+            dot.configure(fg_color=COLOR_WARN)
+        else:
+            dot.configure(fg_color=COLOR_ACCENT if online else "#444")
 
         name = self._device_display_name(d)
         ip = d.get("ip", "?")
         preset = (d.get("settings") or {}).get("transfer_preset", "balanced")
-        status = self.tr("status_online") if online else self.tr("status_offline")
+        try:
+            last_seen_ts = float(d.get("last_seen_ts") or 0.0)
+        except Exception:
+            last_seen_ts = 0.0
+        if last_seen_ts > 0:
+            age_s = int(max(0.0, time.time() - last_seen_ts))
+            if age_s < 60:
+                last_seen_text = self.tr("last_seen_seconds", value=age_s)
+            elif age_s < 3600:
+                last_seen_text = self.tr("last_seen_minutes", value=max(1, age_s // 60))
+            else:
+                last_seen_text = self.tr("last_seen_hours", value=max(1, age_s // 3600))
+        else:
+            last_seen_text = self.tr("last_seen_never")
+        if not approved:
+            status = self.tr("status_pending")
+        else:
+            status = self.tr("status_online") if online else self.tr("status_offline")
 
         lbl_title.configure(text=name)
-        lbl_sub.configure(text=f"{ip} | {status} | {self.tr('profile')}: {preset}")
+        lbl_sub.configure(
+            text=self.tr(
+                "last_seen_format",
+                ip=ip,
+                status=status,
+                profile_label=self.tr("profile"),
+                preset=preset,
+                last_label=self.tr("last_seen_label"),
+                last_seen=last_seen_text,
+            )
+        )
 
         try:
             if is_sel:
@@ -547,15 +1052,16 @@ class AppRuntimeMixin:
         server_upd = self._channel_has_update(server)
         launcher_upd = self._channel_has_update(launcher)
         mobile_upd = self._channel_has_update(mobile)
+        self._update_status_has_updates = bool(server_upd or launcher_upd or mobile_upd)
         if server_upd or launcher_upd or mobile_upd:
             parts = []
             if server_upd:
-                parts.append(f"server {self._channel_latest_tag(server) or '?'}")
+                parts.append(f"{self.tr('updates_channel_server')} {self._channel_latest_tag(server) or '?'}")
             if launcher_upd:
-                parts.append(f"launcher {self._channel_latest_tag(launcher) or '?'}")
+                parts.append(f"{self.tr('updates_channel_launcher')} {self._channel_latest_tag(launcher) or '?'}")
             if mobile_upd:
-                parts.append(f"mobile {self._channel_latest_tag(mobile) or '?'}")
-            return f"Updates available: {', '.join(parts)}"
+                parts.append(f"{self.tr('updates_channel_mobile')} {self._channel_latest_tag(mobile) or '?'}")
+            return self.tr("updates_available", items=", ".join(parts))
 
         errors = [
             x
@@ -567,24 +1073,24 @@ class AppRuntimeMixin:
             if x
         ]
         if errors:
-            return f"Update check error: {errors[0]}"
+            return self.tr("updates_check_error", error=errors[0])
 
         checked_at = int(state.get("checked_at") or 0)
         if checked_at > 0:
             try:
                 stamp = time.strftime("%H:%M:%S", time.localtime(float(checked_at)))
             except Exception:
-                stamp = "recently"
-            return f"Updates: up to date ({stamp})"
-        return "Updates: not checked"
+                stamp = self.tr("updates_recently")
+            return self.tr("updates_up_to_date", time=stamp)
+        return self.tr("updates_not_checked")
 
     def _collect_available_updates(self) -> list[tuple[str, str, str, str]]:
         """Collect channels that have updates as tuples `(name, current, latest, release_url)`."""
         state = self.update_state if isinstance(self.update_state, dict) else {}
         channels = (
-            ("Server", state.get("server")),
-            ("Launcher", state.get("launcher")),
-            ("Mobile", state.get("mobile")),
+            (self.tr("updates_channel_server"), state.get("server")),
+            (self.tr("updates_channel_launcher"), state.get("launcher")),
+            (self.tr("updates_channel_mobile"), state.get("mobile")),
         )
         out: list[tuple[str, str, str, str]] = []
         for name, raw in channels:
@@ -624,7 +1130,7 @@ class AppRuntimeMixin:
         seen.add(key)
 
         lines = [
-            "New updates are available:",
+            self.tr("updates_dialog_header"),
             "",
         ]
         for name, current, latest, url in updates:
@@ -635,9 +1141,9 @@ class AppRuntimeMixin:
             if url:
                 lines.append(f"  {url}")
         lines.append("")
-        lines.append("Open project releases to download the latest build.")
+        lines.append(self.tr("updates_dialog_open_releases"))
         try:
-            messagebox.showinfo("CyberDeck Update", "\n".join(lines))
+            messagebox.showinfo(self.tr("updates_dialog_title"), "\n".join(lines))
         except Exception:
             pass
 
@@ -645,11 +1151,35 @@ class AppRuntimeMixin:
         """Update GUI data."""
         # Write-path helpers should keep side effects minimal and well-scoped.
         self.lbl_code.configure(text=self.pairing_code)
+        if hasattr(self, "lbl_pairing_ttl"):
+            ttl_left = getattr(self, "pairing_expires_in_s", None)
+            if ttl_left is None:
+                ttl_text = self.tr("pairing_ttl_unlimited")
+            elif int(ttl_left) <= 0:
+                ttl_text = self.tr("pairing_ttl_expired")
+            else:
+                ttl_text = self.tr("pairing_ttl_seconds", seconds=int(ttl_left))
+            if bool(getattr(self, "pairing_single_use", False)):
+                ttl_text += f" | {self.tr('pairing_single_use_suffix')}"
+            self.lbl_pairing_ttl.configure(text=ttl_text, text_color=(COLOR_WARN if ttl_left == 0 else COLOR_TEXT_DIM))
+
+        if hasattr(self, "lbl_security_state"):
+            locked = bool((self.security_state or {}).get("locked", False))
+            reason = str((self.security_state or {}).get("reason", "") or "").strip()
+            msg = self.tr("security_locked") if locked else self.tr("security_unlocked")
+            if reason:
+                msg += f" ({reason})"
+            self.lbl_security_state.configure(text=msg, text_color=(COLOR_WARN if locked else COLOR_TEXT_DIM))
+        if hasattr(self, "btn_toggle_input_lock"):
+            locked = bool((self.security_state or {}).get("locked", False))
+            self.btn_toggle_input_lock.configure(text=(self.tr("security_unlock_btn") if locked else self.tr("security_lock_btn")))
+
         self.lbl_server.configure(text=f"{self.server_ip}:{self.server_port}")
         self.lbl_version.configure(text=self.tr("server_version_line", server=self.server_version, launcher=LAUNCHER_VERSION))
         if hasattr(self, "lbl_updates"):
-            text = str(getattr(self, "_update_status_line", "Updates: not checked") or "Updates: not checked")
-            color = COLOR_WARN if "Updates available:" in text else COLOR_TEXT_DIM
+            default_line = self.tr("updates_not_checked")
+            text = str(getattr(self, "_update_status_line", default_line) or default_line)
+            color = COLOR_WARN if bool(getattr(self, "_update_status_has_updates", False)) else COLOR_TEXT_DIM
             self.lbl_updates.configure(text=text, text_color=color)
 
         if self.server_online:

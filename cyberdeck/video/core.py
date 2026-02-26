@@ -138,24 +138,24 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 _ALLOW_GNOME_SCREENSHOT = _env_bool("CYBERDECK_ALLOW_GNOME_SCREENSHOT", False)
-_DEFAULT_MJPEG_W = max(640, _env_int("CYBERDECK_MJPEG_DEFAULT_W", 960 if _ENV_WAYLAND else 1280))
-_DEFAULT_MJPEG_Q = max(20, min(95, _env_int("CYBERDECK_MJPEG_DEFAULT_Q", 42 if _ENV_WAYLAND else 55)))
+_DEFAULT_MJPEG_W = max(640, _env_int("CYBERDECK_MJPEG_DEFAULT_W", 1280))
+_DEFAULT_MJPEG_Q = max(20, min(95, _env_int("CYBERDECK_MJPEG_DEFAULT_Q", 55)))
 _DEFAULT_MJPEG_LOW_LATENCY = 1 if _env_bool("CYBERDECK_MJPEG_LOWLAT_DEFAULT", True) else 0
 _DEFAULT_OFFER_MAX_W = max(640, _env_int("CYBERDECK_STREAM_OFFER_MAX_W", 1920))
 _DEFAULT_OFFER_Q = max(20, min(95, _env_int("CYBERDECK_STREAM_OFFER_Q", 55)))
 _DEFAULT_H264_BITRATE_K = max(500, _env_int("CYBERDECK_H264_BITRATE_K", 6000))
 _DEFAULT_H265_BITRATE_K = max(500, _env_int("CYBERDECK_H265_BITRATE_K", 4200))
-_LOW_LATENCY_MAX_W = max(640, _env_int("CYBERDECK_LOWLAT_MAX_W", 960 if _ENV_WAYLAND else 1280))
-_LOW_LATENCY_MAX_Q = max(20, min(95, _env_int("CYBERDECK_LOWLAT_MAX_Q", 42 if _ENV_WAYLAND else 50)))
+_LOW_LATENCY_MAX_W = max(640, _env_int("CYBERDECK_LOWLAT_MAX_W", 1280))
+_LOW_LATENCY_MAX_Q = max(20, min(95, _env_int("CYBERDECK_LOWLAT_MAX_Q", 50)))
 _LOW_LATENCY_MAX_FPS = max(10, _env_int("CYBERDECK_LOWLAT_MAX_FPS", 30 if _ENV_WAYLAND else 60))
 _MIN_MJPEG_Q = max(10, min(95, _env_int("CYBERDECK_MJPEG_MIN_Q", 45)))
 _MIN_MJPEG_Q_LOWLAT = max(10, min(95, _env_int("CYBERDECK_MJPEG_MIN_Q_LOWLAT", 35)))
-_SCREENSHOT_MAX_W = max(480, _env_int("CYBERDECK_SCREENSHOT_MAX_W", 960))
-_SCREENSHOT_MAX_Q = max(20, min(95, _env_int("CYBERDECK_SCREENSHOT_MAX_Q", 40)))
+_SCREENSHOT_MAX_W = max(480, _env_int("CYBERDECK_SCREENSHOT_MAX_W", 1280))
+_SCREENSHOT_MAX_Q = max(20, min(95, _env_int("CYBERDECK_SCREENSHOT_MAX_Q", 50)))
 _SCREENSHOT_MAX_FPS = max(2, _env_int("CYBERDECK_SCREENSHOT_MAX_FPS", 10 if _ENV_WAYLAND else 15))
-_JPEG_SUBSAMPLING = _env_int("CYBERDECK_JPEG_SUBSAMPLING", 2 if _ENV_WAYLAND else 1)
+_JPEG_SUBSAMPLING = _env_int("CYBERDECK_JPEG_SUBSAMPLING", 1 if _ENV_WAYLAND else 1)
 if _JPEG_SUBSAMPLING not in (0, 1, 2):
-    _JPEG_SUBSAMPLING = 2 if _ENV_WAYLAND else 0
+    _JPEG_SUBSAMPLING = 1 if _ENV_WAYLAND else 0
 _FAST_RESIZE = _env_bool("CYBERDECK_FAST_RESIZE", _ENV_WAYLAND)
 _RESAMPLE_FILTER = Image.Resampling.BILINEAR if _FAST_RESIZE else Image.Resampling.LANCZOS
 _DEFAULT_OFFER_CURSOR = 1 if _env_bool("CYBERDECK_OFFER_CURSOR_DEFAULT", False) else 0
@@ -689,6 +689,7 @@ def _get_monitor_rect(monitor: int) -> Optional[tuple[int, int, int, int]]:
 def _pipewire_source_candidates() -> list[str]:
     """Build ordered pipewire source candidates from env and runtime discovery."""
     out: list[str] = []
+    max_sources = max(1, min(8, _env_int("CYBERDECK_PIPEWIRE_MAX_SOURCES", 2)))
     env_sources = [
         os.environ.get("CYBERDECK_PIPEWIRE_NODE"),
         os.environ.get("PIPEWIRE_NODE"),
@@ -697,13 +698,17 @@ def _pipewire_source_candidates() -> list[str]:
         val = str(item or "").strip()
         if val:
             out.append(val)
+    # Different ffmpeg builds expect different default aliases.
+    # Keep them early to reduce startup latency before expensive node probing.
+    out.extend(["default", "pipewire:"])
+    discovered = []
     for item in _discover_pipewire_nodes():
         val = str(item or "").strip()
         if val:
-            out.append(val)
-    # Different ffmpeg builds expect different default aliases.
-    # Avoid hardcoding "0" - it often breaks GStreamer path selection on Linux.
-    out.extend(["default", "pipewire:"])
+            discovered.append(val)
+        if len(discovered) >= max_sources:
+            break
+    out.extend(discovered)
     uniq: list[str] = []
     for x in out:
         if x not in uniq:
@@ -727,13 +732,14 @@ def _discover_pipewire_nodes() -> list[str]:
             _pipewire_nodes_cached_ts = now
         return []
 
+    probe_timeout = max(0.15, min(2.5, _env_float("CYBERDECK_PIPEWIRE_DISCOVER_TIMEOUT_S", 0.45)))
     try:
         proc = subprocess.run(
             [pw_cli, "ls", "Node"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=2.0,
+            timeout=float(probe_timeout),
             check=False,
         )
         txt = str(proc.stdout or "")

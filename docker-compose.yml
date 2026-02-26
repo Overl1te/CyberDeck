@@ -1,0 +1,30 @@
+services:
+  cyberdeck:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DESKTOP_INPUT: "0"
+    image: cyberdeck:latest
+    container_name: cyberdeck
+    restart: unless-stopped
+    environment:
+      CYBERDECK_PORT: "8080"
+      CYBERDECK_PORT_AUTO: "0"
+      CYBERDECK_UDP_PORT: "5555"
+      CYBERDECK_MDNS: "0"
+      CYBERDECK_ALLOW_QUERY_TOKEN: "0"
+      CYBERDECK_DEVICE_APPROVAL_REQUIRED: "1"
+      CYBERDECK_DATA_DIR: "/data"
+      CYBERDECK_FILES_DIR: "/uploads"
+      CYBERDECK_LOG_FILE: "/data/cyberdeck.log"
+      CYBERDECK_VERBOSE_HTTP_LOG: "0"
+      CYBERDECK_VERBOSE_WS_LOG: "0"
+      CYBERDECK_VERBOSE_STREAM_LOG: "0"
+    ports:
+      - "8080:8080"
+      - "5555:5555/udp"
+    volumes:
+      - ./docker-data:/data
+      - ./docker-uploads:/uploads
+

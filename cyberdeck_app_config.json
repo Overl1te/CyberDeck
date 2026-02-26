@@ -1,9 +1,12 @@
 {
   "allow_query_token": false,
+  "pairing_single_use": false,
+  "ignore_vpn": false,
   "upload_max_bytes": 0,
   "upload_allowed_ext": "",
   "verbose_http_log": true,
   "verbose_ws_log": true,
   "verbose_stream_log": true,
-  "mdns_enabled": true
+  "mdns_enabled": true,
+  "device_approval_required": true
 }

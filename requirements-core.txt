@@ -11,3 +11,4 @@ uvicorn[standard]
 pillow
 mss
 psutil
+soundcard; platform_system == "Windows"

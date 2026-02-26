@@ -6,6 +6,7 @@ def _create_accordion(parent, title: str, ui: dict, *, expanded: bool = True):
     CyberBtn = ui["CyberBtn"]
     COLOR_PANEL_ALT = ui["COLOR_PANEL_ALT"]
     COLOR_BORDER = ui["COLOR_BORDER"]
+    COLOR_TEXT_DIM = ui["COLOR_TEXT_DIM"]
     FONT_SMALL = ui["FONT_SMALL"]
 
     root = ctk.CTkFrame(parent, fg_color="transparent")
@@ -14,7 +15,7 @@ def _create_accordion(parent, title: str, ui: dict, *, expanded: bool = True):
     body = ctk.CTkFrame(
         root,
         fg_color=COLOR_PANEL_ALT,
-        corner_radius=10,
+        corner_radius=4,
         border_width=1,
         border_color=COLOR_BORDER,
     )
@@ -22,8 +23,8 @@ def _create_accordion(parent, title: str, ui: dict, *, expanded: bool = True):
 
     def _refresh():
         """Refresh state."""
-        arrow = "▼" if state["open"] else "▶"
-        btn.configure(text=f"{arrow} {title}")
+        marker = "v" if state["open"] else ">"
+        btn.configure(text=f"{marker} {title}")
         if state["open"]:
             if body.winfo_manager() != "pack":
                 body.pack(fill="x", pady=(6, 0))
@@ -39,10 +40,12 @@ def _create_accordion(parent, title: str, ui: dict, *, expanded: bool = True):
         root,
         text="",
         command=_toggle,
-        height=30,
+        height=32,
         font=FONT_SMALL,
         fg_color="transparent",
         border_color=COLOR_BORDER,
+        text_color=COLOR_TEXT_DIM,
+        hover_color=COLOR_PANEL_ALT,
     )
     btn.pack(fill="x")
     _refresh()
@@ -68,36 +71,57 @@ def setup_devices_ui(app, ui: dict):
     DEFAULT_SETTINGS = ui["DEFAULT_SETTINGS"]
     DEFAULT_DEVICE_PRESETS = ui["DEFAULT_DEVICE_PRESETS"]
 
-    header = ctk.CTkFrame(app.devices_frame, fg_color="transparent")
-    header.pack(fill="x", padx=20, pady=(20, 10))
-    ctk.CTkLabel(header, text=app.tr("devices_title"), font=FONT_HEADER, text_color=COLOR_TEXT).pack(side="left")
+    page = ctk.CTkFrame(app.devices_frame, fg_color="transparent")
+    page.pack(fill="both", expand=True, padx=20, pady=(18, 20))
 
-    app.btn_toggle_devices_panel = CyberBtn(
-        header,
-        text=app.tr("hide_panel"),
-        command=app.toggle_devices_panel,
-        height=30,
-        width=150,
-        font=FONT_SMALL,
+    header = ctk.CTkFrame(
+        page,
+        fg_color=COLOR_PANEL,
+        corner_radius=6,
+        border_width=1,
+        border_color=COLOR_BORDER,
+        height=72,
     )
-    app.btn_toggle_devices_panel.pack(side="right", padx=8)
+    header.pack(fill="x", pady=(0, 12))
+    header.grid_columnconfigure(0, weight=1)
+    header.grid_columnconfigure(1, weight=0)
 
-    app.lbl_devices_status = ctk.CTkLabel(header, text=app.tr("updated_offline"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM)
-    app.lbl_devices_status.pack(side="right", padx=8)
+    left = ctk.CTkFrame(header, fg_color="transparent")
+    left.grid(row=0, column=0, sticky="w", padx=16, pady=14)
+    ctk.CTkLabel(left, text=app.tr("devices_title"), font=FONT_HEADER, text_color=COLOR_TEXT).pack(anchor="w")
+    app.lbl_devices_status = ctk.CTkLabel(
+        left,
+        text=app.tr("updated_offline"),
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+    )
+    app.lbl_devices_status.pack(anchor="w", pady=(2, 0))
+
+    header_actions = ctk.CTkFrame(header, fg_color="transparent")
+    header_actions.grid(row=0, column=1, sticky="e", padx=14, pady=14)
 
     app.sw_show_offline = ctk.CTkSwitch(
-        header,
+        header_actions,
         text=app.tr("show_offline"),
         text_color=COLOR_TEXT,
         variable=app.show_offline,
         command=app.update_gui_data,
     )
-    app.sw_show_offline.pack(side="right", padx=8)
+    app.sw_show_offline.pack(side="right", padx=(10, 0))
 
-    split = ctk.CTkFrame(app.devices_frame, fg_color="transparent")
-    split.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+    app.btn_toggle_devices_panel = CyberBtn(
+        header_actions,
+        text=app.tr("hide_panel"),
+        command=app.toggle_devices_panel,
+        width=150,
+        font=FONT_SMALL,
+    )
+    app.btn_toggle_devices_panel.pack(side="right")
+
+    split = ctk.CTkFrame(page, fg_color="transparent")
+    split.pack(fill="both", expand=True)
     split.grid_columnconfigure(0, weight=1)
-    split.grid_columnconfigure(1, weight=0, minsize=8)
+    split.grid_columnconfigure(1, weight=0, minsize=10)
     split.grid_columnconfigure(
         2,
         weight=0,
@@ -106,8 +130,30 @@ def setup_devices_ui(app, ui: dict):
     split.grid_rowconfigure(0, weight=1)
     app.devices_split = split
 
-    app.device_list = ctk.CTkScrollableFrame(split, fg_color=COLOR_BG, corner_radius=10)
-    app.device_list.grid(row=0, column=0, sticky="nsew", padx=(0, 0))
+    list_card = ctk.CTkFrame(
+        split,
+        fg_color=COLOR_PANEL,
+        corner_radius=6,
+        border_width=1,
+        border_color=COLOR_BORDER,
+    )
+    list_card.grid(row=0, column=0, sticky="nsew")
+
+    ctk.CTkLabel(list_card, text=app.tr("devices_title"), font=FONT_UI_BOLD, text_color=COLOR_TEXT).pack(
+        anchor="w", padx=14, pady=(12, 2)
+    )
+    ctk.CTkLabel(list_card, text=app.tr("choose_device"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM).pack(
+        anchor="w", padx=14, pady=(0, 10)
+    )
+
+    app.device_list = ctk.CTkScrollableFrame(
+        list_card,
+        fg_color=COLOR_BG,
+        corner_radius=4,
+        border_width=1,
+        border_color=COLOR_BORDER,
+    )
+    app.device_list.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
     app.devices_splitter = ctk.CTkFrame(
         split,
@@ -127,18 +173,23 @@ def setup_devices_ui(app, ui: dict):
     panel = ctk.CTkScrollableFrame(
         split,
         fg_color=COLOR_PANEL,
-        corner_radius=12,
+        corner_radius=6,
         border_width=1,
         border_color=COLOR_BORDER,
     )
     panel.grid(row=0, column=2, sticky="nsew")
     app.devices_panel = panel
 
-    ctk.CTkLabel(panel, text=app.tr("target"), font=FONT_UI_BOLD, text_color=COLOR_TEXT_DIM).pack(pady=(18, 4))
+    ctk.CTkLabel(panel, text=app.tr("target"), font=FONT_UI_BOLD, text_color=COLOR_TEXT_DIM).pack(pady=(16, 4))
     app.lbl_target = ctk.CTkLabel(panel, text=app.tr("none"), font=FONT_UI_BOLD, text_color=COLOR_TEXT)
     app.lbl_target.pack(pady=(0, 4))
-    app.lbl_target_status = ctk.CTkLabel(panel, text=app.tr("target_not_selected"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM)
-    app.lbl_target_status.pack(pady=(0, 10))
+    app.lbl_target_status = ctk.CTkLabel(
+        panel,
+        text=app.tr("target_not_selected"),
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+    )
+    app.lbl_target_status.pack(pady=(0, 12))
 
     action_row = ctk.CTkFrame(panel, fg_color="transparent")
     action_row.pack(padx=18, fill="x", pady=(0, 8))
@@ -176,8 +227,8 @@ def setup_devices_ui(app, ui: dict):
     app.ent_alias = ctk.CTkEntry(
         panel,
         textvariable=app.var_device_alias,
-        height=32,
-        corner_radius=8,
+        height=34,
+        corner_radius=4,
         fg_color=COLOR_PANEL_ALT,
         border_color=COLOR_BORDER,
         text_color=COLOR_TEXT,
@@ -192,7 +243,7 @@ def setup_devices_ui(app, ui: dict):
         transfer_body,
         values=DEFAULT_DEVICE_PRESETS,
         variable=app.var_transfer_preset,
-        corner_radius=8,
+        corner_radius=4,
         fg_color=COLOR_PANEL_ALT,
         button_color=COLOR_BORDER,
         button_hover_color=COLOR_PANEL,
@@ -218,8 +269,8 @@ def setup_devices_ui(app, ui: dict):
     app.ent_chunk_kb = ctk.CTkEntry(
         adv,
         textvariable=app.var_transfer_chunk_kb,
-        height=30,
-        corner_radius=8,
+        height=32,
+        corner_radius=4,
         fg_color=COLOR_PANEL_ALT,
         border_color=COLOR_BORDER,
         text_color=COLOR_TEXT,
@@ -229,8 +280,8 @@ def setup_devices_ui(app, ui: dict):
     app.ent_sleep_ms = ctk.CTkEntry(
         adv,
         textvariable=app.var_transfer_sleep_ms,
-        height=30,
-        corner_radius=8,
+        height=32,
+        corner_radius=4,
         fg_color=COLOR_PANEL_ALT,
         border_color=COLOR_BORDER,
         text_color=COLOR_TEXT,
@@ -241,8 +292,8 @@ def setup_devices_ui(app, ui: dict):
     app.ent_note = ctk.CTkEntry(
         note_body,
         textvariable=app.var_device_note,
-        height=32,
-        corner_radius=8,
+        height=34,
+        corner_radius=4,
         fg_color=COLOR_PANEL_ALT,
         border_color=COLOR_BORDER,
         text_color=COLOR_TEXT,
@@ -299,9 +350,8 @@ def setup_devices_ui(app, ui: dict):
         save_row,
         text=app.tr("save"),
         command=app.save_device_settings,
-        height=34,
         fg_color=COLOR_ACCENT,
-        text_color="#0B0F12",
+        text_color="#04110A",
         hover_color=COLOR_ACCENT_HOVER,
         border_color=COLOR_ACCENT,
     )
@@ -312,7 +362,6 @@ def setup_devices_ui(app, ui: dict):
         save_row,
         text=app.tr("reset"),
         command=app.reset_device_settings,
-        height=34,
     )
     app.btn_reset_device_settings.grid(row=0, column=1, sticky="ew", padx=(6, 0))
     app.btn_reset_device_settings.configure(state="disabled")

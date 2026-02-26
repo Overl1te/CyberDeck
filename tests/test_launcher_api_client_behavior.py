@@ -53,6 +53,30 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
             verify=True,
         )
 
+    def test_set_input_lock_posts_payload(self):
+        """Validate scenario: input lock client call should post lock payload."""
+        c = LauncherApiClient("http://127.0.0.1:8080/api/local")
+        with patch("cyberdeck.launcher.api_client.requests.post") as mpost:
+            c.set_input_lock(True, reason="test", actor="launcher", timeout=2.0)
+        mpost.assert_called_once_with(
+            "http://127.0.0.1:8080/api/local/input_lock",
+            json={"locked": True, "reason": "test", "actor": "launcher"},
+            timeout=2.0,
+            verify=True,
+        )
+
+    def test_panic_mode_posts_payload(self):
+        """Validate scenario: panic mode client call should post revoke/lock payload."""
+        c = LauncherApiClient("http://127.0.0.1:8080/api/local")
+        with patch("cyberdeck.launcher.api_client.requests.post") as mpost:
+            c.panic_mode(keep_token="tok", lock_input=True, reason="panic", timeout=4.0)
+        mpost.assert_called_once_with(
+            "http://127.0.0.1:8080/api/local/panic_mode",
+            json={"keep_token": "tok", "lock_input": True, "reason": "panic"},
+            timeout=4.0,
+            verify=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

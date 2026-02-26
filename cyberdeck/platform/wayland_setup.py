@@ -30,10 +30,24 @@ def is_linux_wayland_session() -> bool:
     return bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _is_gnome_desktop() -> bool:
+    """Return whether runtime desktop session looks like GNOME."""
+    merged = " ".join(
+        (
+            str(os.environ.get("XDG_CURRENT_DESKTOP") or ""),
+            str(os.environ.get("DESKTOP_SESSION") or ""),
+            str(os.environ.get("GDMSESSION") or ""),
+        )
+    ).strip().lower()
+    return "gnome" in merged
+
+
 def _linux_pkg_manager() -> str:
     """Detect the Linux package manager available on this host."""
     if os.name == "nt" or not sys.platform.startswith("linux"):
         return "none"
+    if shutil.which("dnf"):
+        return "dnf"
     if shutil.which("apt-get"):
         return "apt"
     if shutil.which("pacman"):
@@ -44,11 +58,13 @@ def _linux_pkg_manager() -> str:
 def _wayland_setup_script_names() -> List[str]:
     """Return candidate Wayland setup script filenames."""
     manager = _linux_pkg_manager()
+    if manager == "dnf":
+        return ["setup_fedora_wayland.sh", "setup_ubuntu_wayland.sh", "setup_arch_wayland.sh"]
     if manager == "apt":
-        return ["setup_ubuntu_wayland.sh", "setup_arch_wayland.sh"]
+        return ["setup_ubuntu_wayland.sh", "setup_fedora_wayland.sh", "setup_arch_wayland.sh"]
     if manager == "pacman":
-        return ["setup_arch_wayland.sh", "setup_ubuntu_wayland.sh"]
-    return ["setup_ubuntu_wayland.sh", "setup_arch_wayland.sh"]
+        return ["setup_arch_wayland.sh", "setup_fedora_wayland.sh", "setup_ubuntu_wayland.sh"]
+    return ["setup_ubuntu_wayland.sh", "setup_fedora_wayland.sh", "setup_arch_wayland.sh"]
 
 
 def find_wayland_setup_script(base_dir: str) -> str:
@@ -156,21 +172,20 @@ def _recommended_backend_order() -> str:
     ffmpeg_x11_ok = ffmpeg_present and _ffmpeg_supports_x11grab() and _wayland_allow_x11_fallback()
     gst_ok = _gst_supports_pipewire()
     screenshot_ok = _wayland_screenshot_available()
+    if _is_gnome_desktop() and gst_ok:
+        # GNOME + xdg-desktop-portal is usually more stable through pipewiresrc.
+        return "gstreamer,ffmpeg,screenshot,native"
     if ffmpeg_pipewire_ok:
         return "ffmpeg,gstreamer,screenshot,native"
     if ffmpeg_x11_ok:
-        # On many Wayland sessions x11grab can produce unusable frames; keep it as a fallback.
-        if screenshot_ok and gst_ok:
-            return "screenshot,gstreamer,ffmpeg,native"
-        if screenshot_ok:
-            return "screenshot,ffmpeg,gstreamer,native"
+        # Prefer realtime backends first; screenshot remains a fallback.
         if gst_ok:
-            return "gstreamer,screenshot,ffmpeg,native"
+            return "gstreamer,ffmpeg,screenshot,native"
+        if screenshot_ok:
+            return "ffmpeg,screenshot,gstreamer,native"
         return "ffmpeg,screenshot,gstreamer,native"
     if gst_ok:
-        if screenshot_ok:
-            return "screenshot,gstreamer,ffmpeg,native"
-        return "gstreamer,screenshot,ffmpeg,native"
+        return "gstreamer,ffmpeg,screenshot,native"
     if screenshot_ok:
         return "screenshot,ffmpeg,gstreamer,native"
     return ""
@@ -192,6 +207,13 @@ def _apply_runtime_wayland_policy(log: Optional[Callable[[str], None]] = None) -
         if order:
             os.environ["CYBERDECK_MJPEG_BACKEND_ORDER"] = order
             applied.append(f"CYBERDECK_MJPEG_BACKEND_ORDER={order}")
+    else:
+        existing_order = str(os.environ.get("CYBERDECK_MJPEG_BACKEND_ORDER") or "").strip()
+        normalized = existing_order.replace(" ", "").lower()
+        if _is_gnome_desktop() and _gst_supports_pipewire() and normalized.startswith("ffmpeg,"):
+            tuned = "gstreamer,ffmpeg,screenshot,native"
+            os.environ["CYBERDECK_MJPEG_BACKEND_ORDER"] = tuned
+            applied.append(f"CYBERDECK_MJPEG_BACKEND_ORDER={tuned}")
 
     if "CYBERDECK_CURSOR_STREAM" not in os.environ:
         os.environ["CYBERDECK_CURSOR_STREAM"] = "0"

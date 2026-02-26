@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import urllib.parse
 
 
 if "pystray" not in sys.modules:
@@ -88,6 +89,84 @@ class _SplitWidget:
 
 
 class LauncherUiLogicTests(unittest.TestCase):
+    def test_build_app_qr_deep_link_prefers_custom_scheme(self):
+        """Validate scenario: app-mode QR payload should use cyberdeck:// deep link."""
+        payload = {
+            "type": "cyberdeck_qr_v1",
+            "server_id": "srv-01",
+            "hostname": "pc",
+            "version": "1.0.0",
+            "ip": "192.168.1.10",
+            "port": 8080,
+            "pairing_code": "1234",
+            "scheme": "http",
+            "ts": 123456,
+            "nonce": "nonce-01",
+            "qr_token": "qr-01",
+            "pairing_expires_at": 987654.0,
+        }
+
+        out = launcher.App._build_app_qr_deep_link(payload)
+        parsed = urllib.parse.urlsplit(out)
+        query = urllib.parse.parse_qs(parsed.query)
+
+        self.assertEqual(parsed.scheme, "cyberdeck")
+        self.assertEqual(parsed.netloc, "pair")
+        self.assertEqual(query.get("ip", [""])[0], "192.168.1.10")
+        self.assertEqual(query.get("port", [""])[0], "8080")
+        self.assertEqual(query.get("code", [""])[0], "1234")
+        self.assertEqual(query.get("qr_token", [""])[0], "qr-01")
+        self.assertEqual(query.get("exp", [""])[0], "987654")
+        self.assertNotIn("open", query)
+
+    def test_build_android_intent_qr_link_includes_browser_fallback(self):
+        """Validate scenario: android intent QR should include fallback URL with open=app."""
+        deep_link = "cyberdeck://pair?ip=10.0.0.2&port=8080&code=1122&qr_token=qr-1"
+        fallback = "http://10.0.0.2:8080/?ip=10.0.0.2&port=8080&code=1122"
+
+        out = launcher.App._build_android_intent_qr_link(deep_link, fallback_url=fallback)
+        self.assertTrue(out.startswith("intent://pair?"))
+        self.assertIn("#Intent;scheme=cyberdeck;action=android.intent.action.VIEW;", out)
+
+        encoded_fallback = out.split("S.browser_fallback_url=", 1)[1].split(";end", 1)[0]
+        decoded_fallback = urllib.parse.unquote(encoded_fallback)
+        parsed = urllib.parse.urlsplit(decoded_fallback)
+        query = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(parsed.scheme, "http")
+        self.assertEqual(parsed.netloc, "10.0.0.2:8080")
+        self.assertEqual(query.get("open", [""])[0], "app")
+
+    def test_build_app_fallback_url_is_compact_and_contains_required_fields(self):
+        """Validate scenario: fallback URL should remain compact and preserve pairing essentials."""
+        payload = {
+            "type": "cyberdeck_qr_v1",
+            "ip": "192.168.0.201",
+            "port": 8080,
+            "pairing_code": "1775",
+            "scheme": "http",
+            "qr_token": "fbca942d3cfc4f67b2127fc2ef8f138a",
+            "pairing_expires_at": 1772135660.0,
+        }
+        out = launcher.App._build_app_fallback_url(payload, base_url="http://192.168.0.201:8080/")
+        parsed = urllib.parse.urlsplit(out)
+        query = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(parsed.scheme, "http")
+        self.assertEqual(parsed.netloc, "192.168.0.201:8080")
+        self.assertEqual(query.get("ip", [""])[0], "192.168.0.201")
+        self.assertEqual(query.get("port", [""])[0], "8080")
+        self.assertEqual(query.get("code", [""])[0], "1775")
+        self.assertEqual(query.get("scheme", [""])[0], "http")
+        self.assertEqual(query.get("qr_token", [""])[0], "fbca942d3cfc4f67b2127fc2ef8f138a")
+        self.assertEqual(query.get("open", [""])[0], "app")
+        self.assertEqual(query.get("exp", [""])[0], "1772135660")
+
+    def test_qr_render_size_scales_for_long_payloads(self):
+        """Validate scenario: larger payloads should request larger QR bitmap size."""
+        self.assertEqual(launcher.App._qr_render_size_for_payload("x" * 120), 240)
+        self.assertEqual(launcher.App._qr_render_size_for_payload("x" * 200), 280)
+        self.assertEqual(launcher.App._qr_render_size_for_payload("x" * 300), 320)
+        self.assertEqual(launcher.App._qr_render_size_for_payload("x" * 420), 360)
+
     def test_set_device_settings_dirty_controls_buttons_and_status(self):
         """Validate scenario: test set device settings dirty controls buttons and status."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

@@ -67,6 +67,14 @@ class PermissionsEnforcementTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403, r.text)
         self.assertIn("permission_denied:perm_stream", r.text)
 
+    def test_audio_stream_denied_without_perm_stream(self):
+        """Validate scenario: audio stream endpoint should respect perm_stream guard."""
+        token = "tok-audio-deny"
+        self._add_session(token, {"perm_stream": False})
+        r = self.client.get("/audio_stream", headers=self._headers(token))
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertIn("permission_denied:perm_stream", r.text)
+
     def test_system_shutdown_denied_without_perm_power(self):
         """Validate scenario: test system shutdown denied without perm power."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

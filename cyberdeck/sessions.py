@@ -27,6 +27,9 @@ class DeviceSession:
     created_ts: float = field(default_factory=lambda: time.time())
     last_seen_ts: float = field(default_factory=lambda: time.time())
     last_ws_seen_ts: float = field(default_factory=lambda: 0.0)
+    approved: bool = True
+    approved_ts: float = field(default_factory=lambda: time.time())
+    pending_since_ts: float = field(default_factory=lambda: 0.0)
 
 
 class DeviceManager:
@@ -106,6 +109,9 @@ class DeviceManager:
                 "created_ts": float(getattr(s, "created_ts", 0.0) or 0.0),
                 "last_seen_ts": float(getattr(s, "last_seen_ts", 0.0) or 0.0),
                 "last_ws_seen_ts": float(getattr(s, "last_ws_seen_ts", 0.0) or 0.0),
+                "approved": bool(getattr(s, "approved", True)),
+                "approved_ts": float(getattr(s, "approved_ts", 0.0) or 0.0),
+                "pending_since_ts": float(getattr(s, "pending_since_ts", 0.0) or 0.0),
             }
             for t, s in self.sessions.items()
         }
@@ -141,7 +147,7 @@ class DeviceManager:
             return True
         return False
 
-    def authorize(self, device_id: str, name: str, ip: str) -> str:
+    def authorize(self, device_id: str, name: str, ip: str, *, approved: bool = True) -> str:
         """Authorize the target operation."""
         with self._lock:
             self._prune_expired_locked()
@@ -149,12 +155,26 @@ class DeviceManager:
                 if s.device_id == device_id:
                     s.ip = ip
                     s.device_name = name
+                    if bool(approved):
+                        s.approved = True
+                        s.approved_ts = time.time()
+                        s.pending_since_ts = 0.0
+                    elif not bool(getattr(s, "approved", False)):
+                        s.pending_since_ts = float(getattr(s, "pending_since_ts", 0.0) or time.time())
                     self._touch(s)
                     self._save_sessions_locked()
                     return t
 
             self._enforce_max_sessions_locked()
-            s = DeviceSession(device_id=device_id, device_name=name, ip=ip)
+            now = time.time()
+            s = DeviceSession(
+                device_id=device_id,
+                device_name=name,
+                ip=ip,
+                approved=bool(approved),
+                approved_ts=now if bool(approved) else 0.0,
+                pending_since_ts=0.0 if bool(approved) else now,
+            )
             self.sessions[s.token] = s
             self._save_sessions_locked()
             return s.token
@@ -186,6 +206,9 @@ class DeviceManager:
                             created_ts=float(i.get("created_ts") or time.time()),
                             last_seen_ts=float(i.get("last_seen_ts") or time.time()),
                             last_ws_seen_ts=float(i.get("last_ws_seen_ts") or i.get("last_seen_ts") or 0.0),
+                            approved=bool(i.get("approved", True)),
+                            approved_ts=float(i.get("approved_ts") or 0.0),
+                            pending_since_ts=float(i.get("pending_since_ts") or 0.0),
                         )
             with self._lock:
                 self.sessions = loaded
@@ -207,7 +230,7 @@ class DeviceManager:
         except Exception:
             log.exception("Failed to load sessions")
 
-    def get_session(self, token: str) -> Optional[DeviceSession]:
+    def get_session(self, token: str, *, include_pending: bool = False) -> Optional[DeviceSession]:
         """Retrieve data required to get session."""
         # Read-path helpers should avoid mutating shared state where possible.
         with self._lock:
@@ -220,6 +243,8 @@ class DeviceManager:
                     self._save_sessions_locked()
                 except Exception:
                     pass
+                return None
+            if (not include_pending) and (not bool(getattr(s, "approved", True))):
                 return None
             self._touch(s)
             return s
@@ -277,6 +302,70 @@ class DeviceManager:
             self._save_sessions_locked()
             return True
 
+    def set_approved(self, token: str, approved: bool) -> bool:
+        """Set session approval state."""
+        with self._lock:
+            s = self.sessions.get(token)
+            if not s:
+                return False
+            now = time.time()
+            if bool(approved):
+                s.approved = True
+                s.approved_ts = now
+                s.pending_since_ts = 0.0
+            else:
+                s.approved = False
+                s.approved_ts = 0.0
+                s.pending_since_ts = float(getattr(s, "pending_since_ts", 0.0) or now)
+                s.websocket = None
+            self._touch(s)
+            self._save_sessions_locked()
+            return True
+
+    def list_tokens(self, *, include_pending: bool = True) -> list[str]:
+        """List session tokens."""
+        with self._lock:
+            out: list[str] = []
+            for t, s in self.sessions.items():
+                if (not include_pending) and (not bool(getattr(s, "approved", True))):
+                    continue
+                out.append(str(t))
+            return out
+
+    def find_token_by_device_id(self, device_id: str, *, include_pending: bool = True) -> Optional[str]:
+        """Find session token by device_id."""
+        lookup = str(device_id or "").strip()
+        if not lookup:
+            return None
+        with self._lock:
+            for t, s in self.sessions.items():
+                if str(getattr(s, "device_id", "") or "") != lookup:
+                    continue
+                if (not include_pending) and (not bool(getattr(s, "approved", True))):
+                    continue
+                return str(t)
+        return None
+
+    def get_pending_devices(self):
+        """Return pending approval sessions."""
+        with self._lock:
+            out = []
+            for t, s in self.sessions.items():
+                if bool(getattr(s, "approved", True)):
+                    continue
+                out.append(
+                    {
+                        "name": s.device_name,
+                        "ip": s.ip,
+                        "token": t,
+                        "device_id": str(getattr(s, "device_id", "") or ""),
+                        "pending_since_ts": float(getattr(s, "pending_since_ts", 0.0) or 0.0),
+                        "created_ts": float(getattr(s, "created_ts", 0.0) or 0.0),
+                    }
+                )
+            out.sort(key=lambda x: float(x.get("pending_since_ts") or 0.0), reverse=True)
+            return out
+
     def get_all_devices(self):
         """Retrieve data required to get all devices."""
         # Read-path helpers should avoid mutating shared state where possible.
@@ -298,8 +387,12 @@ class DeviceManager:
                         "name": s.device_name,
                         "ip": s.ip,
                         "token": t,
+                        "device_id": str(getattr(s, "device_id", "") or ""),
                         "online": bool(online),
+                        "approved": bool(getattr(s, "approved", True)),
                         "settings": s.settings,
+                        "pending_since_ts": float(getattr(s, "pending_since_ts", 0.0) or 0.0),
+                        "approved_ts": float(getattr(s, "approved_ts", 0.0) or 0.0),
                         "created_ts": float(getattr(s, "created_ts", 0.0) or 0.0),
                         "last_seen_ts": float(getattr(s, "last_seen_ts", 0.0) or 0.0),
                     }

@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import ctypes
 import math
 import os
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from .. import config
 from ..auth import get_perm
-from ..context import device_manager
+from ..context import device_manager, input_guard, local_events
 from ..input import INPUT_BACKEND
 from ..logging_config import log
 from ..protocol import protocol_payload
@@ -28,6 +29,8 @@ _virtual_cursor_lock = threading.Lock()
 _virtual_cursor = {}
 _ws_runtime_lock = threading.Lock()
 _ws_runtime = {}
+_ws_event_ids_lock = threading.Lock()
+_ws_event_ids = {}
 _IS_WINDOWS = os.name == "nt"
 _IS_WAYLAND = (os.environ.get("XDG_SESSION_TYPE") or "").strip().lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
@@ -245,6 +248,25 @@ def _ws_diag_close(token: str) -> None:
         s["disconnect_count"] = int(s.get("disconnect_count", 0)) + 1
 
 
+def _track_event_id(token: str, event_id: str) -> bool:
+    """Track event id for idempotency; return True when id is new."""
+    eid = str(event_id or "").strip()
+    if not eid:
+        return True
+    key = str(token or "")
+    if not key:
+        return True
+    with _ws_event_ids_lock:
+        bucket = _ws_event_ids.get(key)
+        if bucket is None:
+            bucket = deque(maxlen=256)
+            _ws_event_ids[key] = bucket
+        if eid in bucket:
+            return False
+        bucket.append(eid)
+        return True
+
+
 def ws_runtime_diag(token: Optional[str] = None):
     """Return websocket diagnostics for one token or all active sessions."""
     with _ws_runtime_lock:
@@ -440,6 +462,22 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
         return
     await websocket.accept()
     device_manager.register_socket(token, websocket)
+    try:
+        s_evt = device_manager.get_session(token, include_pending=True)
+        if s_evt is not None:
+            local_events.emit(
+                "device_connected",
+                title="CyberDeck",
+                message=f"Device connected: {getattr(s_evt, 'device_name', 'Unknown')}",
+                payload={
+                    "token": token,
+                    "device_id": getattr(s_evt, "device_id", ""),
+                    "name": getattr(s_evt, "device_name", ""),
+                    "ip": getattr(s_evt, "ip", ""),
+                },
+            )
+    except Exception:
+        pass
     _ws_diag_init(token)
     if _ws_log_enabled():
         cli_ip = getattr(getattr(websocket, "client", None), "host", None)
@@ -451,6 +489,7 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
     hb_timeout_s = max(hb_interval_s * 2, int(getattr(config, "WS_HEARTBEAT_TIMEOUT_S", 45) or 45))
     proto_push_enabled = _env_bool("CYBERDECK_WS_PROTO_PUSH", False)
     heartbeat_required = False
+    input_lock_warned = False
     last_rx_monotonic = time.monotonic()
 
     async def _heartbeat_loop():
@@ -509,6 +548,19 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             last_rx_monotonic = time.monotonic()
             t = (data.get("type") or "").lower()
             _ws_diag_mark_rx(token, t)
+            event_id = str(data.get("event_id") or data.get("id") or "").strip()
+            if event_id and t not in ("hello", "ping", "pong"):
+                is_new = _track_event_id(token, event_id)
+                try:
+                    await _send_json(
+                        websocket,
+                        token,
+                        {"type": "ack", "event_id": event_id, "accepted": bool(is_new), "ts": int(time.time() * 1000)},
+                    )
+                except Exception:
+                    pass
+                if not is_new:
+                    continue
 
             if t == "hello":
                 caps = data.get("capabilities") or {}
@@ -563,6 +615,15 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 continue
 
             if t == "pong":
+                continue
+
+            if input_guard.is_locked():
+                if not input_lock_warned:
+                    input_lock_warned = True
+                    try:
+                        await _send_json(websocket, token, {"type": "warning", "code": "remote_input_locked"})
+                    except Exception:
+                        pass
                 continue
 
             if t == "move":
@@ -905,6 +966,11 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             pass
         try:
             _windows_warned_input_block.discard(str(token or ""))
+        except Exception:
+            pass
+        try:
+            with _ws_event_ids_lock:
+                _ws_event_ids.pop(str(token or ""), None)
         except Exception:
             pass
         if _ws_log_enabled():

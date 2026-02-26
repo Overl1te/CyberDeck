@@ -14,12 +14,13 @@ import uvicorn
 import queue
 import urllib.parse
 from typing import Any
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from tkinter import filedialog, messagebox
 from collections import deque
 import qrcode
 from cyberdeck import config as server_config
 from cyberdeck.platform.wayland_setup import (
+    check_wayland_requirements,
     ensure_wayland_ready,
     find_wayland_setup_script,
     format_wayland_issues,
@@ -62,28 +63,35 @@ SYNC_INTERVAL_MS = 1000
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-COLOR_BG = "#0B0F12"
-COLOR_PANEL = "#151A1F"
-COLOR_PANEL_ALT = "#0F1418"
-COLOR_BORDER = "#242B33"
-COLOR_ACCENT = "#31E6A1"
-COLOR_ACCENT_HOVER = "#56F0BB"
-COLOR_WARN = "#FFC857"
+COLOR_BG = "#050805"
+COLOR_PANEL = "#0A120D"
+COLOR_PANEL_ALT = "#0D1711"
+COLOR_BORDER = "#1D3A29"
+COLOR_ACCENT = "#3CFF91"
+COLOR_ACCENT_HOVER = "#69FFAD"
+COLOR_WARN = "#FFC24B"
 COLOR_FAIL = "#FF6B6B"
-COLOR_TEXT = "#E6EEF3"
-COLOR_TEXT_DIM = "#8A949E"
+COLOR_TEXT = "#D9FFE8"
+COLOR_TEXT_DIM = "#77A889"
 
-FONT_UI = ("Tahoma", 13)
-FONT_UI_BOLD = ("Tahoma", 13, "bold")
-FONT_HEADER = ("Tahoma", 22, "bold")
-FONT_SMALL = ("Tahoma", 11)
+FONT_UI = ("Consolas", 12)
+FONT_UI_BOLD = ("Consolas", 12, "bold")
+FONT_HEADER = ("Consolas", 22, "bold")
+FONT_SMALL = ("Consolas", 10)
 FONT_MONO = ("Consolas", 12)
 FONT_CODE = ("Consolas", 44, "bold")
-QR_IMAGE_SIZE = 248
+QR_IMAGE_SIZE = 240
 PORT_PICK_SPAN = 40
 
 DEFAULT_DEVICE_PRESETS = ["fast", "balanced", "safe", "ultra_safe"]
-BOOT_OVERLAY_DISMISS_AFTER_S = 12.0
+BOOT_OVERLAY_DISMISS_AFTER_S = 8.0
+BOOT_OVERLAY_MIN_VISIBLE_S = 7.0
+BOOT_PROGRESS_TICK_MS = 120
+BOOT_PROGRESS_TARGET_STEP = 0.006
+BOOT_PROGRESS_EXP_RATE = 0.42
+BOOT_PROGRESS_EXP_MIN_STEP = 0.002
+BOOT_PROGRESS_EXP_MAX_STEP = 0.08
+BOOT_SPINNER_STEP_S = 0.34
 BOOT_MEDIA_GIF_REL = os.path.join("static", "launcher_boot.gif")
 BOOT_MEDIA_IMG_REL = os.path.join("static", "launcher_boot.png")
 BOOT_MEDIA_GIF_FALLBACK_REL = "logo.gif"
@@ -212,14 +220,30 @@ def ensure_console() -> None:
     if not is_windows():
         return
     try:
-        ctypes.windll.kernel32.AllocConsole()
+        # Respect shell redirection: do not replace stdout/stderr with CONOUT$.
+        if (sys.stdout is not None) and hasattr(sys.stdout, "isatty") and (not bool(sys.stdout.isatty())):
+            return
+        if (sys.stderr is not None) and hasattr(sys.stderr, "isatty") and (not bool(sys.stderr.isatty())):
+            return
+    except Exception:
+        pass
+    try:
+        has_console = False
+        try:
+            has_console = bool(ctypes.windll.kernel32.GetConsoleWindow())
+        except Exception:
+            has_console = False
+        if not has_console:
+            ctypes.windll.kernel32.AllocConsole()
         try:
             ctypes.windll.kernel32.SetConsoleOutputCP(65001)
             ctypes.windll.kernel32.SetConsoleCP(65001)
         except Exception:
             pass
-        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
-        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
+        if sys.stdout is None:
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
+        if sys.stderr is None:
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
     except Exception:
         pass
 
@@ -330,8 +354,9 @@ class CyberBtn(ctk.CTkButton):
             border_color=COLOR_BORDER,
             fg_color=COLOR_PANEL_ALT,
             text_color=COLOR_TEXT,
-            hover_color=COLOR_BORDER,
+            hover_color="#163020",
             font=FONT_UI_BOLD,
+            height=34,
         )
         defaults.update(kwargs)
         super().__init__(master, **defaults)

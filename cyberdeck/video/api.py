@@ -8,6 +8,7 @@ from .streamer import video_streamer
 from .mjpeg import *
 from .ffmpeg import *
 from .wayland import *
+from .stream_adaptation import feedback_store
 
 router = APIRouter()
 
@@ -126,6 +127,17 @@ def stream_stats(token: str = TokenDep) -> Any:
         out["input_can_pointer"] = bool(getattr(INPUT_BACKEND, "can_pointer", False))
         out["input_can_keyboard"] = bool(getattr(INPUT_BACKEND, "can_keyboard", False))
         out["wayland_session"] = bool(_is_wayland_session())
+        out["feedback"] = feedback_store.recommend(token)
+        audio_inputs = _ffmpeg_audio_input_arg_sets()
+        snd_ok, snd_name = _soundcard_loopback_probe()
+        out["audio"] = {
+            "ffmpeg_inputs": audio_inputs,
+            "ffmpeg_input_count": len(audio_inputs),
+            "soundcard_loopback": bool(snd_ok),
+            "soundcard_speaker": snd_name,
+            "soundcard_speakers": _soundcard_speaker_names()[:16],
+            "windows_force_soundcard": bool(_env_bool("CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD", True)),
+        }
     except Exception:
         pass
     try:
@@ -336,6 +348,13 @@ def stream_offer(
         "fallback_policy": "ordered_candidates",
         "reconnect_hint_ms": int(_facade_attr("_STREAM_RECONNECT_HINT_MS", _STREAM_RECONNECT_HINT_MS)),
         "adaptive_hint": {
+            "min_quality": int(
+                _facade_attr(
+                    "_MIN_MJPEG_Q_LOWLAT" if eff_low else "_MIN_MJPEG_Q",
+                    _MIN_MJPEG_Q_LOWLAT if eff_low else _MIN_MJPEG_Q,
+                )
+            ),
+            "max_quality": int(eff_q),
             "rtt_high_ms": int(_facade_attr("_ADAPTIVE_RTT_HIGH_MS", _ADAPTIVE_RTT_HIGH_MS)),
             "rtt_critical_ms": int(_facade_attr("_ADAPTIVE_RTT_CRIT_MS", _ADAPTIVE_RTT_CRIT_MS)),
             "fps_drop_threshold": float(_facade_attr("_ADAPTIVE_FPS_DROP_THRESHOLD", _ADAPTIVE_FPS_DROP_THRESHOLD)),
@@ -503,6 +522,39 @@ def video_h265(
         detail = diag.get("ffmpeg_last_error") or "ffmpeg_unavailable_or_unsupported"
         raise HTTPException(502, detail)
     return stream
+
+
+@router.api_route("/audio_stream", methods=["GET", "HEAD"])
+def audio_stream(token: str = TokenDep) -> Any:
+    """Serve low-latency audio relay stream captured from the host audio backend."""
+    require_perm(token, "perm_stream")
+    stream = _ffmpeg_audio_stream()
+    if stream is None:
+        from fastapi import HTTPException
+
+        diag = _get_ffmpeg_diag()
+        detail = diag.get("ffmpeg_last_error") or "audio_capture_unavailable"
+        raise HTTPException(503, detail)
+    return stream
+
+
+@router.post("/api/stream_feedback")
+def stream_feedback(
+    token: str = TokenDep,
+    rtt_ms: float = 0.0,
+    jitter_ms: float = 0.0,
+    drop_ratio: float = 0.0,
+    decode_fps: float = 0.0,
+) -> Any:
+    """Accept stream telemetry feedback and return quality tuning hint."""
+    require_perm(token, "perm_stream")
+    return feedback_store.update(
+        token,
+        rtt_ms=float(rtt_ms),
+        jitter_ms=float(jitter_ms),
+        drop_ratio=float(drop_ratio),
+        decode_fps=float(decode_fps),
+    )
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

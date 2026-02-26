@@ -18,6 +18,7 @@ class ApiBehaviorTests(unittest.TestCase):
     def setUpClass(cls):
         """Prepare shared fixtures for the test class."""
         cls._old_allow_query_token = config.ALLOW_QUERY_TOKEN
+        cls._old_pairing_single_use = config.PAIRING_SINGLE_USE
         cls._old_session_file = config.SESSION_FILE
         cls._old_sessions = dict(context.device_manager.sessions)
         cls._tmp = tempfile.TemporaryDirectory()
@@ -25,6 +26,7 @@ class ApiBehaviorTests(unittest.TestCase):
         context.device_manager.sessions = {}
         config.PAIRING_CODE = "1234"
         config.ALLOW_QUERY_TOKEN = False
+        config.PAIRING_SINGLE_USE = False
         app = FastAPI()
         app.include_router(core_router)
         app.include_router(video_router)
@@ -34,6 +36,7 @@ class ApiBehaviorTests(unittest.TestCase):
     def tearDownClass(cls):
         """Clean up shared fixtures for the test class."""
         config.ALLOW_QUERY_TOKEN = cls._old_allow_query_token
+        config.PAIRING_SINGLE_USE = cls._old_pairing_single_use
         context.device_manager.sessions = cls._old_sessions
         config.SESSION_FILE = cls._old_session_file
         cls._tmp.cleanup()
@@ -53,6 +56,10 @@ class ApiBehaviorTests(unittest.TestCase):
         out = {"Authorization": f"Bearer {token}"}
         out.update(extra)
         return out
+
+    def setUp(self):
+        """Prepare test preconditions for each test case."""
+        context.input_guard.set_locked(False, reason="test_reset", actor="tests")
 
     def test_upload_checksum_validation(self):
         """Validate scenario: test upload checksum validation."""
@@ -92,6 +99,8 @@ class ApiBehaviorTests(unittest.TestCase):
         self.assertIsInstance(hint, dict)
         self.assertIn("decrease_step", hint)
         self.assertIn("increase_step", hint)
+        self.assertIn("min_quality", hint)
+        self.assertIn("max_quality", hint)
 
     def test_query_token_is_rejected_by_default(self):
         """Validate scenario: test query token is rejected by default."""
@@ -143,6 +152,67 @@ class ApiBehaviorTests(unittest.TestCase):
         self.assertIn("Invalid Code", r.text)
         mfail.assert_called_once()
 
+    def test_handshake_rotates_pairing_code_when_single_use_is_enabled(self):
+        """Validate scenario: single-use pairing mode rotates code after successful handshake."""
+        old_single_use = config.PAIRING_SINGLE_USE
+        old_code = config.PAIRING_CODE
+        try:
+            config.PAIRING_SINGLE_USE = True
+            config.PAIRING_CODE = "1234"
+            with patch("cyberdeck.api.core.rotate_pairing_code", return_value="9999") as mrotate, patch(
+                "cyberdeck.api.core.pin_limiter.reset"
+            ) as mreset:
+                r = self.client.post(
+                    "/api/handshake",
+                    json={"code": "1234", "device_id": "single-use-1", "device_name": "Single Use"},
+                )
+        finally:
+            config.PAIRING_SINGLE_USE = old_single_use
+            config.PAIRING_CODE = old_code
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body.get("pairing_rotated"))
+        mrotate.assert_called_once()
+        mreset.assert_called_once()
+
+    def test_pairing_status_reports_pending_then_approved(self):
+        """Validate scenario: pairing status endpoint should reflect approval transitions for the same token."""
+        old_required = config.DEVICE_APPROVAL_REQUIRED
+        try:
+            config.DEVICE_APPROVAL_REQUIRED = True
+            r = self.client.post(
+                "/api/handshake",
+                json={"code": "1234", "device_id": "pending-status-1", "device_name": "Pending Status"},
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            body = r.json()
+            token = str(body.get("token") or "")
+            self.assertTrue(token)
+            self.assertFalse(bool(body.get("approved", True)))
+
+            p1 = self.client.get("/api/pairing_status", params={"token": token})
+            self.assertEqual(p1.status_code, 200, p1.text)
+            self.assertFalse(bool(p1.json().get("approved", True)))
+            self.assertTrue(bool(p1.json().get("approval_pending", False)))
+
+            self.assertTrue(context.device_manager.set_approved(token, True))
+            p2 = self.client.get("/api/pairing_status", params={"token": token})
+            self.assertEqual(p2.status_code, 200, p2.text)
+            self.assertTrue(bool(p2.json().get("approved", False)))
+            self.assertFalse(bool(p2.json().get("approval_pending", True)))
+        finally:
+            config.DEVICE_APPROVAL_REQUIRED = old_required
+
+    def test_pairing_status_rejects_missing_or_unknown_token(self):
+        """Validate scenario: pairing status endpoint should validate token presence and existence."""
+        missing = self.client.get("/api/pairing_status")
+        self.assertEqual(missing.status_code, 400, missing.text)
+        self.assertIn("token_required", missing.text)
+
+        unknown = self.client.get("/api/pairing_status", params={"token": "missing-token"})
+        self.assertEqual(unknown.status_code, 404, unknown.text)
+        self.assertIn("session_not_found", unknown.text)
+
     def test_stats_tolerates_psutil_errors(self):
         """Validate scenario: test stats tolerates psutil errors."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
@@ -170,6 +240,25 @@ class ApiBehaviorTests(unittest.TestCase):
         body = r.json()
         self.assertEqual(body.get("cpu"), 0.0)
         self.assertEqual(body.get("ram"), 0.0)
+
+    def test_audio_stream_returns_503_when_backend_is_unavailable(self):
+        """Validate scenario: audio relay endpoint should surface backend failure as 503."""
+        token = self._token()
+        with patch("cyberdeck.video.api._ffmpeg_audio_stream", return_value=None), patch(
+            "cyberdeck.video.api._get_ffmpeg_diag",
+            return_value={"ffmpeg_last_error": "audio_probe_failed"},
+        ):
+            r = self.client.get("/audio_stream", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertIn("audio_probe_failed", r.text)
+
+    def test_audio_stream_returns_backend_response_when_available(self):
+        """Validate scenario: audio relay endpoint should forward backend stream response."""
+        token = self._token()
+        with patch("cyberdeck.video.api._ffmpeg_audio_stream", return_value={"status": "ok"}):
+            r = self.client.get("/audio_stream", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json().get("status"), "ok")
 
 
 if __name__ == "__main__":

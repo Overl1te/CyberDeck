@@ -1,6 +1,7 @@
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def parse_width_ladder(raw: str, default: List[int]) -> List[int]:
@@ -98,3 +99,105 @@ class WidthStabilizer:
 
             self._state[key] = (snapped, t)
             return snapped
+
+
+@dataclass
+class FeedbackSnapshot:
+    ts: float
+    rtt_ms: float
+    jitter_ms: float
+    drop_ratio: float
+    decode_fps: float
+    network_profile: str
+
+
+class StreamFeedbackStore:
+    """Keep latest per-session network feedback and compute simple tuning hints."""
+
+    def __init__(self, *, stale_after_s: float = 20.0) -> None:
+        self._lock = threading.RLock()
+        self._state: Dict[str, FeedbackSnapshot] = {}
+        self._stale_after_s = max(2.0, float(stale_after_s))
+
+    def update(
+        self,
+        token: str,
+        *,
+        rtt_ms: Optional[float] = None,
+        jitter_ms: Optional[float] = None,
+        drop_ratio: Optional[float] = None,
+        decode_fps: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Update token feedback and return normalized recommendation payload."""
+        key = str(token or "").strip()
+        if not key:
+            return {"ok": False, "error": "token_required"}
+
+        now = time.time()
+        rtt = max(0.0, float(rtt_ms or 0.0))
+        jitter = max(0.0, float(jitter_ms or 0.0))
+        drop = max(0.0, min(1.0, float(drop_ratio or 0.0)))
+        fps = max(0.0, float(decode_fps or 0.0))
+
+        profile = "good"
+        if (rtt >= 340.0) or (drop >= 0.08) or (fps > 0.0 and fps < 12.0):
+            profile = "critical"
+        elif (rtt >= 220.0) or (drop >= 0.03) or (fps > 0.0 and fps < 20.0):
+            profile = "degraded"
+
+        snap = FeedbackSnapshot(
+            ts=now,
+            rtt_ms=rtt,
+            jitter_ms=jitter,
+            drop_ratio=drop,
+            decode_fps=fps,
+            network_profile=profile,
+        )
+        with self._lock:
+            self._state[key] = snap
+        return {"ok": True, **self.recommend(key)}
+
+    def recommend(self, token: str) -> Dict[str, Any]:
+        """Return recommendation derived from latest feedback snapshot."""
+        item = self.get(token)
+        if not item:
+            return {"network_profile": "unknown", "suggested": {}}
+        profile = str(item.get("network_profile") or "unknown")
+        if profile == "critical":
+            return {
+                **item,
+                "suggested": {"fps_delta": -4, "max_w_delta": -128, "quality_delta": -8, "prefer_low_latency": True},
+            }
+        if profile == "degraded":
+            return {
+                **item,
+                "suggested": {"fps_delta": -2, "max_w_delta": -64, "quality_delta": -4, "prefer_low_latency": True},
+            }
+        return {
+            **item,
+            "suggested": {"fps_delta": 1, "max_w_delta": 64, "quality_delta": 2, "prefer_low_latency": False},
+        }
+
+    def get(self, token: str) -> Dict[str, Any]:
+        """Return latest non-stale feedback snapshot for token."""
+        key = str(token or "").strip()
+        if not key:
+            return {}
+        with self._lock:
+            snap = self._state.get(key)
+            if snap is None:
+                return {}
+            if (time.time() - float(snap.ts)) > self._stale_after_s:
+                self._state.pop(key, None)
+                return {}
+            return {
+                "ts": int(snap.ts),
+                "rtt_ms": float(snap.rtt_ms),
+                "jitter_ms": float(snap.jitter_ms),
+                "drop_ratio": float(snap.drop_ratio),
+                "decode_fps": float(snap.decode_fps),
+                "network_profile": str(snap.network_profile),
+            }
+
+
+feedback_store = StreamFeedbackStore()

@@ -1,4 +1,5 @@
-﻿from typing import Any, Dict, Optional
+﻿import time
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException, Query, Request
 
@@ -39,6 +40,21 @@ def get_perm(token: str, key: str) -> bool:
         return False
     try:
         settings: Dict[str, Any] = s.settings or {}
+        ttl_key = f"{key}_until_ts"
+        ttl_raw = settings.get(ttl_key)
+        if ttl_raw not in (None, ""):
+            try:
+                until_ts = float(ttl_raw)
+                ttl_active = time.time() <= until_ts
+            except Exception:
+                ttl_active = False
+            if ttl_active:
+                if key in settings:
+                    return _as_bool(settings.get(key))
+                return True
+            if key in settings:
+                return _as_bool(DEFAULT_PERMS.get(key, False))
+
         if key in settings:
             return _as_bool(settings.get(key))
         return _as_bool(DEFAULT_PERMS.get(key, False))
@@ -70,5 +86,3 @@ async def get_token(request: Request, token: Optional[str] = Query(None)) -> str
 
 
 TokenDep = Depends(get_token)
-
-

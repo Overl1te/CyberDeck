@@ -41,6 +41,7 @@ class ConfigBehaviorTests(unittest.TestCase):
             "TLS_ENABLED": config.TLS_ENABLED,
             "SCHEME": config.SCHEME,
             "PAIRING_TTL_S": config.PAIRING_TTL_S,
+            "PAIRING_SINGLE_USE": config.PAIRING_SINGLE_USE,
             "PAIRING_EXPIRES_AT": config.PAIRING_EXPIRES_AT,
             "QR_TOKEN_TTL_S": config.QR_TOKEN_TTL_S,
             "UPLOAD_MAX_BYTES": config.UPLOAD_MAX_BYTES,
@@ -90,6 +91,7 @@ class ConfigBehaviorTests(unittest.TestCase):
             "CYBERDECK_TLS_CERT": "/tmp/cert.pem",
             "CYBERDECK_TLS_KEY": "/tmp/key.pem",
             "CYBERDECK_PAIRING_TTL_S": "30",
+            "CYBERDECK_PAIRING_SINGLE_USE": "1",
             "CYBERDECK_QR_TOKEN_TTL_S": "90",
             "CYBERDECK_UPLOAD_MAX_BYTES": "1000",
             "CYBERDECK_UPLOAD_ALLOWED_EXT": ".txt,.zip",
@@ -124,6 +126,7 @@ class ConfigBehaviorTests(unittest.TestCase):
         self.assertTrue(config.TLS_ENABLED)
         self.assertEqual(config.SCHEME, "https")
         self.assertEqual(config.PAIRING_EXPIRES_AT, 130.0)
+        self.assertTrue(config.PAIRING_SINGLE_USE)
         self.assertEqual(config.QR_TOKEN_TTL_S, 90)
         self.assertEqual(config.UPLOAD_MAX_BYTES, 1000)
         self.assertEqual(config.UPLOAD_ALLOWED_EXT, [".txt", ".zip"])
@@ -247,6 +250,28 @@ class ConfigBehaviorTests(unittest.TestCase):
         self.assertTrue(mod.SESSION_FILE.endswith("cyberdeck_sessions.json"))
         # Restore globals from the reloaded module side-effects.
         importlib.reload(config)
+
+    def test_default_data_dir_uses_xdg_state_home_on_linux(self):
+        """Validate scenario: Linux default data dir should follow XDG_STATE_HOME when provided."""
+        with patch.object(config.os, "name", "posix"), patch.object(config.sys, "platform", "linux"), patch.dict(
+            os.environ, {"XDG_STATE_HOME": "/tmp/xdg-state"}, clear=False
+        ):
+            out = config._default_data_dir()
+        self.assertEqual(out, os.path.join("/tmp/xdg-state", "CyberDeck"))
+
+    def test_default_data_dir_uses_application_support_on_macos(self):
+        """Validate scenario: macOS default data dir should use Application Support."""
+        with patch.object(config.os, "name", "posix"), patch.object(config.sys, "platform", "darwin"), patch.dict(
+            os.environ, {}, clear=False
+        ):
+            out = config._default_data_dir()
+        self.assertTrue(out.endswith(os.path.join("Library", "Application Support", "CyberDeck")))
+
+    def test_default_log_file_uses_library_logs_on_macos(self):
+        """Validate scenario: macOS default log file should use Library/Logs."""
+        with patch.object(config.sys, "platform", "darwin"):
+            out = config._default_log_file("/tmp/cyberdeck-data")
+        self.assertTrue(out.endswith(os.path.join("Library", "Logs", "CyberDeck", "cyberdeck.log")))
 
 
 if __name__ == "__main__":

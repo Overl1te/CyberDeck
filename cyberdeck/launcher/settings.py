@@ -26,15 +26,18 @@ DEFAULT_SETTINGS = {
     "language": "ru",
     "devices_panel_visible": True,
     "devices_panel_width": 430,
+    "system_notifications": True,
 }
 
 DEFAULT_APP_CONFIG = {
     "allow_query_token": False,
+    "pairing_single_use": False,
+    "ignore_vpn": False,
     "upload_max_bytes": 0,
     "upload_allowed_ext": "",
     "verbose_http_log": True,
     "verbose_ws_log": True,
     "verbose_stream_log": True,
     "mdns_enabled": True,
+    "device_approval_required": True,
 }
-
