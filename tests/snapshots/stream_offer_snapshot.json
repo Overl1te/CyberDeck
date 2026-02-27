@@ -35,6 +35,8 @@
   "fallback_policy": "ordered_candidates",
   "reconnect_hint_ms": 700,
   "adaptive_hint": {
+    "min_quality": 45,
+    "max_quality": 55,
     "rtt_high_ms": 220,
     "rtt_critical_ms": 340,
     "fps_drop_threshold": 0.62,

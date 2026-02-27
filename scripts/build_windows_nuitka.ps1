@@ -8,6 +8,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RepoRoot
 $IconIco = Join-Path $RepoRoot "icon.ico"
 $RequirementsBuild = Join-Path $RepoRoot "requirements-build.txt"
+$LauncherI18nJson = Join-Path $RepoRoot "cyberdeck\launcher\i18n.json"
 
 function Stop-CyberDeckFromDist {
   param(
@@ -75,6 +76,30 @@ if (-not (Test-Path $IconIco)) {
 if (-not (Test-Path $RequirementsBuild)) {
   throw "requirements-build.txt not found: $RequirementsBuild"
 }
+if (-not (Test-Path $LauncherI18nJson)) {
+  throw "launcher i18n.json not found: $LauncherI18nJson"
+}
+
+$timelinePatterns = @(
+  "*timeline*.gif",
+  "*Timeline*.gif",
+  "*timeline*.webp",
+  "*Timeline*.webp",
+  "*timeline*.png",
+  "*Timeline*.png",
+  "*timeline*.jpg",
+  "*Timeline*.jpg",
+  "*timeline*.jpeg",
+  "*Timeline*.jpeg",
+  "*timeline*.bmp",
+  "*Timeline*.bmp"
+)
+$timelineMedia = @()
+foreach ($pattern in $timelinePatterns) {
+  $timelineMedia += Get-ChildItem -Path $RepoRoot -File -Filter $pattern -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName
+}
+$timelineMedia = @($timelineMedia | Sort-Object -Unique)
 
 $nuitkaArgs = @(
   "launcher.py"
@@ -85,6 +110,7 @@ $nuitkaArgs = @(
   "--include-data-file=icon.ico=icon.ico"
   "--include-data-file=logo.gif=logo.gif"
   "--include-data-file=icon-qr-code.png=icon-qr-code.png"
+  "--include-data-file=cyberdeck/launcher/i18n.json=cyberdeck/launcher/i18n.json"
   "--windows-icon-from-ico=$IconIco"
   "--include-package=customtkinter"
   "--include-package-data=customtkinter"
@@ -93,6 +119,10 @@ $nuitkaArgs = @(
   "--output-dir=dist"
   "--output-filename=CyberDeck.exe"
 )
+foreach ($mediaPath in $timelineMedia) {
+  $mediaName = [System.IO.Path]::GetFileName($mediaPath)
+  $nuitkaArgs += "--include-data-file=$mediaPath=$mediaName"
+}
 
 if ($DryRun) {
   Write-Host "Dry run. Nuitka command:"

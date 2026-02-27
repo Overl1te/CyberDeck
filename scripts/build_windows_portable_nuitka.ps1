@@ -9,11 +9,12 @@ Set-Location $RepoRoot
 
 $IconIco = Join-Path $RepoRoot "icon.ico"
 $RequirementsBuild = Join-Path $RepoRoot "requirements-build.txt"
+$LauncherI18nJson = Join-Path $RepoRoot "cyberdeck\launcher\i18n.json"
 $PortableDistDir = Join-Path $RepoRoot "dist-portable"
 $PortableOutDir = Join-Path $RepoRoot "Output"
 $PortableExeName = "CyberDeck.exe"
 $PortableOutExe = Join-Path $PortableOutDir $PortableExeName
-$PortableExtraFiles = @(
+$PortableCoreFiles = @(
   "icon.png",
   "icon.ico",
   "icon-qr-code.png",
@@ -42,7 +43,8 @@ function Stop-ProcessesFromPath {
       }
     }
   } catch {
-    Get-Process -Name "CyberDeck","CyberDeckPortable" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name "CyberDeck","CyberDeckPortable" -ErrorAction SilentlyContinue |
+      Stop-Process -Force -ErrorAction SilentlyContinue
   }
 
   if ($killed -gt 0) {
@@ -84,6 +86,32 @@ if (-not (Test-Path $IconIco)) {
 if (-not (Test-Path $RequirementsBuild)) {
   throw "requirements-build.txt not found: $RequirementsBuild"
 }
+if (-not (Test-Path $LauncherI18nJson)) {
+  throw "launcher i18n.json not found: $LauncherI18nJson"
+}
+
+$timelinePatterns = @(
+  "*timeline*.gif",
+  "*Timeline*.gif",
+  "*timeline*.webp",
+  "*Timeline*.webp",
+  "*timeline*.png",
+  "*Timeline*.png",
+  "*timeline*.jpg",
+  "*Timeline*.jpg",
+  "*timeline*.jpeg",
+  "*Timeline*.jpeg",
+  "*timeline*.bmp",
+  "*Timeline*.bmp"
+)
+$timelineMedia = @()
+foreach ($pattern in $timelinePatterns) {
+  $timelineMedia += Get-ChildItem -Path $RepoRoot -File -Filter $pattern -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName
+}
+$timelineMedia = @($timelineMedia | Sort-Object -Unique)
+$timelineNames = @($timelineMedia | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Sort-Object -Unique)
+$portableExternalFiles = @($PortableCoreFiles + $timelineNames | Sort-Object -Unique)
 
 $nuitkaArgs = @(
   "launcher.py"
@@ -94,16 +122,24 @@ $nuitkaArgs = @(
   "--include-data-file=icon.ico=icon.ico"
   "--include-data-file=logo.gif=logo.gif"
   "--include-data-file=icon-qr-code.png=icon-qr-code.png"
+  "--include-data-file=cyberdeck/launcher/i18n.json=cyberdeck/launcher/i18n.json"
   "--include-data-files-external=icon.png"
   "--include-data-files-external=icon.ico"
   "--include-data-files-external=icon-qr-code.png"
   "--include-data-files-external=logo.gif"
   "--windows-icon-from-ico=$IconIco"
+  "--include-package=customtkinter"
+  "--include-package-data=customtkinter"
   "--windows-console-mode=disable"
   "--windows-uac-admin"
-  "--output-dir=dist-portable"
+  "--output-dir=$PortableDistDir"
   "--output-filename=$PortableExeName"
 )
+foreach ($mediaPath in $timelineMedia) {
+  $mediaName = [System.IO.Path]::GetFileName($mediaPath)
+  $nuitkaArgs += "--include-data-file=$mediaPath=$mediaName"
+  $nuitkaArgs += "--include-data-files-external=$mediaName"
+}
 
 if ($DryRun) {
   Write-Host "Dry run. Nuitka command:"
@@ -131,9 +167,14 @@ if (Test-Path $PortableDistDir) {
   }
 }
 
-if (Test-Path $PortableOutExe) {
-  Stop-ProcessesFromPath -RootPath (Split-Path $PortableOutExe -Parent)
-  Remove-Item -Force $PortableOutExe -ErrorAction SilentlyContinue
+if (Test-Path $PortableOutDir) {
+  Stop-ProcessesFromPath -RootPath $PortableOutDir
+  foreach ($name in @($portableExternalFiles + $PortableExeName | Sort-Object -Unique)) {
+    $path = Join-Path $PortableOutDir $name
+    if (Test-Path $path) {
+      Remove-Item -Force $path -ErrorAction SilentlyContinue
+    }
+  }
 }
 
 python -m nuitka @nuitkaArgs
@@ -149,7 +190,7 @@ if (-not (Test-Path $PortableOutDir)) {
 
 Copy-Item $builtPath -Destination $PortableOutExe -Force
 
-foreach ($name in $PortableExtraFiles) {
+foreach ($name in $portableExternalFiles) {
   $src = Join-Path $PortableDistDir $name
   if (Test-Path $src) {
     Copy-Item $src -Destination (Join-Path $PortableOutDir $name) -Force

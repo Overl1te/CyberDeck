@@ -1,7 +1,7 @@
 ﻿; File is UTF-8.
 
 #define MyAppName "CyberDeck"
-#define MyAppVersion "1.3.1"
+#define MyAppVersion "1.3.2"
 #define MyAppPublisher "Overl1te"
 #define MyAppURL "https://github.com/Overl1te/CyberDeck"
 #define MyAppExeName "CyberDeck.exe"

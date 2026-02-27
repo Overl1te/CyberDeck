@@ -163,6 +163,13 @@ pip install -r requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_nuitka.ps1
 ```
 
+Windows (Nuitka portable onefile):
+
+```powershell
+pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_portable_nuitka.ps1
+```
+
 Linux (Arch helper script):
 
 ```bash
