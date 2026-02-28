@@ -23,10 +23,11 @@
 </p>
 
 <p align="center">
-  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=quality&format=svg&theme=midnight&locale=ru&card_width=760&animate=true&animation=all&duration=1400" alt="CyberDeck repository stats card" />
+  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=quality&format=svg&theme=midnight&locale=ru&card_width=760&animate=true&animation=all&duration=1400&cache_seconds=21601" alt="CyberDeck repository stats card" />
+  
 </p>
 <p align="center">
-  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=repo&format=svg&theme=midnight&locale=ru&card_width=760&animate=true&animation=all&duration=1400&langs_count=4" alt="CyberDeck quality card" />
+  <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=repo&format=svg&theme=midnight&locale=ru&card_width=760&animate=true&animation=all&duration=1400&cache_seconds=21600&langs_count=4" alt="CyberDeck quality card" />
 </p>
 
 ---
