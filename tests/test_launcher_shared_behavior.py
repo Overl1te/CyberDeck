@@ -62,6 +62,16 @@ class LauncherSharedBehaviorTests(unittest.TestCase):
             out2 = ls.load_json(path, default)
             self.assertEqual(out2, default)
 
+    def test_load_json_accepts_utf8_bom_payload(self):
+        """Validate scenario: launcher should parse UTF-8 BOM JSON files."""
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "settings_bom.json")
+            default = {"a": 1}
+            with open(path, "w", encoding="utf-8-sig") as f:
+                json.dump({"b": 2}, f)
+            out = ls.load_json(path, default)
+            self.assertEqual(out, {"a": 1, "b": 2})
+
     def test_save_json_writes_file(self):
         """Validate scenario: test save json writes file."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

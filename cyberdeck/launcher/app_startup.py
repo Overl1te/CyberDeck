@@ -105,6 +105,8 @@ class AppStartupMixin:
         except Exception:
             self._window_icon_photo = None
 
+        self._capture_exclusion_job = None
+        self._schedule_capture_exclusion_refresh(120)
         self._apply_topmost()
         if sys.platform.startswith("linux"):
             # Hide window until the boot overlay is ready to avoid UI flash on Linux compositors.
@@ -408,6 +410,67 @@ class AppStartupMixin:
         except Exception:
             pass
 
+    def _capture_exclusion_enabled(self) -> bool:
+        """Return whether launcher windows should be excluded from screen capture."""
+        if not is_windows():
+            return False
+        raw = str(os.environ.get("CYBERDECK_HIDE_LAUNCHER_FROM_CAPTURE", "1") or "1").strip().lower()
+        if raw in {"0", "false", "no", "off", "n"}:
+            return False
+        return True
+
+    def _refresh_capture_exclusion_windows(self) -> Any:
+        """Apply capture exclusion to launcher top-level windows (best-effort)."""
+        self._capture_exclusion_job = None
+        if not self._capture_exclusion_enabled():
+            return
+
+        targets: list[Any] = [self]
+        for attr in ("_approval_dialog_window", "_help_window"):
+            win = getattr(self, attr, None)
+            if win is not None:
+                targets.append(win)
+        try:
+            for child in self.winfo_children():
+                if isinstance(child, tk.Toplevel):
+                    targets.append(child)
+        except Exception:
+            pass
+
+        seen_ids: set[int] = set()
+        for win in targets:
+            if win is None:
+                continue
+            wid = id(win)
+            if wid in seen_ids:
+                continue
+            seen_ids.add(wid)
+            try:
+                apply_capture_exclusion_for_window(win, enabled=True)
+            except Exception:
+                pass
+
+    def _schedule_capture_exclusion_refresh(self, delay_ms: int = 80) -> Any:
+        """Schedule deferred capture-exclusion refresh for launcher windows."""
+        if not self._capture_exclusion_enabled():
+            return
+        try:
+            if self._capture_exclusion_job is not None:
+                self.after_cancel(self._capture_exclusion_job)
+        except Exception:
+            pass
+        try:
+            self._capture_exclusion_job = self.after(
+                max(0, int(delay_ms)),
+                self._refresh_capture_exclusion_windows,
+            )
+        except Exception:
+            self._capture_exclusion_job = None
+            try:
+                self._refresh_capture_exclusion_windows()
+            except Exception:
+                pass
+
     def _select_port_for_launch(self) -> None:
         """Select port for launch."""
         self.port = self._pick_port(self.settings.get("preferred_port", DEFAULT_PORT))
@@ -445,7 +508,7 @@ class AppStartupMixin:
                 cfg.update(self.app_config)
         except Exception:
             pass
-        cfg["allow_query_token"] = bool(cfg.get("allow_query_token"))
+        cfg.pop("allow_query_token", None)
         cfg["pairing_single_use"] = bool(cfg.get("pairing_single_use", False))
         cfg["ignore_vpn"] = bool(cfg.get("ignore_vpn", False))
         try:
@@ -560,7 +623,7 @@ class AppStartupMixin:
             env["CYBERDECK_PIN_BLOCK_S"] = "300"
 
         env["CYBERDECK_CONFIG_FILE"] = str(self.app_config_path)
-        env["CYBERDECK_ALLOW_QUERY_TOKEN"] = "1" if bool(self.app_config.get("allow_query_token")) else "0"
+        env["CYBERDECK_ALLOW_QUERY_TOKEN"] = "0"
         env["CYBERDECK_PAIRING_SINGLE_USE"] = "1" if bool(self.app_config.get("pairing_single_use")) else "0"
         env["CYBERDECK_IGNORE_VPN"] = "1" if bool(self.app_config.get("ignore_vpn", False)) else "0"
         env["CYBERDECK_UPLOAD_MAX_BYTES"] = str(max(0, int(self.app_config.get("upload_max_bytes", 0) or 0)))
@@ -570,6 +633,10 @@ class AppStartupMixin:
         env["CYBERDECK_VERBOSE_STREAM_LOG"] = "1" if bool(self.app_config.get("verbose_stream_log", True)) else "0"
         env["CYBERDECK_MDNS"] = "1" if bool(self.app_config.get("mdns_enabled", True)) else "0"
         env["CYBERDECK_DEVICE_APPROVAL_REQUIRED"] = "1" if bool(self.app_config.get("device_approval_required", True)) else "0"
+        env["CYBERDECK_LAUNCHER_PID"] = str(int(os.getpid()))
+        env["CYBERDECK_HIDE_LAUNCHER_FROM_CAPTURE"] = (
+            "1" if self._capture_exclusion_enabled() else "0"
+        )
 
         if self.tls_enabled and self.tls_cert_path and self.tls_key_path:
             env["CYBERDECK_TLS"] = "1"

@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
-  <a href="https://github.com/Overlite/CyberDeck-Mobile"><img src="https://img.shields.io/badge/Mobile-CyberDeck--Mobile-00A7E1" alt="Mobile"></a>
+  <a href="https://github.com/Overl1te/CyberDeck-Mobile"><img src="https://img.shields.io/badge/Mobile-CyberDeck--Mobile-00A7E1" alt="Mobile"></a>
   <a href="README_EN.md"><img src="https://img.shields.io/badge/lang-English-1f6feb" alt="English"></a>
 </p>
 

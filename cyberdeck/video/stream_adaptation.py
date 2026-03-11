@@ -114,10 +114,11 @@ class FeedbackSnapshot:
 class StreamFeedbackStore:
     """Keep latest per-session network feedback and compute simple tuning hints."""
 
-    def __init__(self, *, stale_after_s: float = 20.0) -> None:
+    def __init__(self, *, stale_after_s: float = 20.0, ema_alpha: float = 0.34) -> None:
         self._lock = threading.RLock()
         self._state: Dict[str, FeedbackSnapshot] = {}
         self._stale_after_s = max(2.0, float(stale_after_s))
+        self._ema_alpha = max(0.05, min(0.95, float(ema_alpha)))
 
     def update(
         self,
@@ -139,10 +140,31 @@ class StreamFeedbackStore:
         drop = max(0.0, min(1.0, float(drop_ratio or 0.0)))
         fps = max(0.0, float(decode_fps or 0.0))
 
+        with self._lock:
+            prev = self._state.get(key)
+        if prev is not None:
+            a = self._ema_alpha
+            rtt = (float(prev.rtt_ms) * (1.0 - a)) + (rtt * a)
+            jitter = (float(prev.jitter_ms) * (1.0 - a)) + (jitter * a)
+            drop = (float(prev.drop_ratio) * (1.0 - a)) + (drop * a)
+            # Keep previous FPS if a sample is missing/zero to avoid false critical spikes.
+            fps_sample = fps if fps > 0.0 else float(prev.decode_fps)
+            fps = (float(prev.decode_fps) * (1.0 - a)) + (fps_sample * a)
+
         profile = "good"
-        if (rtt >= 340.0) or (drop >= 0.08) or (fps > 0.0 and fps < 12.0):
+        if (
+            (rtt >= 340.0)
+            or (jitter >= 85.0)
+            or (drop >= 0.08)
+            or (fps > 0.0 and fps < 12.0)
+        ):
             profile = "critical"
-        elif (rtt >= 220.0) or (drop >= 0.03) or (fps > 0.0 and fps < 20.0):
+        elif (
+            (rtt >= 220.0)
+            or (jitter >= 45.0)
+            or (drop >= 0.03)
+            or (fps > 0.0 and fps < 20.0)
+        ):
             profile = "degraded"
 
         snap = FeedbackSnapshot(
@@ -164,14 +186,16 @@ class StreamFeedbackStore:
             return {"network_profile": "unknown", "suggested": {}}
         profile = str(item.get("network_profile") or "unknown")
         if profile == "critical":
+            w_delta = -192 if float(item.get("jitter_ms") or 0.0) >= 120.0 else -128
             return {
                 **item,
-                "suggested": {"fps_delta": -4, "max_w_delta": -128, "quality_delta": -8, "prefer_low_latency": True},
+                "suggested": {"fps_delta": -4, "max_w_delta": w_delta, "quality_delta": -8, "prefer_low_latency": True},
             }
         if profile == "degraded":
+            q_delta = -5 if float(item.get("jitter_ms") or 0.0) >= 60.0 else -4
             return {
                 **item,
-                "suggested": {"fps_delta": -2, "max_w_delta": -64, "quality_delta": -4, "prefer_low_latency": True},
+                "suggested": {"fps_delta": -2, "max_w_delta": -64, "quality_delta": q_delta, "prefer_low_latency": True},
             }
         return {
             **item,

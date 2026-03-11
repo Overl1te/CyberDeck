@@ -1,5 +1,7 @@
-﻿import unittest
+import unittest
 from unittest.mock import patch
+
+import requests
 
 from cyberdeck.launcher.api_client import LauncherApiClient
 
@@ -77,7 +79,36 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
             verify=True,
         )
 
+    def test_json_dict_returns_fallback_for_invalid_payload(self):
+        """Validate scenario: json dict helper should return fallback on invalid payload."""
+        c = LauncherApiClient("http://127.0.0.1:8080/api/local")
+        resp = type("R", (), {"json": lambda self: ["not", "a", "dict"]})()
+        self.assertEqual(c.json_dict(resp, default={"x": 1}), {"x": 1})
+
+    def test_describe_api_error_prefers_structured_error_fields(self):
+        """Validate scenario: structured API payload should produce readable error string."""
+        c = LauncherApiClient("http://127.0.0.1:8080/api/local")
+        payload = {
+            "detail": "ignored detail",
+            "error": {
+                "code": "CD-3001",
+                "title": "Bad extension",
+                "hint": "Upload allowed extension",
+            },
+        }
+        resp = type("R", (), {"status_code": 415, "json": lambda self: payload})()
+        msg = c.describe_api_error(resp)
+        self.assertIn("CD-3001", msg)
+        self.assertIn("Bad extension", msg)
+        self.assertIn("Upload allowed extension", msg)
+
+    def test_describe_exception_handles_common_requests_errors(self):
+        """Validate scenario: transport exceptions should be normalized for UI."""
+        c = LauncherApiClient("http://127.0.0.1:8080/api/local")
+        self.assertEqual(c.describe_exception(requests.Timeout()), "request timeout")
+        self.assertEqual(c.describe_exception(requests.ConnectionError()), "connection failed")
+        self.assertEqual(c.describe_exception(requests.exceptions.SSLError()), "TLS verification failed")
+
 
 if __name__ == "__main__":
     unittest.main()
-

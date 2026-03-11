@@ -18,7 +18,7 @@ DEFAULT_SETTINGS = {
     "pin_window_s": 60,
     "pin_max_fails": 8,
     "pin_block_s": 300,
-    "tls_enabled": False,
+    "tls_enabled": True,
     "tls_cert_path": "",
     "tls_key_path": "",
     "tls_ca_path": "",
@@ -30,7 +30,6 @@ DEFAULT_SETTINGS = {
 }
 
 DEFAULT_APP_CONFIG = {
-    "allow_query_token": False,
     "pairing_single_use": False,
     "ignore_vpn": False,
     "upload_max_bytes": 0,

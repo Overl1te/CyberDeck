@@ -1,5 +1,4 @@
 {
-  "allow_query_token": false,
   "pairing_single_use": false,
   "ignore_vpn": false,
   "upload_max_bytes": 0,

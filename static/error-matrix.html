@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberDeck Error Matrix</title>
+  <style>
+    :root {
+      --bg: #060907;
+      --panel: #0f1511;
+      --line: #23352a;
+      --text: #e7f7ee;
+      --muted: #9eb5aa;
+      --accent: #5ad49d;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top right, #103022 0%, var(--bg) 46%);
+      color: var(--text);
+    }
+
+    .wrap {
+      width: min(1320px, 96vw);
+      margin: 0 auto;
+      padding: 24px 0 40px;
+    }
+
+    h1 {
+      margin: 0;
+      color: var(--accent);
+      font-size: clamp(1.4rem, 2.4vw, 2rem);
+      letter-spacing: 0.04em;
+    }
+
+    .sub {
+      margin: 8px 0 14px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .links a {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: #0a120d;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.92rem;
+    }
+
+    .links a:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(15, 21, 17, 0.92);
+      padding: 12px;
+      margin-bottom: 14px;
+    }
+
+    .panel h2 {
+      margin: 0 0 6px;
+      font-size: 1.14rem;
+    }
+
+    .panel p {
+      margin: 0 0 10px;
+      color: var(--muted);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 980px;
+      background: #0b110d;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid #1a281f;
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 0.92rem;
+      line-height: 1.38;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #101912;
+      color: #c8eedb;
+      z-index: 1;
+    }
+
+    code {
+      color: #8aecc0;
+      font-family: Consolas, monospace;
+      font-size: 0.88rem;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin-top: 2px;
+    }
+
+    @media (max-width: 740px) {
+      .wrap { width: min(1320px, 94vw); }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>CyberDeck Error Matrix</h1>
+    <p class="sub">Unified API error matrix grouped by subsystem. For interactive search use <a href="/errors.html">/errors.html</a>.</p>
+    <div class="meta">Updated: 2026-03-08 08:03 UTC | Source: cyberdeck/errors.py</div>
+    <nav class="links"><a href="#pairing">Pairing</a> <a href="#upload">Upload</a> <a href="#auth">Auth</a> <a href="#system">System</a> <a href="#other">Other</a></nav>
+      <section id="pairing" class="panel">
+        <h2>Pairing</h2>
+        <p>Pairing/PIN/QR/approval related errors.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>HTTP</th>
+                <th>Slug</th>
+                <th>Title</th>
+                <th>Hint</th>
+                <th>Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>CD-2001</code></td><td>429</td><td><code>pin_rate_limited</code></td><td>Слишком много попыток PIN</td><td>Подождите Retry-After и повторите попытку позже.</td><td>pairing, pin, rate-limit</td></tr>
+              <tr><td><code>CD-2002</code></td><td>403</td><td><code>invalid_code</code></td><td>Неверный PIN-код</td><td>Проверьте актуальный PIN в лаунчере и введите его заново.</td><td>pairing, pin</td></tr>
+              <tr><td><code>CD-2003</code></td><td>403</td><td><code>pairing_expired</code></td><td>Срок действия PIN истек</td><td>Сгенерируйте новый PIN-код и повторите сопряжение.</td><td>pairing, pin, ttl</td></tr>
+              <tr><td><code>CD-2101</code></td><td>400</td><td><code>qr_token_required</code></td><td>Не передан QR-токен</td><td>Отсканируйте актуальный QR-код заново.</td><td>pairing, qr</td></tr>
+              <tr><td><code>CD-2102</code></td><td>403</td><td><code>invalid_or_expired_qr_token</code></td><td>QR-токен недействителен или истек</td><td>Обновите QR в лаунчере и повторите вход.</td><td>pairing, qr, ttl</td></tr>
+              <tr><td><code>CD-2103</code></td><td>202</td><td><code>approval_pending</code></td><td>Ожидается подтверждение на ПК</td><td>Подтвердите запрос устройства в лаунчере CyberDeck на ПК.</td><td>pairing, approval</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>      <section id="upload" class="panel">
+        <h2>Upload</h2>
+        <p>Upload, file constraints, and integrity related errors.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>HTTP</th>
+                <th>Slug</th>
+                <th>Title</th>
+                <th>Hint</th>
+                <th>Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>CD-3001</code></td><td>415</td><td><code>upload_extension_not_allowed</code></td><td>Расширение файла запрещено</td><td>Добавьте расширение в whitelist загрузки или отправьте другой файл.</td><td>upload, file</td></tr>
+              <tr><td><code>CD-3002</code></td><td>413</td><td><code>upload_too_large</code></td><td>Файл слишком большой</td><td>Уменьшите размер файла или увеличьте limit upload_max_bytes на сервере.</td><td>upload, file, limit</td></tr>
+              <tr><td><code>CD-3003</code></td><td>400</td><td><code>upload_checksum_mismatch</code></td><td>Контрольная сумма не совпала</td><td>Повторите загрузку файла; проверьте сеть и целостность файла.</td><td>upload, checksum</td></tr>
+              <tr><td><code>CD-3004</code></td><td>500</td><td><code>upload_failed</code></td><td>Ошибка загрузки файла</td><td>Проверьте права записи в FILES_DIR и свободное место на диске.</td><td>upload, storage</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>      <section id="auth" class="panel">
+        <h2>Auth</h2>
+        <p>Token/session/permission related errors.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>HTTP</th>
+                <th>Slug</th>
+                <th>Title</th>
+                <th>Hint</th>
+                <th>Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>CD-1101</code></td><td>400</td><td><code>token_required</code></td><td>Отсутствует токен</td><td>Передайте токен в Authorization: Bearer &lt;token&gt; или через поддерживаемый параметр.</td><td>auth, token</td></tr>
+              <tr><td><code>CD-1102</code></td><td>404</td><td><code>session_not_found</code></td><td>Сессия не найдена</td><td>Повторите сопряжение устройства и используйте новый токен.</td><td>auth, session</td></tr>
+              <tr><td><code>CD-1401</code></td><td>403</td><td><code>unauthorized</code></td><td>Неавторизованный запрос</td><td>Проверьте токен и заголовок Authorization.</td><td>auth, token</td></tr>
+              <tr><td><code>CD-1403</code></td><td>403</td><td><code>permission_denied</code></td><td>Недостаточно прав</td><td>Разрешите нужный permission в настройках устройства на ПК.</td><td>auth, permission</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>      <section id="system" class="panel">
+        <h2>System</h2>
+        <p>System actions and input backend related errors.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>HTTP</th>
+                <th>Slug</th>
+                <th>Title</th>
+                <th>Hint</th>
+                <th>Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>CD-5001</code></td><td>500</td><td><code>shutdown_failed</code></td><td>Команда выключения не выполнена</td><td>Проверьте системные права процесса CyberDeck.</td><td>system, power</td></tr>
+              <tr><td><code>CD-5002</code></td><td>500</td><td><code>restart_failed</code></td><td>Команда перезагрузки не выполнена</td><td>Проверьте системные права процесса CyberDeck.</td><td>system, power</td></tr>
+              <tr><td><code>CD-5003</code></td><td>500</td><td><code>logoff_failed</code></td><td>Команда выхода из сессии не выполнена</td><td>Проверьте доступность утилит logoff/loginctl.</td><td>system, session</td></tr>
+              <tr><td><code>CD-5004</code></td><td>400</td><td><code>logoff_not_supported_on_this_system</code></td><td>Выход из сессии не поддерживается</td><td>Используйте lock/shutdown/restart для этой ОС.</td><td>system, session</td></tr>
+              <tr><td><code>CD-5005</code></td><td>400</td><td><code>lock_not_supported_on_this_system</code></td><td>Блокировка экрана не поддерживается</td><td>Проверьте установленный desktop environment и утилиты lock.</td><td>system, lock</td></tr>
+              <tr><td><code>CD-5006</code></td><td>500</td><td><code>sleep_failed</code></td><td>Не удалось перевести систему в сон</td><td>Проверьте поддержку sleep/hibernate в ОС и права процесса.</td><td>system, power</td></tr>
+              <tr><td><code>CD-5007</code></td><td>500</td><td><code>hibernate_failed</code></td><td>Не удалось перевести систему в гибернацию</td><td>Проверьте поддержку hibernate в ОС и права процесса.</td><td>system, power</td></tr>
+              <tr><td><code>CD-5008</code></td><td>400</td><td><code>unknown_action</code></td><td>Неизвестное действие</td><td>Проверьте параметр action в запросе.</td><td>system, request</td></tr>
+              <tr><td><code>CD-5009</code></td><td>501</td><td><code>keyboard_input_unavailable</code></td><td>Клавиатурный backend недоступен</td><td>Проверьте разрешения ввода и настройки backend на сервере.</td><td>system, input</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>      <section id="other" class="panel">
+        <h2>Other</h2>
+        <p>Errors outside core subsystems (device/validation/internal).</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>HTTP</th>
+                <th>Slug</th>
+                <th>Title</th>
+                <th>Hint</th>
+                <th>Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>CD-1000</code></td><td>422</td><td><code>validation_error</code></td><td>Некорректные входные данные</td><td>Проверьте формат и обязательные поля запроса.</td><td>request, validation, payload</td></tr>
+              <tr><td><code>CD-4001</code></td><td>404</td><td><code>device_not_found</code></td><td>Устройство не найдено</td><td>Обновите список устройств и повторите действие.</td><td>device, session</td></tr>
+              <tr><td><code>CD-4002</code></td><td>400</td><td><code>device_id_required</code></td><td>Не передан device_id</td><td>Передайте device_id в теле запроса.</td><td>device, request</td></tr>
+              <tr><td><code>CD-4003</code></td><td>500</td><td><code>delete_failed</code></td><td>Не удалось удалить устройство</td><td>Повторите позже и проверьте доступ к файлу сессий.</td><td>device, storage</td></tr>
+              <tr><td><code>CD-4004</code></td><td>500</td><td><code>approve_failed</code></td><td>Не удалось изменить статус подтверждения</td><td>Повторите действие и проверьте состояние сессий.</td><td>device, approval</td></tr>
+              <tr><td><code>CD-4005</code></td><td>500</td><td><code>rename_failed</code></td><td>Не удалось сохранить alias/note</td><td>Проверьте файл сессий и повторите попытку.</td><td>device, storage</td></tr>
+              <tr><td><code>CD-9000</code></td><td>500</td><td><code>internal_error</code></td><td>Внутренняя ошибка сервера</td><td>Повторите запрос позже и проверьте логи сервера.</td><td>internal</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+  </main>
+</body>
+</html>

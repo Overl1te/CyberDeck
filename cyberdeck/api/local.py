@@ -1,6 +1,7 @@
 ﻿import asyncio
 import ipaddress
 import os
+import re
 import time
 import uuid
 import urllib.parse
@@ -78,6 +79,19 @@ class QrLoginRequest(BaseModel):
     qr_token: Optional[str] = None
     device_id: Optional[str] = None
     device_name: Optional[str] = None
+
+
+def _validate_qr_login_payload(req: QrLoginRequest) -> None:
+    """Validate optional QR payload fields before session authorization."""
+    qr_token = str((req.qr_token or req.nonce or "")).strip()
+    if qr_token and (len(qr_token) > 256):
+        raise HTTPException(400, detail="validation_error")
+    device_id = str((req.device_id or "")).strip()
+    if device_id and (len(device_id) > 128):
+        raise HTTPException(400, detail="validation_error")
+    device_name = str((req.device_name or "")).strip()
+    if device_name and (len(device_name) > 128):
+        raise HTTPException(400, detail="validation_error")
 
 
 def _safe_port(value: Any, *, scheme: str = "http") -> int:
@@ -420,6 +434,7 @@ def local_qr_payload(request: Request):
 @router.post("/api/qr/login")
 def qr_login(req: QrLoginRequest, request: Request):
     """Authorize a device using a one-time QR token and create a session."""
+    _validate_qr_login_payload(req)
     qr_token = str((req.qr_token or req.nonce or "")).strip()
     if not qr_token:
         raise HTTPException(400, detail="qr_token_required")

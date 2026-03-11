@@ -160,10 +160,73 @@ class ApiSystemBehaviorTests(unittest.TestCase):
         # Test body is intentionally explicit so regressions are easy to diagnose.
         token = "tok-vol-ok"
         self._add_session(token, settings={"perm_keyboard": True})
-        with patch.object(api_system.INPUT_BACKEND, "press", return_value=True) as mpress:
+        with patch.object(api_system, "_toggle_system_mute", return_value=False), patch.object(
+            api_system.INPUT_BACKEND, "press", return_value=True
+        ) as mpress:
             r = self.client.post("/volume/mute", headers=self._headers(token))
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json().get("status"), "ok")
+        mpress.assert_called_once_with("volumemute")
+
+    def test_volume_state_returns_current_volume_payload(self):
+        """Validate scenario: volume state endpoint should expose normalized payload."""
+        token = "tok-vol-state"
+        self._add_session(token, settings={"perm_keyboard": True})
+        payload = {"supported": True, "volume_percent": 61, "muted": False, "backend": "winmm"}
+        with patch.object(api_system, "get_volume_state_payload", return_value=payload):
+            r = self.client.get("/volume/state", headers=self._headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body.get("status"), "ok")
+        self.assertEqual(body.get("volume_percent"), 61)
+        self.assertEqual(body.get("muted"), False)
+        self.assertEqual(body.get("supported"), True)
+
+    def test_volume_set_updates_volume_when_backend_available(self):
+        """Validate scenario: volume set endpoint should call backend setter and return fresh state."""
+        token = "tok-vol-set"
+        self._add_session(token, settings={"perm_keyboard": True})
+        with patch.object(api_system, "_set_volume_percent", return_value=True) as mset, patch.object(
+            api_system,
+            "get_volume_state_payload",
+            return_value={"supported": True, "volume_percent": 73, "muted": False, "backend": "winmm"},
+        ):
+            r = self.client.post("/volume/set/73", headers=self._headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json().get("volume_percent"), 73)
+        mset.assert_called_once_with(73)
+
+    def test_volume_set_returns_501_when_backend_unavailable(self):
+        """Validate scenario: volume set endpoint should fail when OS backend is unavailable."""
+        token = "tok-vol-set-fail"
+        self._add_session(token, settings={"perm_keyboard": True})
+        with patch.object(api_system, "_set_volume_percent", return_value=False):
+            r = self.client.post("/volume/set/10", headers=self._headers(token))
+        self.assertEqual(r.status_code, 501, r.text)
+        self.assertIn("volume_control_unavailable", r.text)
+
+    def test_volume_mute_prefers_native_toggle_before_keyboard(self):
+        """Validate scenario: mute action should use native toggle and avoid keyboard fallback when possible."""
+        token = "tok-vol-native-mute"
+        self._add_session(token, settings={"perm_keyboard": True})
+        with patch.object(api_system, "_toggle_system_mute", return_value=True) as mtoggle, patch.object(
+            api_system.INPUT_BACKEND, "press", return_value=True
+        ) as mpress:
+            r = self.client.post("/volume/mute", headers=self._headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        mtoggle.assert_called_once()
+        mpress.assert_not_called()
+
+    def test_volume_mute_falls_back_to_keyboard_when_native_toggle_fails(self):
+        """Validate scenario: mute action should fallback to media key when native toggle fails."""
+        token = "tok-vol-fallback-mute"
+        self._add_session(token, settings={"perm_keyboard": True})
+        with patch.object(api_system, "_toggle_system_mute", return_value=False) as mtoggle, patch.object(
+            api_system.INPUT_BACKEND, "press", return_value=True
+        ) as mpress:
+            r = self.client.post("/volume/mute", headers=self._headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        mtoggle.assert_called_once()
         mpress.assert_called_once_with("volumemute")
 
     def test_run_background_ok_handles_spawn_errors(self):

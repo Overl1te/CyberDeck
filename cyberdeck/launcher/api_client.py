@@ -35,6 +35,57 @@ class LauncherApiClient:
             verify=self.verify,
         )
 
+    @staticmethod
+    def describe_exception(exc: BaseException) -> str:
+        """Return concise user-facing explanation for transport/runtime exceptions."""
+        if isinstance(exc, requests.exceptions.SSLError):
+            return "TLS verification failed"
+        if isinstance(exc, requests.exceptions.Timeout):
+            return "request timeout"
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return "connection failed"
+        text = str(exc or "").strip()
+        return text or exc.__class__.__name__
+
+    @staticmethod
+    def json_dict(response: Any, *, default: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Decode response JSON as dict with predictable fallback."""
+        fallback = {} if default is None else dict(default)
+        try:
+            payload = response.json()
+        except Exception:
+            return fallback
+        if isinstance(payload, dict):
+            return payload
+        return fallback
+
+    @classmethod
+    def describe_api_error(cls, response: Any, *, default: str = "API error") -> str:
+        """Extract readable API error text from structured response payload."""
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        payload = cls.json_dict(response)
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+
+        code = str(error.get("code") or "").strip()
+        title = str(error.get("title") or "").strip()
+        hint = str(error.get("hint") or "").strip()
+        detail = str(payload.get("detail") or "").strip()
+
+        pieces: list[str] = []
+        if code:
+            pieces.append(code)
+        if title:
+            pieces.append(title)
+        if hint:
+            pieces.append(hint)
+        if pieces:
+            return " | ".join(pieces)
+        if detail:
+            return detail
+        if status_code > 0:
+            return f"HTTP {status_code}"
+        return str(default or "API error")
+
     def get_info(self, timeout: float = 1.0):
         """Retrieve data required to get info."""
         # Read-path helpers should avoid mutating shared state where possible.

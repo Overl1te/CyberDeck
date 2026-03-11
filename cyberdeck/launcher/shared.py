@@ -99,7 +99,12 @@ BOOT_OVERLAY_EXIT_STEPS = 10
 BOOT_OVERLAY_EXIT_STEP_MS = 18
 BOOT_OVERLAY_EXIT_SHRINK = 0.14
 BOOT_OVERLAY_EXIT_ALPHA_DROP = 0.08
-SUPPORT_URL = "https://pay.cloudtips.ru/p/70ab5e1b"
+SUPPORT_URL = "https://github.com/Overl1te/CyberDeck/blob/main/SUPPORT.md"
+SUPPORT_URLS = (
+    "https://github.com/Overl1te/CyberDeck/blob/main/SUPPORT.md",
+    "https://github.com/Overl1te/CyberDeck/discussions",
+    "https://github.com/Overl1te/CyberDeck/issues",
+)
 
 LAUNCHER_VERSION = str(getattr(server_config, "VERSION", "unknown") or "unknown")
 
@@ -265,25 +270,41 @@ def ensure_null_stdio() -> None:
 def load_json(path: str, default: dict[str, Any]) -> dict[str, Any]:
     """Load JSON dictionary and merge with defaults."""
     # Read-path helpers should avoid mutating shared state where possible.
+    fallback = dict(default)
     try:
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            raw = b""
+            with open(path, "rb") as f:
+                raw = f.read()
+            for enc in ("utf-8", "utf-8-sig", "cp1251"):
+                try:
+                    text = raw.decode(enc)
+                except Exception:
+                    continue
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    continue
                 if isinstance(data, dict):
-                    merged = default.copy()
+                    merged = dict(fallback)
                     merged.update(data)
                     return merged
     except Exception:
         pass
-    return default.copy()
+    return fallback
 
 
 def save_json(path: str, data: dict[str, Any]) -> None:
     """Persist dictionary to JSON file."""
     # Write-path helpers should keep side effects minimal and well-scoped.
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
     except Exception:
         pass
 
@@ -343,6 +364,54 @@ def set_autostart(enabled: bool, command: str) -> None:
                 f.write(content)
         except Exception:
             pass
+
+
+def set_window_capture_excluded(hwnd: int, enabled: bool = True) -> bool:
+    """Best-effort Windows API window capture exclusion toggle."""
+    if not is_windows():
+        return False
+    try:
+        handle = int(hwnd)
+    except Exception:
+        return False
+    if handle <= 0:
+        return False
+
+    try:
+        user32 = ctypes.windll.user32
+        wda_none = 0x00000000
+        wda_monitor = 0x00000001
+        # Preferred mode: hide window from capture, available on modern Windows.
+        wda_exclude_from_capture = 0x00000011
+        target = wda_exclude_from_capture if bool(enabled) else wda_none
+        ok = bool(user32.SetWindowDisplayAffinity(int(handle), int(target)))
+        if (not ok) and bool(enabled):
+            # Compatibility fallback for older builds.
+            ok = bool(user32.SetWindowDisplayAffinity(int(handle), int(wda_monitor)))
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def apply_capture_exclusion_for_window(widget: Any, enabled: bool = True) -> bool:
+    """Apply capture exclusion for a Tk/CTk window-like widget."""
+    if not is_windows():
+        return False
+    try:
+        if hasattr(widget, "winfo_exists") and (not bool(widget.winfo_exists())):
+            return False
+    except Exception:
+        pass
+    try:
+        if hasattr(widget, "update_idletasks"):
+            widget.update_idletasks()
+    except Exception:
+        pass
+    try:
+        hwnd = int(widget.winfo_id())
+    except Exception:
+        return False
+    return bool(set_window_capture_excluded(hwnd, enabled=enabled))
 
 
 class CyberBtn(ctk.CTkButton):

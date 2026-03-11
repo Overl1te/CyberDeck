@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberDeck Error Guide</title>
+    <style>
+        :root {
+            --bg: #050505;
+            --panel: #101010;
+            --panel-border: #2b2b2b;
+            --text: #f0f0f0;
+            --muted: #9aa0a6;
+            --accent: #00ff9d;
+            --danger: #ff7f7f;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", sans-serif;
+            background: radial-gradient(circle at top right, #0e1f17 0%, var(--bg) 45%);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .wrap {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 28px 18px 36px;
+        }
+
+        h1 {
+            margin: 0 0 8px;
+            color: var(--accent);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: clamp(1.3rem, 3vw, 2rem);
+        }
+
+        .sub {
+            margin: 0 0 20px;
+            color: var(--muted);
+        }
+
+        .sub a {
+            color: var(--accent);
+        }
+
+        .sub a:hover {
+            color: #a7ffd8;
+        }
+
+        .toolbar {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        input, button {
+            border-radius: 10px;
+            border: 1px solid var(--panel-border);
+            background: #0c0c0c;
+            color: var(--text);
+            font: inherit;
+            padding: 12px 14px;
+        }
+
+        input:focus, button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+
+        button {
+            cursor: pointer;
+            min-width: 140px;
+            border-color: #1f4a35;
+            background: #123121;
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        #stats {
+            margin: 0 0 14px;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+
+        .card {
+            background: rgba(16, 16, 16, 0.92);
+            border: 1px solid var(--panel-border);
+            border-radius: 14px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+
+        .line {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: baseline;
+            margin-bottom: 8px;
+        }
+
+        .code {
+            color: var(--accent);
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+
+        .status {
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .title {
+            margin: 0 0 7px;
+            font-size: 1.05rem;
+        }
+
+        .hint {
+            margin: 0;
+            color: #d8d8d8;
+        }
+
+        .tags {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        .err {
+            color: var(--danger);
+            margin-top: 14px;
+        }
+    </style>
+</head>
+<body>
+    <main class="wrap">
+        <h1>CyberDeck Error Guide</h1>
+        <p class="sub">
+            Поиск по коду, названию и подсказке устранения.
+            Полная матрица: <a href="/error-matrix.html">/error-matrix.html</a>
+        </p>
+        <div class="toolbar">
+            <input id="q" type="search" placeholder="Например: CD-3003, upload, token, permission">
+            <button id="refresh">Обновить</button>
+        </div>
+        <p id="stats">Загрузка каталога...</p>
+        <section id="items"></section>
+        <p id="error" class="err hidden"></p>
+    </main>
+
+    <script>
+        const qInput = document.getElementById("q");
+        const refreshBtn = document.getElementById("refresh");
+        const statsEl = document.getElementById("stats");
+        const itemsEl = document.getElementById("items");
+        const errorEl = document.getElementById("error");
+
+        function esc(text) {
+            return String(text ?? "")
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;");
+        }
+
+        function setError(msg) {
+            if (!msg) {
+                errorEl.classList.add("hidden");
+                errorEl.textContent = "";
+                return;
+            }
+            errorEl.classList.remove("hidden");
+            errorEl.textContent = msg;
+        }
+
+        function renderItems(items) {
+            const rows = Array.isArray(items) ? items : [];
+            if (!rows.length) {
+                itemsEl.innerHTML = '<div class="card"><p class="hint">Ничего не найдено.</p></div>';
+                return;
+            }
+            itemsEl.innerHTML = rows.map((row) => {
+                const tags = Array.isArray(row.tags) ? row.tags : [];
+                return `
+                    <article class="card">
+                        <div class="line">
+                            <span class="code">${esc(row.code)}</span>
+                            <span class="status">HTTP ${esc(row.status)} • #${esc(row.number)}</span>
+                        </div>
+                        <h2 class="title">${esc(row.title)}</h2>
+                        <p class="hint">${esc(row.hint)}</p>
+                        ${tags.length ? `<div class="tags">Теги: ${esc(tags.join(", "))}</div>` : ""}
+                    </article>
+                `;
+            }).join("");
+        }
+
+        async function loadCatalog() {
+            const query = (qInput.value || "").trim();
+            const url = query
+                ? `/api/errors/catalog?q=${encodeURIComponent(query)}&limit=300`
+                : "/api/errors/catalog?limit=300";
+            setError("");
+            statsEl.textContent = "Загрузка...";
+            try {
+                const response = await fetch(url, { cache: "no-store" });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error((payload && payload.detail) || `HTTP ${response.status}`);
+                }
+                const items = Array.isArray(payload.items) ? payload.items : [];
+                statsEl.textContent = `Найдено: ${items.length}`;
+                renderItems(items);
+            } catch (e) {
+                statsEl.textContent = "Ошибка загрузки";
+                renderItems([]);
+                setError(`Не удалось загрузить каталог: ${e}`);
+            }
+        }
+
+        refreshBtn.addEventListener("click", loadCatalog);
+        qInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                loadCatalog();
+            }
+        });
+
+        const params = new URLSearchParams(window.location.search);
+        const code = (params.get("code") || "").trim();
+        if (code) {
+            qInput.value = code;
+        }
+
+        loadCatalog();
+    </script>
+</body>
+</html>

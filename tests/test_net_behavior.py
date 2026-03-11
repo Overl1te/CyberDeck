@@ -111,6 +111,41 @@ class NetBehaviorTests(unittest.TestCase):
             ip = net.get_local_ip()
         self.assertEqual(ip, "100.64.10.9")
 
+    def test_get_local_ip_ignores_virtual_interfaces_when_ignore_vpn_enabled(self):
+        """Validate scenario: virtual adapters should not win over physical LAN/Wi-Fi."""
+        fake = _FakeSocket(ip="172.28.240.1", raise_connect=False)
+        addrs = {
+            "vEthernet (Default Switch)": [_FakeAddr(socket.AF_INET, "172.28.240.1")],
+            "Wi-Fi": [_FakeAddr(socket.AF_INET, "192.168.0.55")],
+        }
+        stats = {
+            "vEthernet (Default Switch)": _FakeStat(True),
+            "Wi-Fi": _FakeStat(True),
+        }
+        with patch.dict(os.environ, {"CYBERDECK_IGNORE_VPN": "1"}, clear=False), patch(
+            "cyberdeck.net.socket.socket", return_value=fake
+        ), patch("cyberdeck.net.psutil.net_if_addrs", return_value=addrs), patch(
+            "cyberdeck.net.psutil.net_if_stats", return_value=stats
+        ):
+            ip = net.get_local_ip()
+        self.assertEqual(ip, "192.168.0.55")
+
+    def test_get_local_ip_deprioritizes_cgnat_when_lan_exists(self):
+        """Validate scenario: cgnat-like addresses should lose against regular LAN in ignore-vpn mode."""
+        fake = _FakeSocket(ip="100.96.10.7", raise_connect=False)
+        addrs = {
+            "Some Adapter": [_FakeAddr(socket.AF_INET, "100.96.10.7")],
+            "Ethernet": [_FakeAddr(socket.AF_INET, "10.10.10.20")],
+        }
+        stats = {"Some Adapter": _FakeStat(True), "Ethernet": _FakeStat(True)}
+        with patch.dict(os.environ, {"CYBERDECK_IGNORE_VPN": "1"}, clear=False), patch(
+            "cyberdeck.net.socket.socket", return_value=fake
+        ), patch("cyberdeck.net.psutil.net_if_addrs", return_value=addrs), patch(
+            "cyberdeck.net.psutil.net_if_stats", return_value=stats
+        ):
+            ip = net.get_local_ip()
+        self.assertEqual(ip, "10.10.10.20")
+
     def test_find_free_port_binds_ephemeral_port(self):
         """Validate scenario: test find free port binds ephemeral port."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

@@ -217,11 +217,15 @@
             rel="noopener noreferrer"
         >Скачать CyberDeck Mobile</a>
         <a
-            href="https://pay.cloudtips.ru/p/70ab5e1b"
+            href="https://github.com/Overl1te/CyberDeck/blob/main/SUPPORT.md"
             class="btn secondary"
             target="_blank"
             rel="noopener noreferrer"
-        >Поддержать CyberDeck</a>
+        >Поддержка CyberDeck</a>
+        <a
+            href="/errors.html"
+            class="btn secondary"
+        >База ошибок</a>
     </div>
 
     <script>
@@ -237,7 +241,7 @@
             const type = (params.get("type") || "cyberdeck_qr_v1").trim();
             const openMode = (params.get("open") || "").trim().toLowerCase();
             const autoMode = (params.get("auto") || "1").trim();
-            const appPkg = (params.get("app_pkg") || "com.example.cyberdeck_mobile.cyberdeck_mobile").trim();
+            const appPkg = (params.get("app_pkg") || "com.overl1te.cyberdeckmobile").trim();
             const expRaw = (params.get("exp") || params.get("expires_at") || "").trim();
             const expTs = /^\d+(\.\d+)?$/.test(expRaw) ? Number(expRaw) : 0;
             const AUTO_OPEN_DELAY_MS = 60;

@@ -20,9 +20,9 @@ from .net import find_free_port, get_local_ip
 
 
 TRANSFER_PRESETS = {
-    "fast": {"chunk": 1024 * 1024, "sleep": 0.0},
-    "balanced": {"chunk": 256 * 1024, "sleep": 0.001},
-    "safe": {"chunk": 64 * 1024, "sleep": 0.002},
+    "fast": {"chunk": 2 * 1024 * 1024, "sleep": 0.0},
+    "balanced": {"chunk": 512 * 1024, "sleep": 0.0005},
+    "safe": {"chunk": 128 * 1024, "sleep": 0.002},
     "ultra_safe": {"chunk": 32 * 1024, "sleep": 0.005},
 }
 
@@ -118,6 +118,10 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
             # Lifecycle transitions are centralized here to prevent partial-state bugs.
             target_name = os.path.basename(path)
 
+            class _ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+                daemon_threads = True
+                allow_reuse_address = True
+
             class OneFileHandler(http.server.BaseHTTPRequestHandler):
                 def do_GET(self):
                     """Serve transfer status and file download endpoints."""
@@ -211,7 +215,7 @@ def trigger_file_send_logic(device_token: str, file_path: str) -> Tuple[bool, st
             def _run():
                 """Execute an internal helper callback used by the surrounding control flow."""
                 try:
-                    with socketserver.TCPServer(("", port), OneFileHandler) as httpd:
+                    with _ThreadedTCPServer(("", port), OneFileHandler) as httpd:
                         if use_tls:
                             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                             ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)

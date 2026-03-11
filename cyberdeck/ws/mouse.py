@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -83,6 +83,17 @@ _MOUSE_LAG_DAMP_MIN = _env_float("CYBERDECK_MOUSE_LAG_DAMP_MIN", 0.35)
 _MOUSE_LAG_DAMP_MIN = max(0.1, min(1.0, _MOUSE_LAG_DAMP_MIN))
 _mouse_last_move_ts = {}
 _windows_warned_input_block = set()
+_windows_gui_block_warned = set()
+_windows_protected_cache_lock = threading.Lock()
+_windows_protected_cache: dict[str, Any] = {"ts": 0.0, "items": []}
+_WINDOWS_GUI_PROTECT_ENABLED = _IS_WINDOWS and _env_bool("CYBERDECK_BLOCK_SELF_GUI_INPUT", True)
+_WINDOWS_PROTECT_CACHE_TTL_S = max(0.05, min(2.0, _env_float("CYBERDECK_PROTECTED_GUI_CACHE_TTL_S", 0.35)))
+_WINDOWS_LAUNCHER_PID = max(0, _env_int("CYBERDECK_LAUNCHER_PID", 0))
+_WINDOWS_PROTECT_TITLE_TOKENS = tuple(
+    x.strip().lower()
+    for x in str(os.environ.get("CYBERDECK_PROTECTED_GUI_TITLES", "") or "").split(",")
+    if x.strip()
+)
 
 
 def _ws_log_enabled() -> bool:
@@ -176,6 +187,261 @@ def _warn_windows_input_block_once(token: str) -> bool:
             t,
         )
     return True
+
+
+def _windows_get_title(hwnd: int) -> str:
+    """Return top-level window title for HWND."""
+    if not _IS_WINDOWS:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        n = int(ctypes.windll.user32.GetWindowTextW(int(hwnd), buf, int(len(buf))))
+        if n <= 0:
+            return ""
+        return str(buf.value or "").strip()
+    except Exception:
+        return ""
+
+
+def _windows_get_pid(hwnd: int) -> int:
+    """Return owner PID for HWND."""
+    if not _IS_WINDOWS:
+        return 0
+    try:
+        pid = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(int(hwnd), ctypes.byref(pid))
+        return int(pid.value or 0)
+    except Exception:
+        return 0
+
+
+def _windows_get_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
+    """Return window rectangle `(left, top, right, bottom)` for HWND."""
+    if not _IS_WINDOWS:
+        return None
+    try:
+        class _Rect(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        rc = _Rect()
+        ok = bool(ctypes.windll.user32.GetWindowRect(int(hwnd), ctypes.byref(rc)))
+        if not ok:
+            return None
+        if int(rc.right) <= int(rc.left) or int(rc.bottom) <= int(rc.top):
+            return None
+        return int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
+    except Exception:
+        return None
+
+
+def _windows_protected_handles(refresh: bool = False) -> list[dict[str, Any]]:
+    """Enumerate visible launcher GUI windows that must be excluded from remote input."""
+    if not _WINDOWS_GUI_PROTECT_ENABLED:
+        return []
+    if _WINDOWS_LAUNCHER_PID <= 0 and not _WINDOWS_PROTECT_TITLE_TOKENS:
+        return []
+    now = time.monotonic()
+    with _windows_protected_cache_lock:
+        ts = float(_windows_protected_cache.get("ts", 0.0) or 0.0)
+        items = _windows_protected_cache.get("items", [])
+        if (not refresh) and items and ((now - ts) < _WINDOWS_PROTECT_CACHE_TTL_S):
+            return list(items)
+
+    out: list[dict[str, Any]] = []
+    try:
+        enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        handles: list[int] = []
+
+        @enum_proc_type
+        def _cb(hwnd: int, _lparam: int) -> bool:
+            try:
+                handles.append(int(hwnd))
+            except Exception:
+                pass
+            return True
+
+        ctypes.windll.user32.EnumWindows(_cb, 0)
+        for hwnd in handles:
+            try:
+                if not bool(ctypes.windll.user32.IsWindowVisible(int(hwnd))):
+                    continue
+                if bool(ctypes.windll.user32.IsIconic(int(hwnd))):
+                    continue
+            except Exception:
+                continue
+            pid = _windows_get_pid(hwnd)
+            title = _windows_get_title(hwnd)
+            title_l = title.lower()
+            match_pid = bool(_WINDOWS_LAUNCHER_PID > 0 and pid == _WINDOWS_LAUNCHER_PID)
+            match_title = bool(title_l and any(tok in title_l for tok in _WINDOWS_PROTECT_TITLE_TOKENS))
+            if not (match_pid or match_title):
+                continue
+            rect = _windows_get_rect(hwnd)
+            if not rect:
+                continue
+            out.append(
+                {
+                    "hwnd": int(hwnd),
+                    "pid": int(pid),
+                    "title": str(title),
+                    "left": int(rect[0]),
+                    "top": int(rect[1]),
+                    "right": int(rect[2]),
+                    "bottom": int(rect[3]),
+                }
+            )
+    except Exception:
+        out = []
+
+    with _windows_protected_cache_lock:
+        _windows_protected_cache["ts"] = now
+        _windows_protected_cache["items"] = list(out)
+    return out
+
+
+def _windows_point_hits_protected_window(x: int, y: int) -> bool:
+    """Return True when point lands inside protected launcher window bounds."""
+    if not _WINDOWS_GUI_PROTECT_ENABLED:
+        return False
+    px = int(x)
+    py = int(y)
+    for item in _windows_protected_handles():
+        if int(item["left"]) <= px < int(item["right"]) and int(item["top"]) <= py < int(item["bottom"]):
+            return True
+    return False
+
+
+def _windows_foreground_is_protected() -> bool:
+    """Return True when current foreground window belongs to protected launcher GUI."""
+    if not _WINDOWS_GUI_PROTECT_ENABLED:
+        return False
+    try:
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        hwnd = 0
+    if hwnd <= 0:
+        return False
+    protected = _windows_protected_handles()
+    if not protected:
+        return False
+    protected_hwnds = {int(x.get("hwnd") or 0) for x in protected}
+    if hwnd in protected_hwnds:
+        return True
+    try:
+        # GA_ROOT allows child/owned windows to resolve to top-level handle.
+        ga_root = 2
+        root = int(ctypes.windll.user32.GetAncestor(int(hwnd), int(ga_root)) or 0)
+    except Exception:
+        root = 0
+    return bool(root > 0 and root in protected_hwnds)
+
+
+def _pointer_xy_now(token: str) -> tuple[int, int]:
+    """Return current pointer position with virtual cursor fallback."""
+    try:
+        pos = INPUT_BACKEND.position()
+        if pos is not None:
+            return int(pos[0]), int(pos[1])
+    except Exception:
+        pass
+    x, y, _, _ = _get_virtual_cursor(token)
+    return int(x), int(y)
+
+
+async def _notify_gui_input_blocked(websocket: WebSocket, token: str, *, code: str) -> None:
+    """Send one warning per session that launcher GUI input is blocked."""
+    t = str(token or "")
+    if not t:
+        return
+    if t in _windows_gui_block_warned:
+        return
+    _windows_gui_block_warned.add(t)
+    try:
+        await _send_json(websocket, token, {"type": "warning", "code": str(code or "protected_gui_input_blocked")})
+    except Exception:
+        pass
+
+
+async def _should_block_pointer_input(
+    websocket: WebSocket,
+    token: str,
+    *,
+    target_x: Optional[int] = None,
+    target_y: Optional[int] = None,
+) -> bool:
+    """Return True when pointer action targets protected launcher GUI."""
+    if not _WINDOWS_GUI_PROTECT_ENABLED:
+        return False
+    if target_x is None or target_y is None:
+        px, py = _pointer_xy_now(token)
+    else:
+        px, py = int(target_x), int(target_y)
+    blocked = _windows_point_hits_protected_window(px, py)
+    if blocked:
+        await _notify_gui_input_blocked(websocket, token, code="launcher_gui_input_blocked")
+    return bool(blocked)
+
+
+async def _should_block_keyboard_input(websocket: WebSocket, token: str) -> bool:
+    """Return True when keyboard action would target protected launcher GUI."""
+    if not _WINDOWS_GUI_PROTECT_ENABLED:
+        return False
+    blocked = _windows_foreground_is_protected()
+    if blocked:
+        await _notify_gui_input_blocked(websocket, token, code="launcher_gui_keyboard_blocked")
+    return bool(blocked)
+
+
+def _normalize_hotkey_keys(raw_keys: list[str]) -> list[str]:
+    """Normalize hotkey token names to backend-friendly values."""
+    aliases = {
+        "control": "ctrl",
+        "ctl": "ctrl",
+        "return": "enter",
+        "escape": "esc",
+        "command": "winleft",
+        "cmd": "winleft",
+        "meta": "winleft",
+        "super": "winleft",
+        "win": "winleft",
+        "windows": "winleft",
+        "option": "alt",
+        "equals": "equal",
+        "plus": "equal",
+    }
+    out: list[str] = []
+    for key in raw_keys:
+        token = str(key or "").strip().lower()
+        if not token:
+            continue
+        out.append(aliases.get(token, token))
+    return out
+
+
+def _hotkey_variants(keys: list[str]) -> list[list[str]]:
+    """Build fallback variants for backend-specific hotkey token naming."""
+    if not keys:
+        return []
+    variants: list[list[str]] = [list(keys)]
+    alt = list(keys)
+    changed = False
+    if _IS_WINDOWS:
+        repl = {"winleft": "win", "winright": "win", "equal": "equals"}
+    else:
+        repl = {"win": "winleft", "equals": "equal"}
+    for idx, token in enumerate(list(alt)):
+        mapped = repl.get(str(token))
+        if mapped and mapped != token:
+            alt[idx] = mapped
+            changed = True
+    if changed and alt not in variants:
+        variants.append(alt)
+    return variants
 
 
 def _ws_diag_init(token: str) -> None:
@@ -677,6 +943,16 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                         rem_y = 0.0
                     _mouse_remainders[token] = (rem_x, rem_y)
 
+                cur_x, cur_y, w, h = _get_virtual_cursor(token)
+                tgt_x = max(0, min(max(0, int(w) - 1), int(cur_x) + int(mx)))
+                tgt_y = max(0, min(max(0, int(h) - 1), int(cur_y) + int(my)))
+                if await _should_block_pointer_input(
+                    websocket,
+                    token,
+                    target_x=tgt_x,
+                    target_y=tgt_y,
+                ):
+                    continue
                 await _apply_pointer_move(websocket, token, mx, my)
 
             elif t == "move_abs":
@@ -708,10 +984,19 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 with _mouse_remainders_lock:
                     _mouse_remainders[token] = (0.0, 0.0)
                     _mouse_last_move_ts[token] = time.monotonic()
+                if await _should_block_pointer_input(
+                    websocket,
+                    token,
+                    target_x=target_x,
+                    target_y=target_y,
+                ):
+                    continue
                 await _apply_pointer_move(websocket, token, move_x, move_y)
 
             elif t == "click":
                 if not get_perm(token, "perm_mouse"):
+                    continue
+                if await _should_block_pointer_input(websocket, token):
                     continue
                 clicked = False
                 try:
@@ -734,6 +1019,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "rclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if await _should_block_pointer_input(websocket, token):
+                    continue
                 clicked = False
                 try:
                     clicked = bool(INPUT_BACKEND.click("right"))
@@ -755,6 +1042,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "dclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if await _should_block_pointer_input(websocket, token):
+                    continue
                 clicked = False
                 try:
                     clicked = bool(INPUT_BACKEND.click("left", double=True))
@@ -775,6 +1064,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
 
             elif t == "scroll":
                 if not get_perm(token, "perm_mouse"):
+                    continue
+                if await _should_block_pointer_input(websocket, token):
                     continue
                 try:
                     dy = int(data.get("dy", 0))
@@ -801,6 +1092,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "drag_s":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if await _should_block_pointer_input(websocket, token):
+                    continue
                 ok = False
                 try:
                     ok = bool(INPUT_BACKEND.mouse_down("left"))
@@ -822,6 +1115,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "drag_e":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if await _should_block_pointer_input(websocket, token):
+                    continue
                 ok = False
                 try:
                     ok = bool(INPUT_BACKEND.mouse_up("left"))
@@ -842,6 +1137,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
 
             elif is_text_event_type(t):
                 if not get_perm(token, "perm_keyboard"):
+                    continue
+                if await _should_block_keyboard_input(websocket, token):
                     continue
                 text = extract_text_payload(data)
                 if text:
@@ -869,6 +1166,8 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
 
             elif t == "key":
                 if not get_perm(token, "perm_keyboard"):
+                    continue
+                if await _should_block_keyboard_input(websocket, token):
                     continue
                 val = str(data.get("key", "")).lower()
                 if _IS_WINDOWS:
@@ -898,10 +1197,21 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "hotkey":
                 if not get_perm(token, "perm_keyboard"):
                     continue
-                keys = data.get("keys") or []
-                if isinstance(keys, list) and keys:
-                    keys = [str(k).lower() for k in keys]
-                    INPUT_BACKEND.hotkey(*keys)
+                if await _should_block_keyboard_input(websocket, token):
+                    continue
+                raw = data.get("keys") or []
+                if isinstance(raw, list) and raw:
+                    keys = _normalize_hotkey_keys([str(k) for k in raw])
+                    sent = False
+                    for variant in _hotkey_variants(keys):
+                        try:
+                            sent = bool(INPUT_BACKEND.hotkey(*variant))
+                        except Exception:
+                            sent = False
+                        if sent:
+                            break
+                    if (not sent) and _ws_log_enabled():
+                        log.warning("WS hotkey failed: token=%s keys=%s", token, keys)
 
             elif t == "media":
                 if not get_perm(token, "perm_keyboard"):
@@ -918,22 +1228,32 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 }
                 key = media_map.get(act)
                 if key:
-                    INPUT_BACKEND.press(key)
+                    try:
+                        INPUT_BACKEND.press(key)
+                    except Exception:
+                        if _ws_log_enabled():
+                            log.warning("WS media key failed: token=%s action=%s", token, act)
 
             elif t == "shortcut":
                 if not get_perm(token, "perm_keyboard"):
                     continue
+                if await _should_block_keyboard_input(websocket, token):
+                    continue
                 act = str(data.get("action", "")).lower()
-                if act == "copy":
-                    INPUT_BACKEND.hotkey("ctrl", "c")
-                elif act == "paste":
-                    INPUT_BACKEND.hotkey("ctrl", "v")
-                elif act == "cut":
-                    INPUT_BACKEND.hotkey("ctrl", "x")
-                elif act == "undo":
-                    INPUT_BACKEND.hotkey("ctrl", "z")
-                elif act == "redo":
-                    INPUT_BACKEND.hotkey("ctrl", "y")
+                try:
+                    if act == "copy":
+                        INPUT_BACKEND.hotkey("ctrl", "c")
+                    elif act == "paste":
+                        INPUT_BACKEND.hotkey("ctrl", "v")
+                    elif act == "cut":
+                        INPUT_BACKEND.hotkey("ctrl", "x")
+                    elif act == "undo":
+                        INPUT_BACKEND.hotkey("ctrl", "z")
+                    elif act == "redo":
+                        INPUT_BACKEND.hotkey("ctrl", "y")
+                except Exception:
+                    if _ws_log_enabled():
+                        log.warning("WS shortcut failed: token=%s action=%s", token, act)
             elif t:
                 if _ws_log_enabled():
                     log.info("WS unknown event: token=%s type=%s", token, t)
@@ -966,6 +1286,10 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             pass
         try:
             _windows_warned_input_block.discard(str(token or ""))
+        except Exception:
+            pass
+        try:
+            _windows_gui_block_warned.discard(str(token or ""))
         except Exception:
             pass
         try:

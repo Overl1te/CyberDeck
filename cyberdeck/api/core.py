@@ -1,5 +1,6 @@
 ﻿import hashlib
 import os
+import re
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -16,6 +17,7 @@ from ..logging_config import log
 from ..pairing import pairing_meta, rotate_pairing_code
 from ..pin_limiter import pin_limiter
 from ..protocol import protocol_payload
+from .system import get_volume_state_payload
 
 
 router = APIRouter()
@@ -101,9 +103,23 @@ class HandshakeRequest(BaseModel):
     capabilities: Optional[Dict[str, Any]] = None
 
 
+def _validate_handshake_payload(req: HandshakeRequest) -> None:
+    """Validate handshake payload fields and fail with explicit 4xx errors."""
+    code = str(getattr(req, "code", "") or "").strip()
+    device_id = str(getattr(req, "device_id", "") or "").strip()
+    device_name = str(getattr(req, "device_name", "") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{3,16}", code):
+        raise HTTPException(400, detail="invalid_code")
+    if len(device_id) < 3 or len(device_id) > 128:
+        raise HTTPException(400, detail="validation_error")
+    if len(device_name) < 1 or len(device_name) > 128:
+        raise HTTPException(400, detail="validation_error")
+
+
 @router.post("/api/handshake")
 def handshake(req: HandshakeRequest, request: Request):
     """Return the public handshake payload for new clients."""
+    _validate_handshake_payload(req)
     ip = request.client.host if request.client else "unknown"
 
     try:
@@ -200,9 +216,13 @@ def get_protocol():
 @router.get("/api/stats")
 def get_stats(token: str = TokenDep):
     """Return lightweight host metrics for authenticated clients."""
+    volume_state = get_volume_state_payload()
     return {
         "cpu": _safe_cpu_percent(),
         "ram": _safe_ram_percent(),
+        "volume_percent": volume_state.get("volume_percent"),
+        "volume_muted": volume_state.get("muted"),
+        "volume_supported": bool(volume_state.get("supported", False)),
         **protocol_payload(),
     }
 

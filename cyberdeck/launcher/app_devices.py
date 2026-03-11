@@ -306,8 +306,10 @@ class AppDevicesMixin:
             try:
                 resp = self.api_client.get_qr_payload(timeout=1)
                 if resp.status_code != 200:
-                    raise RuntimeError(f"http {resp.status_code}")
-                data = resp.json() or {}
+                    raise RuntimeError(self.api_client.describe_api_error(resp))
+                data = self.api_client.json_dict(resp)
+                if not data:
+                    raise RuntimeError("invalid qr payload json")
                 payload = data.get("payload") or {}
 
                 mode = str(self.settings.get("qr_mode", DEFAULT_SETTINGS["qr_mode"]) or DEFAULT_SETTINGS["qr_mode"]).strip().lower()
@@ -352,7 +354,8 @@ class AppDevicesMixin:
                 self._qr_last_fetch_ts = time.time()
                 self._qr_next_fetch_ts = self._qr_last_fetch_ts + 30.0
             except Exception as e:
-                self.append_log(f"[launcher] qr error: {e}\n")
+                msg = self.api_client.describe_exception(e)
+                self.append_log(f"[launcher] qr error: {msg}\n")
                 # After a failed fetch retry quickly, do not lock QR updates for 30s.
                 self._qr_next_fetch_ts = time.time() + 2.0
                 self.ui_call(lambda: self._set_qr_placeholder(self.tr("qr_error")))
@@ -481,10 +484,13 @@ class AppDevicesMixin:
         def _bg() -> None:
             """Run device disconnect request."""
             try:
-                self.api_client.device_disconnect(token, timeout=2)
+                resp = self.api_client.device_disconnect(token, timeout=2)
+                if int(getattr(resp, "status_code", 0) or 0) != 200:
+                    raise RuntimeError(self.api_client.describe_api_error(resp))
                 self.ui_call(lambda: self.show_toast(self.tr("disconnect"), level="success"))
             except Exception as e:
-                self.ui_call(lambda e=e: self.show_toast(self.tr("error_prefix", msg=e), level="error"))
+                msg = self.api_client.describe_exception(e)
+                self.ui_call(lambda msg=msg: self.show_toast(self.tr("error_prefix", msg=msg), level="error"))
             finally:
                 self.ui_call(lambda: self.request_sync(150))
 
@@ -507,13 +513,16 @@ class AppDevicesMixin:
         def _bg() -> None:
             """Run device delete request."""
             try:
-                self.api_client.device_delete(token, timeout=3)
+                resp = self.api_client.device_delete(token, timeout=3)
+                if int(getattr(resp, "status_code", 0) or 0) != 200:
+                    raise RuntimeError(self.api_client.describe_api_error(resp))
                 if self.selected_token == token:
                     self.selected_token = None
                     self.selected_device_name = None
                 self.ui_call(lambda: self.show_toast(self.tr("delete"), level="success"))
             except Exception as e:
-                self.ui_call(lambda e=e: self.show_toast(self.tr("error_prefix", msg=e), level="error"))
+                msg = self.api_client.describe_exception(e)
+                self.ui_call(lambda msg=msg: self.show_toast(self.tr("error_prefix", msg=msg), level="error"))
             finally:
                 self.ui_call(lambda: self.request_sync(150))
 
@@ -655,23 +664,25 @@ class AppDevicesMixin:
                 if resp.status_code == 200:
                     self.ui_call(lambda: self._mark_device_settings_saved())
                 else:
+                    msg = self.api_client.describe_api_error(resp, default=self.tr("save_error"))
                     self.ui_call(
-                        lambda: self._set_device_settings_dirty(
+                        lambda msg=msg: self._set_device_settings_dirty(
                             True,
-                            status_text=self.tr("save_error"),
+                            status_text=self.tr("error_prefix", msg=msg),
                             status_color=COLOR_FAIL,
                         )
                     )
-                    self.ui_call(lambda: self.show_toast(self.tr("toast_save_failed"), level="error"))
+                    self.ui_call(lambda msg=msg: self.show_toast(self.tr("toast_saving_error", msg=msg), level="error"))
             except Exception as e:
+                msg = self.api_client.describe_exception(e)
                 self.ui_call(
-                    lambda e=e: self._set_device_settings_dirty(
+                    lambda msg=msg: self._set_device_settings_dirty(
                         True,
-                        status_text=self.tr("error_prefix", msg=e),
+                        status_text=self.tr("error_prefix", msg=msg),
                         status_color=COLOR_FAIL,
                     )
                 )
-                self.ui_call(lambda e=e: self.show_toast(self.tr("toast_saving_error", msg=e), level="error"))
+                self.ui_call(lambda msg=msg: self.show_toast(self.tr("toast_saving_error", msg=msg), level="error"))
             finally:
                 self.ui_call(lambda: self.request_sync(150))
 
@@ -719,20 +730,23 @@ class AppDevicesMixin:
                 resp = self.api_client.trigger_file(payload, timeout=4)
 
                 if resp.status_code == 200:
-                    data = resp.json()
+                    data = self.api_client.json_dict(resp)
                     if data.get("ok"):
                         self.ui_call(lambda: self.lbl_status.configure(text=self.tr("transfer_started"), text_color=COLOR_ACCENT))
                         self.ui_call(lambda: self.show_toast(self.tr("toast_transfer_started"), level="success"))
                     else:
-                        msg = self._translate_transfer_msg(data.get("msg"))
+                        fallback = self.api_client.describe_api_error(resp, default=self.tr("api_error"))
+                        msg = self._translate_transfer_msg(data.get("msg") or fallback)
                         self.ui_call(lambda: self.lbl_status.configure(text=self.tr("error_prefix", msg=msg), text_color=COLOR_FAIL))
                         self.ui_call(lambda: self.show_toast(self.tr("toast_transfer_error", msg=msg), level="error"))
                 else:
-                    self.ui_call(lambda: self.lbl_status.configure(text=self.tr("api_error"), text_color=COLOR_FAIL))
-                    self.ui_call(lambda: self.show_toast(self.tr("toast_api_error_transfer"), level="error"))
+                    msg = self.api_client.describe_api_error(resp, default=self.tr("api_error"))
+                    self.ui_call(lambda msg=msg: self.lbl_status.configure(text=self.tr("error_prefix", msg=msg), text_color=COLOR_FAIL))
+                    self.ui_call(lambda msg=msg: self.show_toast(self.tr("toast_transfer_error", msg=msg), level="error"))
             except Exception as e:
-                self.ui_call(lambda e=e: self.lbl_status.configure(text=self.tr("error_prefix", msg=e), text_color=COLOR_FAIL))
-                self.ui_call(lambda e=e: self.show_toast(self.tr("toast_transfer_error", msg=e), level="error"))
+                msg = self.api_client.describe_exception(e)
+                self.ui_call(lambda msg=msg: self.lbl_status.configure(text=self.tr("error_prefix", msg=msg), text_color=COLOR_FAIL))
+                self.ui_call(lambda msg=msg: self.show_toast(self.tr("toast_transfer_error", msg=msg), level="error"))
 
         threading.Thread(target=_bg_send, daemon=True).start()
 
@@ -769,8 +783,8 @@ class AppDevicesMixin:
                 reason = "launcher_lock" if target else "launcher_unlock"
                 resp = self.api_client.set_input_lock(target, reason=reason, actor="launcher", timeout=2.0)
                 if int(getattr(resp, "status_code", 0) or 0) != 200:
-                    raise RuntimeError(f"http {getattr(resp, 'status_code', '?')}")
-                body = resp.json() if hasattr(resp, "json") else {}
+                    raise RuntimeError(self.api_client.describe_api_error(resp))
+                body = self.api_client.json_dict(resp)
                 sec = body.get("security") if isinstance(body, dict) else {}
                 if isinstance(sec, dict):
                     self.security_state = {
@@ -782,7 +796,8 @@ class AppDevicesMixin:
                 msg = self.tr("input_locked") if target else self.tr("input_unlocked")
                 self.ui_call(lambda msg=msg: self.show_toast(msg, level="warning" if target else "success"))
             except Exception as e:
-                self.ui_call(lambda e=e: self.show_toast(self.tr("input_lock_error", msg=e), level="error"))
+                msg = self.api_client.describe_exception(e)
+                self.ui_call(lambda msg=msg: self.show_toast(self.tr("input_lock_error", msg=msg), level="error"))
             finally:
                 self.ui_call(lambda: self.request_sync(150))
 
@@ -807,8 +822,8 @@ class AppDevicesMixin:
             try:
                 resp = self.api_client.panic_mode(keep_token="", lock_input=True, reason="launcher_panic", timeout=4.0)
                 if int(getattr(resp, "status_code", 0) or 0) != 200:
-                    raise RuntimeError(f"http {getattr(resp, 'status_code', '?')}")
-                body = resp.json() if hasattr(resp, "json") else {}
+                    raise RuntimeError(self.api_client.describe_api_error(resp))
+                body = self.api_client.json_dict(resp)
                 revoked = int((body or {}).get("revoked", 0) or 0)
                 sec = (body or {}).get("security") if isinstance((body or {}).get("security"), dict) else {}
                 if isinstance(sec, dict):
@@ -824,7 +839,8 @@ class AppDevicesMixin:
                     )
                 )
             except Exception as e:
-                self.ui_call(lambda e=e: self.show_toast(self.tr("panic_mode_error", msg=e), level="error"))
+                msg = self.api_client.describe_exception(e)
+                self.ui_call(lambda msg=msg: self.show_toast(self.tr("panic_mode_error", msg=msg), level="error"))
             finally:
                 self.ui_call(lambda: self.request_sync(150))
 

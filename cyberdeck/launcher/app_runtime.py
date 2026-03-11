@@ -558,6 +558,7 @@ class AppRuntimeMixin:
             win.bind("<Escape>", lambda _e: _decide(False))
             win.bind("<Return>", lambda _e: _decide(True))
             win.protocol("WM_DELETE_WINDOW", lambda: _decide(False))
+            self._schedule_capture_exclusion_refresh(40)
             return True
         except Exception:
             self._close_approval_dialog()
@@ -632,6 +633,7 @@ class AppRuntimeMixin:
             self.deiconify()
             self.lift()
             self._apply_topmost(raise_window=False)
+            self._schedule_capture_exclusion_refresh(40)
             self.focus_force()
         except Exception:
             pass
@@ -654,6 +656,10 @@ class AppRuntimeMixin:
                 self.focus_force()
             except Exception:
                 pass
+        try:
+            self._schedule_capture_exclusion_refresh(40)
+        except Exception:
+            pass
 
     def preview_topmost_toggle(self) -> Any:
         """Preview topmost toggle."""
@@ -697,7 +703,9 @@ class AppRuntimeMixin:
             try:
                 resp = self.api_client.get_info(timeout=1)
                 if resp.status_code == 200:
-                    data = resp.json()
+                    data = self.api_client.json_dict(resp)
+                    if not data:
+                        raise RuntimeError("invalid /info json")
                     self.server_online = True
                     self.ui_call(self._boot_mark_ready)
                     if not was_online:
@@ -750,7 +758,9 @@ class AppRuntimeMixin:
                         try:
                             updates_resp = self.api_client.get_updates(timeout=2.5, force_refresh=False)
                             if updates_resp.status_code == 200:
-                                self.update_state = updates_resp.json()
+                                updates_payload = self.api_client.json_dict(updates_resp)
+                                if updates_payload:
+                                    self.update_state = updates_payload
                                 self._next_update_pull_ts = now_mono + 300.0
                             else:
                                 self._next_update_pull_ts = now_mono + 60.0
@@ -760,7 +770,7 @@ class AppRuntimeMixin:
                     try:
                         events_resp = self.api_client.get_events(since_id=self._last_local_event_id, limit=80, timeout=1.3)
                         if events_resp.status_code == 200:
-                            payload = events_resp.json() or {}
+                            payload = self.api_client.json_dict(events_resp)
                             events = payload.get("events") if isinstance(payload.get("events"), list) else []
                             try:
                                 latest_id = int(payload.get("latest_id") or self._last_local_event_id)
@@ -780,7 +790,11 @@ class AppRuntimeMixin:
                 else:
                     self.server_online = False
                     self.ui_call(self._boot_mark_waiting)
-            except Exception:
+            except Exception as e:
+                try:
+                    self.append_log(f"[launcher] sync error: {self.api_client.describe_exception(e)}\n")
+                except Exception:
+                    pass
                 self.server_online = False
                 self.ui_call(self._boot_mark_waiting)
             finally:

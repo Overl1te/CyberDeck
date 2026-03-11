@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from cyberdeck import config
 from cyberdeck import context
 from cyberdeck.api.core import router as core_router
 from cyberdeck.video import router as video_router
+import cyberdeck.video as video
 
 
 class ApiBehaviorTests(unittest.TestCase):
@@ -259,6 +261,67 @@ class ApiBehaviorTests(unittest.TestCase):
             r = self.client.get("/audio_stream", headers=self._auth_headers(token))
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json().get("status"), "ok")
+
+    def test_stream_offer_applies_recent_feedback_tuning(self):
+        """Validate scenario: recent critical feedback should tune stream offer parameters down."""
+        token = self._token()
+        with patch.object(video, "_capture_input_available", return_value=True), patch.object(
+            video, "_ffmpeg_wayland_capture_reliable", return_value=True
+        ), patch.object(
+            video,
+            "_codec_encoder_available",
+            side_effect=lambda codec: str(codec).lower() in ("h264", "h265"),
+        ), patch.object(
+            video,
+            "_mjpeg_backend_status",
+            return_value={"native": True, "ffmpeg": False, "gstreamer": False, "screenshot": False},
+        ), patch.object(
+            video, "_mjpeg_backend_order", return_value=["native"]
+        ), patch.object(
+            video._WIDTH_STABILIZER, "decide", side_effect=lambda _token, requested: int(requested)
+        ):
+            feedback = self.client.post(
+                "/api/stream_feedback",
+                params={
+                    "rtt_ms": 460,
+                    "jitter_ms": 140,
+                    "drop_ratio": 0.12,
+                    "decode_fps": 9,
+                },
+                headers=self._auth_headers(token),
+            )
+            self.assertEqual(feedback.status_code, 200, feedback.text)
+            self.assertEqual((feedback.json().get("network_profile") or "").lower(), "critical")
+
+            r = self.client.get(
+                "/api/stream_offer",
+                params={
+                    "monitor": 1,
+                    "fps": 60,
+                    "max_w": 1920,
+                    "quality": 70,
+                    "bitrate_k": 4800,
+                    "low_latency": 0,
+                },
+                headers=self._auth_headers(token),
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        tuning = body.get("feedback") or {}
+        effective = tuning.get("effective") or {}
+        self.assertEqual((tuning.get("profile") or "").lower(), "critical")
+        self.assertTrue(bool(tuning.get("applied")))
+        self.assertLess(int(effective.get("fps") or 0), 60)
+        self.assertLess(int(effective.get("max_w") or 0), 1920)
+        self.assertLess(int(effective.get("quality") or 0), 70)
+        self.assertLess(int(effective.get("bitrate_k") or 0), 4800)
+        self.assertTrue(bool(effective.get("low_latency")))
+
+        candidates = body.get("candidates") or []
+        self.assertTrue(candidates)
+        first_url = str(candidates[0].get("url") or "")
+        parsed = parse_qs(urlparse(first_url).query)
+        self.assertEqual(parsed.get("low_latency"), ["1"])
 
 
 if __name__ == "__main__":

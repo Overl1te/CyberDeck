@@ -67,9 +67,152 @@ class AppNavigationMixin:
         """Build and attach widgets for the Settings tab."""
         setup_settings_ui(self, self._ui_theme())
 
-    def save_settings_action(self) -> Any:
+    def _inline_text(self, ru_text: str, en_text: str) -> str:
+        """Return short inline text in active language without touching i18n payload."""
+        lang = str(self.settings.get("language", "ru") or "ru").strip().lower()
+        return str(en_text if lang == "en" else ru_text)
+
+    def queue_settings_autosave(self, delay_ms: int = 450) -> Any:
+        """Debounce automatic settings save requests from UI controls."""
+        if bool(getattr(self, "_settings_ui_initializing", False)):
+            return
+        try:
+            if getattr(self, "_settings_autosave_job", None) is not None:
+                self.after_cancel(self._settings_autosave_job)
+        except Exception:
+            pass
+        self._settings_autosave_job = None
+        try:
+            if hasattr(self, "lbl_settings_status"):
+                self.lbl_settings_status.configure(
+                    text=self._inline_text("Автосохранение...", "Autosaving..."),
+                    text_color=COLOR_TEXT_DIM,
+                )
+        except Exception:
+            pass
+
+        def _run() -> None:
+            """Execute delayed auto-save on UI thread."""
+            self._settings_autosave_job = None
+            self.save_settings_action(auto=True)
+
+        try:
+            self._settings_autosave_job = self.after(max(80, int(delay_ms)), _run)
+        except Exception:
+            self._settings_autosave_job = None
+
+    def _set_settings_status(self, text: str, color: str = None) -> None:
+        """Update settings status label if it exists."""
+        if not hasattr(self, "lbl_settings_status"):
+            return
+        try:
+            self.lbl_settings_status.configure(
+                text=str(text or ""),
+                text_color=color or COLOR_TEXT_DIM,
+            )
+        except Exception:
+            pass
+
+    def queue_server_restart(self, delay_ms: int = 1200) -> Any:
+        """Debounce server restart requests triggered by settings changes."""
+        self._server_restart_dirty = True
+        try:
+            if getattr(self, "_server_restart_job", None) is not None:
+                self.after_cancel(self._server_restart_job)
+        except Exception:
+            pass
+        self._server_restart_job = None
+        self._set_settings_status(
+            self._inline_text(
+                "Настройки сохранены. Перезапуск сервера...",
+                "Settings saved. Restarting server...",
+            ),
+            COLOR_WARN,
+        )
+
+        def _run() -> None:
+            """Run delayed server restart once after burst of settings changes."""
+            self._server_restart_job = None
+            if not bool(getattr(self, "_server_restart_dirty", False)):
+                return
+            try:
+                self.restart_server()
+            finally:
+                self._server_restart_dirty = False
+            self._set_settings_status(
+                self._inline_text("Сервер перезапущен", "Server restarted"),
+                COLOR_ACCENT,
+            )
+
+        try:
+            self._server_restart_job = self.after(max(120, int(delay_ms)), _run)
+        except Exception:
+            self._server_restart_job = None
+
+    def _help_content(self) -> str:
+        """Return user-readable help body for current locale."""
+        if str(self.settings.get("language", "ru") or "ru").strip().lower() == "en":
+            return (
+                f"CyberDeck Launcher {LAUNCHER_VERSION}\n\n"
+                "What this app does\n"
+                "- Starts and monitors local CyberDeck server\n"
+                "- Shows pairing PIN and QR for mobile connection\n"
+                "- Manages trusted devices and permissions\n\n"
+                "Quick start\n"
+                "1. Open Home and make sure server status is Online.\n"
+                "2. Scan QR from mobile app and confirm the new device.\n"
+                "3. In Devices tab, choose permissions for this device.\n\n"
+                "Important settings\n"
+                "- TLS is enabled by default.\n"
+                "- If TLS certificate/key fields are empty, launcher generates a self-signed certificate automatically.\n"
+                "- Server settings are applied and restarted automatically when required.\n\n"
+                "If connection fails\n"
+                "- Restart server from Home.\n"
+                "- Enable debug logs in Settings.\n"
+                "- Run launcher with `-c` to mirror logs to console.\n"
+                "- Open `docs/ERROR_MATRIX.md` for error codes and fixes."
+            )
+        return (
+            f"CyberDeck Launcher {LAUNCHER_VERSION}\n\n"
+            "Что делает лаунчер\n"
+            "- Запускает и контролирует локальный сервер CyberDeck\n"
+            "- Показывает PIN и QR для подключения телефона\n"
+            "- Управляет доверенными устройствами и их правами\n\n"
+            "Быстрый старт\n"
+            "1. Откройте «Сводка» и убедитесь, что сервер в статусе «Онлайн».\n"
+            "2. Отсканируйте QR в мобильном приложении и подтвердите новое устройство.\n"
+            "3. На вкладке «Устройства» задайте права для этого устройства.\n\n"
+            "Важные настройки\n"
+            "- TLS включен по умолчанию.\n"
+            "- Если поля сертификата/ключа TLS пустые, лаунчер автоматически создаст самоподписанный сертификат.\n"
+            "- Серверные настройки применяются автоматически, при необходимости сервер перезапускается.\n\n"
+            "Если подключение не работает\n"
+            "- Перезапустите сервер на вкладке «Сводка».\n"
+            "- Включите «Режим отладки логов сервера» в настройках.\n"
+            "- Запустите лаунчер с флагом `-c`, чтобы видеть логи в консоли.\n"
+            "- Откройте `docs/ERROR_MATRIX.md`: там список кодов ошибок и действия по исправлению."
+        )
+
+    def save_settings_action(self, auto: bool = False) -> Any:
         """Save settings action."""
         # Write-path helpers should keep side effects minimal and well-scoped.
+        if getattr(self, "_settings_autosave_job", None) is not None:
+            try:
+                self.after_cancel(self._settings_autosave_job)
+            except Exception:
+                pass
+            self._settings_autosave_job = None
+
+        def _show_settings_error(err_text: str) -> None:
+            """Show save validation error in user-friendly way."""
+            if auto:
+                self._set_settings_status(err_text, COLOR_FAIL)
+                return
+            try:
+                messagebox.showerror(self.tr("app_name"), err_text)
+            except Exception:
+                pass
+
         restart_keys = (
             "debug",
             "preferred_port",
@@ -87,7 +230,6 @@ class AppNavigationMixin:
             "qr_mode",
         )
         app_restart_keys = (
-            "allow_query_token",
             "pairing_single_use",
             "ignore_vpn",
             "upload_max_bytes",
@@ -143,8 +285,6 @@ class AppNavigationMixin:
         if hasattr(self, "opt_language"):
             self.settings["language"] = normalize_language(self.language_code_from_label(self.opt_language.get()))
 
-        if hasattr(self, "sw_allow_query_token"):
-            self.app_config["allow_query_token"] = bool(self.sw_allow_query_token.get())
         if hasattr(self, "sw_pairing_single_use"):
             self.app_config["pairing_single_use"] = bool(self.sw_pairing_single_use.get())
         if hasattr(self, "sw_ignore_vpn"):
@@ -165,35 +305,82 @@ class AppNavigationMixin:
             self.app_config["device_approval_required"] = bool(self.sw_device_approval_required.get())
         self._normalize_app_config()
 
-        if self.settings["tls_enabled"] and (not self.settings["tls_cert_path"] or not self.settings["tls_key_path"]):
-            try:
-                self.tls_enabled = True
-                self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
-                self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
-                self._ensure_tls_material()
-                self.settings["tls_enabled"] = bool(self.tls_enabled)
-                self.settings["tls_cert_path"] = str(self.tls_cert_path or "")
-                self.settings["tls_key_path"] = str(self.tls_key_path or "")
-            except Exception:
-                pass
-            if self.settings["tls_enabled"] and self.settings["tls_cert_path"] and self.settings["tls_key_path"]:
-                try:
-                    self.ent_tls_cert.delete(0, "end")
-                    self.ent_tls_cert.insert(0, self.settings["tls_cert_path"])
-                    self.ent_tls_key.delete(0, "end")
-                    self.ent_tls_key.insert(0, self.settings["tls_key_path"])
-                except Exception:
-                    pass
-            else:
-                try:
-                    messagebox.showerror(self.tr("app_name"), self.tr("tls_invalid"))
-                except Exception:
-                    pass
+        tls_auto_generated = False
+        if self.settings["tls_enabled"]:
+            cert_path = str(self.settings.get("tls_cert_path") or "").strip()
+            key_path = str(self.settings.get("tls_key_path") or "").strip()
+            cert_empty = cert_path == ""
+            key_empty = key_path == ""
+            if cert_empty != key_empty:
+                err = self._inline_text(
+                    "Для TLS укажите и сертификат, и ключ, либо оставьте оба поля пустыми для автогенерации.",
+                    "For TLS, provide both certificate and key, or keep both fields empty for auto-generation.",
+                )
+                _show_settings_error(err)
                 self.settings["tls_enabled"] = False
                 try:
                     self.sw_tls.deselect()
+                    if hasattr(self, "_refresh_tls_fields_visibility"):
+                        self._refresh_tls_fields_visibility()
                 except Exception:
                     pass
+            elif cert_empty and key_empty:
+                before_cert = cert_path
+                before_key = key_path
+                try:
+                    self.tls_enabled = True
+                    self.tls_cert_path = before_cert
+                    self.tls_key_path = before_key
+                    self._ensure_tls_material()
+                    self.settings["tls_enabled"] = bool(self.tls_enabled)
+                    self.settings["tls_cert_path"] = str(self.tls_cert_path or "")
+                    self.settings["tls_key_path"] = str(self.tls_key_path or "")
+                    tls_auto_generated = bool(self.settings["tls_cert_path"] and self.settings["tls_key_path"])
+                except Exception:
+                    pass
+                if not tls_auto_generated:
+                    err = self._inline_text(
+                        "Не удалось сгенерировать TLS сертификат автоматически. TLS отключен.",
+                        "Failed to generate TLS certificate automatically. TLS was disabled.",
+                    )
+                    _show_settings_error(err)
+                    try:
+                        self.sw_tls.deselect()
+                        if hasattr(self, "_refresh_tls_fields_visibility"):
+                            self._refresh_tls_fields_visibility()
+                    except Exception:
+                        pass
+            else:
+                cert_exists = os.path.exists(cert_path)
+                key_exists = os.path.exists(key_path)
+                if (not cert_exists) or (not key_exists):
+                    missing = []
+                    if not cert_exists:
+                        missing.append(cert_path)
+                    if not key_exists:
+                        missing.append(key_path)
+                    missing_msg = ", ".join([str(x) for x in missing if str(x).strip()]) or "TLS files"
+                    err = self._inline_text(
+                        f"TLS файлы не найдены: {missing_msg}",
+                        f"TLS files were not found: {missing_msg}",
+                    )
+                    _show_settings_error(err)
+                    self.settings["tls_enabled"] = False
+                    try:
+                        self.sw_tls.deselect()
+                        if hasattr(self, "_refresh_tls_fields_visibility"):
+                            self._refresh_tls_fields_visibility()
+                    except Exception:
+                        pass
+
+        if tls_auto_generated:
+            try:
+                self.ent_tls_cert.delete(0, "end")
+                self.ent_tls_cert.insert(0, str(self.settings.get("tls_cert_path") or ""))
+                self.ent_tls_key.delete(0, "end")
+                self.ent_tls_key.insert(0, str(self.settings.get("tls_key_path") or ""))
+            except Exception:
+                pass
 
         self.start_in_tray = bool(self.settings.get("start_in_tray"))
         self.show_on_start = bool(self.settings.get("show_on_start", True))
@@ -217,7 +404,16 @@ class AppNavigationMixin:
         if language_changed:
             self._rebuild_ui_for_language()
         if hasattr(self, "lbl_settings_status"):
-            self.lbl_settings_status.configure(text=self.tr("settings_applied"), text_color=COLOR_ACCENT)
+            if tls_auto_generated:
+                text = self._inline_text(
+                    "Настройки сохранены. Сгенерирован самоподписанный TLS сертификат.",
+                    "Settings saved. Self-signed TLS certificate generated.",
+                )
+            elif auto:
+                text = self._inline_text("Сохранено автоматически", "Saved automatically")
+            else:
+                text = self.tr("settings_applied")
+            self.lbl_settings_status.configure(text=text, text_color=COLOR_ACCENT)
 
         restart_server_needed = False
         try:
@@ -228,7 +424,9 @@ class AppNavigationMixin:
         except Exception:
             pass
         if restart_server_needed:
-            self.restart_server()
+            self._server_restart_dirty = True
+        if bool(getattr(self, "_server_restart_dirty", False)):
+            self.queue_server_restart(delay_ms=(1400 if auto else 350))
 
         launcher_restart_needed = False
         try:
@@ -344,12 +542,13 @@ class AppNavigationMixin:
                 if existing.winfo_exists():
                     existing.deiconify()
                     existing.lift()
+                    self._schedule_capture_exclusion_refresh(40)
                     existing.focus_force()
                     return
             except Exception:
                 pass
 
-        text = str(self.tr("help_text", version=LAUNCHER_VERSION) or "").strip()
+        text = str(self._help_content() or "").strip()
         commands_text = str(self.tr("help_commands") or "").strip()
         try:
             win = ctk.CTkToplevel(self)
@@ -360,6 +559,7 @@ class AppNavigationMixin:
             win.configure(fg_color=COLOR_BG)
             win.transient(self)
             win.protocol("WM_DELETE_WINDOW", self._close_help_window)
+            self._schedule_capture_exclusion_refresh(40)
 
             try:
                 self.update_idletasks()
@@ -538,7 +738,17 @@ class AppNavigationMixin:
     def open_support_page(self) -> Any:
         """Open or close resources required to open support page."""
         try:
-            if not webbrowser.open(SUPPORT_URL, new=2):
+            urls = [str(SUPPORT_URL or "").strip(), *[str(x or "").strip() for x in SUPPORT_URLS]]
+            opened = False
+            seen: set[str] = set()
+            for url in urls:
+                if (not url) or (url in seen):
+                    continue
+                seen.add(url)
+                if webbrowser.open(url, new=2):
+                    opened = True
+                    break
+            if not opened:
                 raise RuntimeError("browser_open_failed")
         except Exception:
             try:

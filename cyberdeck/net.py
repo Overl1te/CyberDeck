@@ -26,7 +26,23 @@ _VPN_IFACE_HINTS = (
     "warp",
 )
 
-_NET_IFACE_HINTS = ("ethernet", "wifi", "wi-fi", "wlan", "eth", "en")
+_VIRTUAL_IFACE_HINTS = (
+    "docker",
+    "veth",
+    "virbr",
+    "vmnet",
+    "virtual",
+    "hyper-v",
+    "host-only",
+    "default switch",
+    "loopback",
+    "wsl",
+    "bridge",
+    "br-",
+)
+
+_LAN_IFACE_HINTS = ("ethernet", "wifi", "wi-fi", "wlan", "lan")
+_LAN_PREFIX_HINTS = ("eth", "en", "wl", "wlan")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -62,6 +78,24 @@ def _iface_has_hint(name: str, hints: tuple[str, ...]) -> bool:
     return any(h in val for h in hints)
 
 
+def _iface_is_virtual(name: str) -> bool:
+    """Return True when interface looks virtual/host-only/container-related."""
+    return _iface_has_hint(name, _VIRTUAL_IFACE_HINTS)
+
+
+def _iface_is_lan_like(name: str) -> bool:
+    """Return True when interface name looks like physical LAN/Wi-Fi."""
+    val = str(name or "").strip().lower()
+    if not val:
+        return False
+    if _iface_has_hint(val, _LAN_IFACE_HINTS):
+        return True
+    for prefix in _LAN_PREFIX_HINTS:
+        if val.startswith(prefix):
+            return True
+    return False
+
+
 def _score_ipv4_candidate(ip: str, iface_name: str) -> int:
     """Return quality score for IPv4 candidate; negative means unusable."""
     try:
@@ -74,16 +108,24 @@ def _score_ipv4_candidate(ip: str, iface_name: str) -> int:
         return -1
     if _iface_has_hint(iface_name, _VPN_IFACE_HINTS):
         return -1
+    if _iface_is_virtual(iface_name):
+        return -1
 
-    score = 50
+    score = 40
     if addr.is_private:
         score += 60
-    if _iface_has_hint(iface_name, _NET_IFACE_HINTS):
-        score += 12
+    if _iface_is_lan_like(iface_name):
+        score += 24
+    # 100.64.0.0/10 is frequently used by VPN overlays; de-prioritize.
+    try:
+        if ipaddress.ip_address(ip) in ipaddress.ip_network("100.64.0.0/10"):
+            score -= 20
+    except Exception:
+        pass
     return score
 
 
-def _iter_non_vpn_ipv4() -> Iterator[str]:
+def _iter_non_vpn_ipv4(*, preferred_ip: str = "") -> Iterator[str]:
     """Yield IPv4 addresses from active non-VPN interfaces ordered by score."""
     try:
         by_iface = psutil.net_if_addrs() or {}
@@ -107,6 +149,14 @@ def _iter_non_vpn_ipv4() -> Iterator[str]:
                 continue
             score = _score_ipv4_candidate(ip, str(iface_name or ""))
             if score >= 0:
+                try:
+                    speed = int(getattr(st, "speed", 0) or 0)
+                    if speed > 0:
+                        score += 6
+                except Exception:
+                    pass
+                if preferred_ip and ip == preferred_ip:
+                    score += 18
                 ranked.append((score, ip))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -124,7 +174,7 @@ def get_local_ip() -> str:
     if not _env_bool("CYBERDECK_IGNORE_VPN", False):
         return route_ip
 
-    for ip in _iter_non_vpn_ipv4():
+    for ip in _iter_non_vpn_ipv4(preferred_ip=route_ip):
         return ip
     return route_ip
 

@@ -6,17 +6,22 @@ from contextlib import asynccontextmanager
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config
 from .discovery import start_udp_discovery
+from .errors import build_error_response
 from .stdio import ensure_null_stdio
 from .platform.wayland_setup import ensure_wayland_ready, format_wayland_issues, is_linux_wayland_session
 from .logging_config import log
 
 from .api.core import router as core_router
+from .api.errors import router as errors_router
 from .api.local import router as local_router
 from .api.system import router as system_router
 from .video import router as video_router
@@ -103,7 +108,56 @@ async def http_log_middleware(request: Request, call_next):
     return response
 
 
+@app.exception_handler(HTTPException)
+async def fastapi_http_exception_handler(request: Request, exc: HTTPException):
+    """Normalize FastAPI HTTPException payload to include catalog error metadata."""
+    body = build_error_response(
+        detail=getattr(exc, "detail", "internal_error"),
+        status_code=int(getattr(exc, "status_code", 500) or 500),
+        path=str(getattr(request.url, "path", "") or ""),
+    )
+    headers = dict(getattr(exc, "headers", {}) or {})
+    return JSONResponse(status_code=int(exc.status_code), content=body, headers=headers)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Normalize Starlette HTTPException payload to include catalog error metadata."""
+    body = build_error_response(
+        detail=getattr(exc, "detail", "internal_error"),
+        status_code=int(getattr(exc, "status_code", 500) or 500),
+        path=str(getattr(request.url, "path", "") or ""),
+    )
+    headers = dict(getattr(exc, "headers", {}) or {})
+    return JSONResponse(status_code=int(exc.status_code), content=body, headers=headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Normalize request validation failures with dedicated error code."""
+    body = build_error_response(
+        detail="validation_error",
+        status_code=422,
+        path=str(getattr(request.url, "path", "") or ""),
+        extra={"validation_errors": exc.errors()},
+    )
+    return JSONResponse(status_code=422, content=body)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Last-resort exception handler with normalized internal error payload."""
+    log.exception("Unhandled exception")
+    body = build_error_response(
+        detail="internal_error",
+        status_code=500,
+        path=str(getattr(request.url, "path", "") or ""),
+    )
+    return JSONResponse(status_code=500, content=body)
+
+
 app.include_router(core_router)
+app.include_router(errors_router)
 app.include_router(local_router)
 app.include_router(system_router)
 app.include_router(video_router)
@@ -164,13 +218,13 @@ def run() -> None:
             port = int(find_free_port())
             config.PORT = port
         except Exception:
-            pass
+            log.exception("PORT_AUTO failed to allocate free port, keeping configured port=%s", config.PORT)
 
     if config.MDNS_ENABLED:
         try:
             start_mdns()
         except Exception:
-            pass
+            log.exception("mDNS startup failed")
 
     ssl_kwargs = {}
     if getattr(config, "TLS_ENABLED", False):

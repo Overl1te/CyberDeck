@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict
 import json
 import os
+import re
 
 
 LANG_CHOICES = (
@@ -17,25 +18,76 @@ def _i18n_json_path() -> str:
     return os.path.join(here, "i18n.json")
 
 
+_MOJIBAKE_PATTERN = re.compile(r"(Р.|С.|вЂ.|Ð.|Ñ.|Â.)")
+
+
+def _repair_text(value: str) -> str:
+    """Best-effort repair for common mojibake sequences in translation strings."""
+    text = str(value or "")
+    if not text:
+        return ""
+    if not _MOJIBAKE_PATTERN.search(text):
+        return text
+
+    candidates = [text]
+    for enc in ("cp1251", "latin1"):
+        try:
+            candidates.append(text.encode(enc).decode("utf-8"))
+        except Exception:
+            continue
+
+    def _score(s: str) -> int:
+        good = 0
+        bad = 0
+        for ch in s:
+            if ("A" <= ch <= "Z") or ("a" <= ch <= "z") or ("А" <= ch <= "я") or ch in "ёЁ":
+                good += 1
+        for marker in ("Р", "С", "вЂ", "Â", "Ð", "Ñ"):
+            bad += s.count(marker)
+        return good - (bad * 3)
+
+    best = text
+    best_score = _score(text)
+    for item in candidates[1:]:
+        score = _score(item)
+        if score > best_score + 4:
+            best = item
+            best_score = score
+    return best
+
+
 def _load_translations() -> Dict[str, Dict[str, str]]:
-    """Load translations from JSON with safe fallback."""
+    """Load translations from JSON with safe fallback and encoding repair."""
     path = _i18n_json_path()
+    raw = b""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if not isinstance(payload, dict):
-            return {}
-        out: Dict[str, Dict[str, str]] = {}
-        for lang, mapping in payload.items():
-            if not isinstance(mapping, dict):
-                continue
-            lang_key = str(lang or "").strip().lower()
-            if not lang_key:
-                continue
-            out[lang_key] = {str(k): str(v) for k, v in mapping.items()}
-        return out
+        with open(path, "rb") as f:
+            raw = f.read()
     except Exception:
         return {}
+
+    payload = None
+    for enc in ("utf-8", "utf-8-sig", "cp1251"):
+        try:
+            payload = json.loads(raw.decode(enc))
+            break
+        except Exception:
+            continue
+    if not isinstance(payload, dict):
+        return {}
+
+    out: Dict[str, Dict[str, str]] = {}
+    for lang, mapping in payload.items():
+        if not isinstance(mapping, dict):
+            continue
+        lang_key = str(lang or "").strip().lower()
+        if not lang_key:
+            continue
+        fixed: Dict[str, str] = {}
+        for k, v in mapping.items():
+            fixed[str(k)] = _repair_text(str(v))
+        out[lang_key] = fixed
+    return out
 
 
 _T: Dict[str, Dict[str, str]] = _load_translations()

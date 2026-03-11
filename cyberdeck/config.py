@@ -112,8 +112,8 @@ CYBERDECK_MOBILE_GITHUB_REPO = str(
 ).strip()
 MOBILE_VERSION = str(os.environ.get("CYBERDECK_MOBILE_VERSION", "1.1.2") or "1.1.2").strip()
 MOBILE_ANDROID_PACKAGE = str(
-    os.environ.get("CYBERDECK_MOBILE_ANDROID_PACKAGE", "com.example.cyberdeck_mobile.cyberdeck_mobile")
-    or "com.example.cyberdeck_mobile.cyberdeck_mobile"
+    os.environ.get("CYBERDECK_MOBILE_ANDROID_PACKAGE", "com.overl1te.cyberdeckmobile")
+    or "com.overl1te.cyberdeckmobile"
 ).strip()
 UPDATE_CHECK_TIMEOUT_S = _env_float("CYBERDECK_UPDATE_CHECK_TIMEOUT_S", 2.5)
 UPDATE_CHECK_TIMEOUT_S = max(0.5, min(15.0, UPDATE_CHECK_TIMEOUT_S))
@@ -303,9 +303,9 @@ def reload_from_env() -> None:
     MOBILE_ANDROID_PACKAGE = str(
         os.environ.get(
             "CYBERDECK_MOBILE_ANDROID_PACKAGE",
-            MOBILE_ANDROID_PACKAGE or "com.example.cyberdeck_mobile.cyberdeck_mobile",
+            MOBILE_ANDROID_PACKAGE or "com.overl1te.cyberdeckmobile",
         )
-        or "com.example.cyberdeck_mobile.cyberdeck_mobile"
+        or "com.overl1te.cyberdeckmobile"
     ).strip()
     UPDATE_CHECK_TIMEOUT_S = _env_float("CYBERDECK_UPDATE_CHECK_TIMEOUT_S", UPDATE_CHECK_TIMEOUT_S)
     UPDATE_CHECK_TIMEOUT_S = max(0.5, min(15.0, UPDATE_CHECK_TIMEOUT_S))

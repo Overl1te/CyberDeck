@@ -74,6 +74,7 @@ class WsWindowsFallbackBehaviorTests(unittest.TestCase):
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
         ws_mouse._windows_warned_input_block.clear()
+        ws_mouse._windows_gui_block_warned.clear()
 
     def setUp(self):
         context.device_manager.sessions = {}
@@ -81,6 +82,7 @@ class WsWindowsFallbackBehaviorTests(unittest.TestCase):
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
         ws_mouse._windows_warned_input_block.clear()
+        ws_mouse._windows_gui_block_warned.clear()
 
     @staticmethod
     def _headers(token: str) -> dict:

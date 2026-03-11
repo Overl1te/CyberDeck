@@ -26,6 +26,128 @@ def _facade_call(name: str, fallback: Any, *args: Any, **kwargs: Any) -> Any:
     fn = _facade_attr(name, fallback)
     return fn(*args, **kwargs)
 
+
+def _to_int(value: Any, default: int = 0) -> int:
+    """Parse integer-like values from mixed payloads safely."""
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        return int(str(value or "").strip())
+    except Exception:
+        return int(default)
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    """Parse float-like values from mixed payloads safely."""
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    """Parse bool-like values from mixed payloads safely."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return bool(default)
+
+
+def _clamp_int(value: int, lo: int, hi: int) -> int:
+    """Return bounded integer value with stable low/high ordering."""
+    lo_i = int(min(lo, hi))
+    hi_i = int(max(lo, hi))
+    return max(lo_i, min(hi_i, int(value)))
+
+
+def _feedback_tuning_for_offer(
+    token: str,
+    *,
+    fps: int,
+    max_w: int,
+    quality: int,
+    bitrate_k: int,
+    low_latency: bool,
+) -> tuple[int, int, int, int, bool, dict[str, Any]]:
+    """Apply latest stream feedback recommendation to outgoing stream offer knobs."""
+    feedback = feedback_store.recommend(token)
+    profile = str(feedback.get("network_profile") or "unknown").strip().lower()
+    suggested_raw = feedback.get("suggested")
+    suggested = suggested_raw if isinstance(suggested_raw, dict) else {}
+
+    fps_delta = _to_int(suggested.get("fps_delta"), 0)
+    width_delta = _to_int(suggested.get("max_w_delta"), 0)
+    quality_delta = _to_int(suggested.get("quality_delta"), 0)
+    prefer_low = _to_bool(suggested.get("prefer_low_latency"), False)
+
+    out_fps = int(fps)
+    out_w = int(max_w)
+    out_quality = int(quality)
+    out_bitrate = int(bitrate_k)
+    out_low = bool(low_latency)
+    applied = False
+
+    # Only automatic degradation path is applied server-side.
+    # Positive suggestions are left for client-side adaptive loop.
+    should_degrade = profile in ("critical", "degraded")
+    if should_degrade:
+        if fps_delta < 0:
+            out_fps = _clamp_int(out_fps + fps_delta, 10, 120)
+            applied = applied or out_fps != int(fps)
+        if width_delta < 0:
+            out_w = _clamp_int(out_w + width_delta, 640, 4096)
+            applied = applied or out_w != int(max_w)
+        if quality_delta < 0:
+            out_quality = _clamp_int(out_quality + quality_delta, 10, 95)
+            applied = applied or out_quality != int(quality)
+        if prefer_low:
+            out_low = True
+            applied = applied or (out_low != bool(low_latency))
+
+        jitter = _to_float(feedback.get("jitter_ms"), 0.0)
+        drop = _to_float(feedback.get("drop_ratio"), 0.0)
+        if profile == "critical":
+            scale = 0.72 if (jitter >= 120.0 or drop >= 0.10) else 0.82
+        else:
+            scale = 0.90 if (jitter >= 60.0 or drop >= 0.05) else 0.94
+        out_bitrate = _clamp_int(int(round(out_bitrate * scale)), 200, 20000)
+        applied = applied or out_bitrate != int(bitrate_k)
+
+    details = {
+        "profile": profile,
+        "suggested": {
+            "fps_delta": fps_delta,
+            "max_w_delta": width_delta,
+            "quality_delta": quality_delta,
+            "prefer_low_latency": bool(prefer_low),
+        },
+        "sample": {
+            "rtt_ms": _to_float(feedback.get("rtt_ms"), 0.0),
+            "jitter_ms": _to_float(feedback.get("jitter_ms"), 0.0),
+            "drop_ratio": _to_float(feedback.get("drop_ratio"), 0.0),
+            "decode_fps": _to_float(feedback.get("decode_fps"), 0.0),
+        },
+        "applied": bool(applied),
+        "effective": {
+            "fps": int(out_fps),
+            "max_w": int(out_w),
+            "quality": int(out_quality),
+            "bitrate_k": int(out_bitrate),
+            "low_latency": bool(out_low),
+        },
+    }
+    return out_fps, out_w, out_quality, out_bitrate, out_low, details
+
 @router.api_route("/video_feed", methods=["GET", "HEAD"])
 def video_feed(
     token: str = TokenDep,
@@ -207,6 +329,20 @@ def stream_offer(
         eff_w = min(eff_w, _LOW_LATENCY_MAX_W)
         eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h264"))
 
+    eff_fps, eff_w, eff_q, eff_bitrate, eff_low, feedback_hint = _feedback_tuning_for_offer(
+        token,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=eff_q,
+        bitrate_k=eff_bitrate,
+        low_latency=eff_low,
+    )
+    if eff_low:
+        eff_fps = min(eff_fps, _LOW_LATENCY_MAX_FPS)
+        eff_w = min(eff_w, _LOW_LATENCY_MAX_W)
+        eff_q = max(_MIN_MJPEG_Q_LOWLAT, min(eff_q, _LOW_LATENCY_MAX_Q))
+        eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h264"))
+
     can_capture = _facade_call("_capture_input_available", _capture_input_available, eff_monitor, eff_fps)
     ffmpeg_codec_capture_ok = can_capture and _facade_call(
         "_ffmpeg_wayland_capture_reliable",
@@ -347,6 +483,7 @@ def stream_offer(
         "candidates": candidates,
         "fallback_policy": "ordered_candidates",
         "reconnect_hint_ms": int(_facade_attr("_STREAM_RECONNECT_HINT_MS", _STREAM_RECONNECT_HINT_MS)),
+        "feedback": feedback_hint,
         "adaptive_hint": {
             "min_quality": int(
                 _facade_attr(
@@ -452,6 +589,14 @@ def video_h264(
     eff_w = int(max_w)
     eff_low = bool(int(low_latency))
     eff_audio = bool(int(audio))
+    eff_fps, eff_w, _, eff_bitrate, eff_low, _ = _feedback_tuning_for_offer(
+        token,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=_DEFAULT_OFFER_Q,
+        bitrate_k=eff_bitrate,
+        low_latency=eff_low,
+    )
     if eff_low:
         eff_fps = min(_LOW_LATENCY_MAX_FPS, max(10, eff_fps))
         eff_w = min(eff_w, _LOW_LATENCY_MAX_W)
@@ -499,6 +644,14 @@ def video_h265(
     eff_w = int(max_w)
     eff_low = bool(int(low_latency))
     eff_audio = bool(int(audio))
+    eff_fps, eff_w, _, eff_bitrate, eff_low, _ = _feedback_tuning_for_offer(
+        token,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=_DEFAULT_OFFER_Q,
+        bitrate_k=eff_bitrate,
+        low_latency=eff_low,
+    )
     if eff_low:
         eff_fps = min(_LOW_LATENCY_MAX_FPS, max(10, eff_fps))
         eff_w = min(eff_w, _LOW_LATENCY_MAX_W)

@@ -22,6 +22,8 @@ class _FakeInputBackend:
         """Initialize _FakeInputBackend state and collaborator references."""
         self.text_payloads = []
         self.moves = []
+        self.hotkey_calls = []
+        self.raise_hotkey = False
 
     def position(self):
         """Return the current pointer position."""
@@ -64,6 +66,9 @@ class _FakeInputBackend:
 
     def hotkey(self, *keys: str) -> bool:
         """Send a key combination through the active backend."""
+        self.hotkey_calls.append(tuple(str(k) for k in keys))
+        if self.raise_hotkey:
+            raise RuntimeError("hotkey_fail")
         return True
 
 
@@ -95,6 +100,7 @@ class WsBehaviorTests(unittest.TestCase):
         ws_mouse._ws_runtime.clear()
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
+        ws_mouse._windows_gui_block_warned.clear()
 
     def setUp(self):
         """Prepare test preconditions for each test case."""
@@ -103,8 +109,11 @@ class WsBehaviorTests(unittest.TestCase):
         ws_mouse._ws_runtime.clear()
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
+        ws_mouse._windows_gui_block_warned.clear()
         self.fake_backend.text_payloads.clear()
         self.fake_backend.moves.clear()
+        self.fake_backend.hotkey_calls.clear()
+        self.fake_backend.raise_hotkey = False
 
     @staticmethod
     def _headers(token: str) -> dict:
@@ -271,6 +280,71 @@ class WsBehaviorTests(unittest.TestCase):
             self.assertEqual(pong.get("type"), "pong")
 
         self.assertEqual(self.fake_backend.moves, [])
+
+    def test_ws_hotkey_error_does_not_disconnect_socket(self):
+        """Validate scenario: hotkey backend failure must not terminate websocket session."""
+        token = "tok-hotkey-safe"
+        self._add_session(token)
+        self.fake_backend.raise_hotkey = True
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", False):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "hotkey", "keys": ["ctrl", "v"]})
+                ws.send_json({"type": "ping", "id": "probe"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+                self.assertEqual(pong.get("id"), "probe")
+
+    def test_ws_hotkey_normalizes_win_alias_for_non_windows(self):
+        """Validate scenario: win alias should map to backend-friendly winleft token on non-Windows hosts."""
+        token = "tok-hotkey-alias"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", False):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "hotkey", "keys": ["win", "d"]})
+                ws.send_json({"type": "ping", "id": "p1"})
+                ws.receive_json()
+
+        self.assertIn(("winleft", "d"), self.fake_backend.hotkey_calls)
+
+    def test_ws_blocks_pointer_events_on_protected_launcher_window(self):
+        """Validate scenario: pointer events must be blocked when target is protected launcher GUI."""
+        token = "tok-protected-pointer"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_WINDOWS_GUI_PROTECT_ENABLED", True), patch.object(
+            ws_mouse, "_windows_point_hits_protected_window", return_value=True
+        ), patch.object(
+            ws_mouse.INPUT_BACKEND, "click", return_value=True
+        ) as m_click:
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "click"})
+                warning = ws.receive_json()
+                self.assertEqual(warning.get("type"), "warning")
+                self.assertEqual(warning.get("code"), "launcher_gui_input_blocked")
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+        m_click.assert_not_called()
+
+    def test_ws_blocks_keyboard_events_when_launcher_is_foreground(self):
+        """Validate scenario: keyboard events must be blocked when launcher GUI has focus."""
+        token = "tok-protected-keyboard"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_WINDOWS_GUI_PROTECT_ENABLED", True), patch.object(
+            ws_mouse, "_windows_foreground_is_protected", return_value=True
+        ):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "text", "text": "blocked"})
+                warning = ws.receive_json()
+                self.assertEqual(warning.get("type"), "warning")
+                self.assertEqual(warning.get("code"), "launcher_gui_keyboard_blocked")
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+        self.assertEqual(self.fake_backend.text_payloads, [])
 
 
 if __name__ == "__main__":
