@@ -9,6 +9,51 @@ from .shared import _tr_any
 class AppDevicesMixin:
     """Device detail/actions/settings and QR handling methods."""
 
+    def _device_filter_label(self, code: str) -> str:
+        """Return localized device-list filter label."""
+        mapping = {
+            "all": "device_filter_all",
+            "online": "device_filter_online",
+            "offline": "device_filter_offline",
+            "pending": "device_filter_pending",
+        }
+        return self.tr(mapping.get(str(code or "").strip().lower(), "device_filter_all"))
+
+    def _device_filter_code(self, label: str) -> str:
+        """Resolve internal device filter code from a localized label."""
+        text = str(label or "").strip()
+        for code in ("all", "online", "offline", "pending"):
+            if text == self._device_filter_label(code):
+                return code
+        return "all"
+
+    def _device_sort_label(self, code: str) -> str:
+        """Return localized device-list sort label."""
+        mapping = {
+            "activity": "device_sort_activity",
+            "name": "device_sort_name",
+            "recent": "device_sort_recent",
+        }
+        return self.tr(mapping.get(str(code or "").strip().lower(), "device_sort_activity"))
+
+    def _device_sort_code(self, label: str) -> str:
+        """Resolve internal device sort code from a localized label."""
+        text = str(label or "").strip()
+        for code in ("activity", "name", "recent"):
+            if text == self._device_sort_label(code):
+                return code
+        return "activity"
+
+    def _device_platform_hint(self, device: dict[str, Any]) -> str:
+        """Return compact device platform/version hint for list cards."""
+        if not isinstance(device, dict):
+            return ""
+        for key in ("platform", "client_platform", "os", "system"):
+            value = str(device.get(key) or "").strip()
+            if value:
+                return value
+        return str(device.get("device_id") or "").strip()
+
     @staticmethod
     def _build_app_qr_deep_link(payload: dict[str, Any]) -> str:
         """Build `cyberdeck://pair` deep link for app-mode QR payload."""
@@ -119,6 +164,97 @@ class AppDevicesMixin:
             )
         except Exception:
             return raw
+
+    @staticmethod
+    def _public_origin_url(raw: str) -> str:
+        """Normalize public origin string into an absolute URL."""
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        if "://" not in text:
+            text = f"https://{text}"
+        try:
+            parsed = urllib.parse.urlsplit(text)
+            scheme = str(parsed.scheme or "https").strip().lower() or "https"
+            netloc = str(parsed.netloc or "").strip()
+            path = str(parsed.path or "/").strip() or "/"
+            if not netloc:
+                return ""
+            if not path.startswith("/"):
+                path = f"/{path}"
+            return urllib.parse.urlunsplit((scheme, netloc, path, "", "")).rstrip("/")
+        except Exception:
+            return ""
+
+    @classmethod
+    def _rewrite_qr_for_public_origin(
+        cls,
+        payload: dict[str, Any],
+        url: str = "",
+        public_origin: str = "",
+    ) -> tuple[dict[str, Any], str]:
+        """Rewrite local QR payload/url so mobile clients pair through public origin."""
+        origin = cls._public_origin_url(public_origin)
+        if not origin or not isinstance(payload, dict):
+            return dict(payload or {}), str(url or "").strip()
+
+        try:
+            parsed_origin = urllib.parse.urlsplit(origin)
+            host = str(parsed_origin.hostname or "").strip()
+            if not host:
+                return dict(payload or {}), str(url or "").strip()
+            scheme = str(parsed_origin.scheme or "https").strip().lower() or "https"
+            port = int(parsed_origin.port or (443 if scheme == "https" else 80))
+
+            rewritten = dict(payload)
+            rewritten["lan_ip"] = str(payload.get("ip") or "").strip()
+            rewritten["lan_port"] = str(payload.get("port") or "").strip()
+            rewritten["lan_scheme"] = str(payload.get("scheme") or "").strip()
+            rewritten["ip"] = host
+            rewritten["port"] = port
+            rewritten["scheme"] = scheme
+
+            parsed_url = urllib.parse.urlsplit(str(url or "").strip())
+            qs = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+            out_qs: list[tuple[str, str]] = []
+            seen_ip = False
+            seen_port = False
+            seen_scheme = False
+            for key, value in qs:
+                k = str(key or "").strip()
+                if k == "ip":
+                    out_qs.append(("ip", host))
+                    seen_ip = True
+                elif k == "port":
+                    out_qs.append(("port", str(port)))
+                    seen_port = True
+                elif k == "scheme":
+                    out_qs.append(("scheme", scheme))
+                    seen_scheme = True
+                else:
+                    out_qs.append((k, value))
+            if not seen_ip:
+                out_qs.append(("ip", host))
+            if not seen_port:
+                out_qs.append(("port", str(port)))
+            if not seen_scheme:
+                out_qs.append(("scheme", scheme))
+
+            path = str(parsed_origin.path or parsed_url.path or "/").strip() or "/"
+            if not path.startswith("/"):
+                path = f"/{path}"
+            rewritten_url = urllib.parse.urlunsplit(
+                (
+                    scheme,
+                    str(parsed_origin.netloc or "").strip(),
+                    path,
+                    urllib.parse.urlencode(out_qs, doseq=True),
+                    "",
+                )
+            )
+            return rewritten, rewritten_url
+        except Exception:
+            return dict(payload or {}), str(url or "").strip()
 
     @staticmethod
     def _build_android_intent_qr_link(deep_link: str, fallback_url: str = "") -> str:
@@ -284,6 +420,8 @@ class AppDevicesMixin:
             str(getattr(self, "pairing_code", "") or ""),
             str(getattr(self, "server_port", "") or ""),
             str(getattr(self, "api_scheme", "") or ""),
+            str(getattr(self, "cloudflare_public_url", "") or ""),
+            str(getattr(self, "cloudflare_status", "") or ""),
         )
         last_sig = getattr(self, "_qr_last_state_signature", None)
         if current_sig != last_sig:
@@ -311,6 +449,13 @@ class AppDevicesMixin:
                 if not data:
                     raise RuntimeError("invalid qr payload json")
                 payload = data.get("payload") or {}
+                public_origin = str(getattr(self, "cloudflare_public_url", "") or "").strip()
+                if public_origin:
+                    payload, data["url"] = self._rewrite_qr_for_public_origin(
+                        payload,
+                        url=str(data.get("url") or "").strip(),
+                        public_origin=public_origin,
+                    )
 
                 mode = str(self.settings.get("qr_mode", DEFAULT_SETTINGS["qr_mode"]) or DEFAULT_SETTINGS["qr_mode"]).strip().lower()
                 if mode not in ("site", "app"):
@@ -337,7 +482,7 @@ class AppDevicesMixin:
                     url = str(data.get("url") or "").strip()
                     qr_text = url if url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-                img = self._build_qr_image(qr_text, size=QR_IMAGE_SIZE)
+                img = self._build_qr_image(qr_text, size=self._qr_render_size_for_payload(qr_text))
 
                 def _ui() -> None:
                     """Apply prepared QR image on UI thread."""
@@ -428,6 +573,8 @@ class AppDevicesMixin:
         if not self.selected_token:
             self.lbl_target.configure(text=self.tr("none"))
             self.lbl_target_status.configure(text=self.tr("target_not_selected"), text_color=COLOR_TEXT_DIM)
+            if hasattr(self, "lbl_target_meta"):
+                self.lbl_target_meta.configure(text=self.tr("device_meta_placeholder"), text_color=COLOR_TEXT_DIM)
             self._selected_device_form_state = None
             self._set_device_settings_dirty(False)
             try:
@@ -447,12 +594,37 @@ class AppDevicesMixin:
             status = self.tr("status_pending")
         else:
             status = self.tr("status_online") if online else self.tr("status_offline")
+        platform_hint = self._device_platform_hint(d) if d else ""
+        try:
+            last_seen_ts = float((d or {}).get("last_seen_ts") or 0.0)
+        except Exception:
+            last_seen_ts = 0.0
+        if last_seen_ts > 0:
+            age_s = int(max(0.0, time.time() - last_seen_ts))
+            if age_s < 60:
+                last_seen_text = self.tr("last_seen_seconds", value=age_s)
+            elif age_s < 3600:
+                last_seen_text = self.tr("last_seen_minutes", value=max(1, age_s // 60))
+            else:
+                last_seen_text = self.tr("last_seen_hours", value=max(1, age_s // 3600))
+        else:
+            last_seen_text = self.tr("last_seen_never")
 
         self.lbl_target.configure(text=f"{name}\n{self.selected_token[:8]}...")
         self.lbl_target_status.configure(
             text=f"{status} | {ip}",
             text_color=(COLOR_WARN if (not approved) else (COLOR_ACCENT if online else COLOR_TEXT_DIM)),
         )
+        if hasattr(self, "lbl_target_meta"):
+            self.lbl_target_meta.configure(
+                text=self.tr(
+                    "device_panel_meta",
+                    platform=(platform_hint or self.tr("unknown_value")),
+                    device_id=str((d or {}).get("device_id") or self.selected_token[:12]),
+                    last_seen=last_seen_text,
+                ),
+                text_color=COLOR_TEXT_DIM,
+            )
         try:
             self.btn_delete_selected.configure(state="normal", text_color=COLOR_FAIL)
             if online:
@@ -764,13 +936,55 @@ class AppDevicesMixin:
 
     def copy_pairing_code(self) -> Any:
         """Copy pairing code."""
+        self._copy_text_to_clipboard(
+            str(getattr(self, "pairing_code", "") or "").strip(),
+            success_toast=self.tr("toast_code_copied"),
+            status_text=self.tr("code_copied"),
+        )
+
+    def _copy_text_to_clipboard(self, value: str, *, success_toast: str = "", status_text: str = "") -> bool:
+        """Copy arbitrary text into clipboard and surface the result in launcher UI."""
+        payload = str(value or "").strip()
+        if not payload:
+            return False
         try:
             self.clipboard_clear()
-            self.clipboard_append(self.pairing_code)
-            self.lbl_status.configure(text=self.tr("code_copied"), text_color=COLOR_ACCENT)
-            self.show_toast(self.tr("toast_code_copied"), level="success")
+            self.clipboard_append(payload)
+            if status_text and hasattr(self, "lbl_status"):
+                try:
+                    self.lbl_status.configure(text=status_text, text_color=COLOR_ACCENT)
+                except Exception:
+                    pass
+            if success_toast:
+                try:
+                    self.show_toast(success_toast, level="success")
+                except Exception:
+                    pass
+            return True
         except Exception:
-            pass
+            return False
+
+    def copy_local_access(self) -> Any:
+        """Copy full local access origin from the Home screen."""
+        try:
+            value = self._local_access_origin()
+        except Exception:
+            value = ""
+        self._copy_text_to_clipboard(
+            value,
+            success_toast=self.tr("toast_local_access_copied"),
+        )
+
+    def copy_public_access(self) -> Any:
+        """Copy full public access origin from the Home screen."""
+        try:
+            value = self._public_access_origin()
+        except Exception:
+            value = ""
+        self._copy_text_to_clipboard(
+            value,
+            success_toast=self.tr("toast_public_access_copied"),
+        )
 
     def toggle_remote_input_lock(self) -> Any:
         """Toggle remote input lock state via local API."""

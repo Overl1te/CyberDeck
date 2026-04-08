@@ -230,6 +230,15 @@ def run() -> None:
     if getattr(config, "TLS_ENABLED", False):
         ssl_kwargs = {"ssl_certfile": config.TLS_CERT, "ssl_keyfile": config.TLS_KEY}
 
-    uvicorn.run(app, host=config.HOST, port=port, log_level=log_level, access_log=access_log, **ssl_kwargs)
+    uvicorn.run(
+        app,
+        host=config.HOST,
+        port=port,
+        log_level=log_level,
+        access_log=access_log,
+        proxy_headers=True,
+        forwarded_allow_ips="127.0.0.1",
+        **ssl_kwargs,
+    )
 
 

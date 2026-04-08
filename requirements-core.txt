@@ -12,3 +12,5 @@ pillow
 mss
 psutil
 soundcard; platform_system == "Windows"
+pycaw; platform_system == "Windows"
+comtypes; platform_system == "Windows"

@@ -101,6 +101,7 @@ class WsBehaviorTests(unittest.TestCase):
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
         ws_mouse._windows_gui_block_warned.clear()
+        ws_mouse._power_guard_warned.clear()
 
     def setUp(self):
         """Prepare test preconditions for each test case."""
@@ -110,6 +111,7 @@ class WsBehaviorTests(unittest.TestCase):
         ws_mouse._mouse_remainders.clear()
         ws_mouse._virtual_cursor.clear()
         ws_mouse._windows_gui_block_warned.clear()
+        ws_mouse._power_guard_warned.clear()
         self.fake_backend.text_payloads.clear()
         self.fake_backend.moves.clear()
         self.fake_backend.hotkey_calls.clear()
@@ -138,6 +140,17 @@ class WsBehaviorTests(unittest.TestCase):
             with self.client.websocket_connect("/ws/mouse", headers=self._headers("missing")):
                 pass
         self.assertEqual(ctx.exception.code, 4003)
+
+    def test_ws_accepts_query_token_fallback_even_when_api_query_tokens_are_disabled(self):
+        """Validate scenario: websocket control should keep query-token compatibility for relay/browser transports."""
+        token = "tok-query-fallback"
+        self._add_session(token)
+
+        with self.client.websocket_connect(f"/ws/mouse?token={token}") as ws:
+            ws.send_json({"type": "ping", "id": "q1"})
+            pong = ws.receive_json()
+            self.assertEqual(pong.get("type"), "pong")
+            self.assertEqual(pong.get("id"), "q1")
 
     def test_ws_hello_ping_pong_and_text(self):
         """Validate scenario: test ws hello ping pong and text."""
@@ -298,7 +311,7 @@ class WsBehaviorTests(unittest.TestCase):
     def test_ws_hotkey_normalizes_win_alias_for_non_windows(self):
         """Validate scenario: win alias should map to backend-friendly winleft token on non-Windows hosts."""
         token = "tok-hotkey-alias"
-        self._add_session(token)
+        self._add_session(token, settings={"perm_power": True})
 
         with patch.object(ws_mouse, "_IS_WINDOWS", False):
             with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
@@ -307,6 +320,92 @@ class WsBehaviorTests(unittest.TestCase):
                 ws.receive_json()
 
         self.assertIn(("winleft", "d"), self.fake_backend.hotkey_calls)
+
+    def test_ws_blocks_power_hotkeys_when_perm_power_denied(self):
+        """Validate scenario: power-sensitive hotkeys should be blocked when perm_power is disabled."""
+        token = "tok-no-power-hotkey"
+        self._add_session(token, settings={"perm_power": False, "perm_keyboard": True})
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", False):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "hotkey", "keys": ["win", "d"]})
+                warning = ws.receive_json()
+                self.assertEqual(warning.get("type"), "warning")
+                self.assertEqual(warning.get("code"), "permission_denied:perm_power")
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+
+        self.assertEqual(self.fake_backend.hotkey_calls, [])
+
+    def test_ws_blocks_power_text_commands_when_perm_power_denied(self):
+        """Validate scenario: shutdown-like text commands should be denied when perm_power is disabled."""
+        token = "tok-no-power-text"
+        self._add_session(token, settings={"perm_power": False, "perm_keyboard": True})
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", False):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "text", "text": "shutdown /s /t 1"})
+                warning = ws.receive_json()
+                self.assertEqual(warning.get("type"), "warning")
+                self.assertEqual(warning.get("code"), "permission_denied:perm_power")
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+
+        self.assertEqual(self.fake_backend.text_payloads, [])
+
+    def test_ws_allows_pointer_move_across_protected_launcher_window(self):
+        """Validate scenario: protected GUI should block clicks, not cursor movement path."""
+        token = "tok-protected-move"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_WINDOWS_GUI_PROTECT_ENABLED", True), patch.object(
+            ws_mouse, "_windows_point_hits_protected_window", return_value=True
+        ):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "move", "dx": 12, "dy": -4})
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+
+        self.assertTrue(self.fake_backend.moves)
+
+    def test_ws_blocks_click_when_power_surface_is_foreground_without_perm_power(self):
+        """Validate scenario: click input should be denied on power-sensitive foreground windows."""
+        token = "tok-power-surface-click"
+        self._add_session(token, settings={"perm_power": False, "perm_mouse": True})
+
+        with patch.object(ws_mouse, "_foreground_targets_power_surface", return_value=True), patch.object(
+            ws_mouse.INPUT_BACKEND, "click", return_value=True
+        ) as m_click:
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "click"})
+                warning = ws.receive_json()
+                self.assertEqual(warning.get("type"), "warning")
+                self.assertEqual(warning.get("code"), "permission_denied:perm_power")
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+        m_click.assert_not_called()
+
+    def test_ws_blocks_keyboard_input_on_power_surface_without_perm_power(self):
+        """Validate scenario: generic text typing is denied when shell/start surface is foreground."""
+        token = "tok-power-surface-text"
+        self._add_session(token, settings={"perm_power": False, "perm_keyboard": True})
+
+        with patch.object(ws_mouse, "_foreground_targets_power_surface", return_value=True), patch.object(
+            ws_mouse, "_IS_WINDOWS", False
+        ):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "text", "text": "hello"})
+                warning = ws.receive_json()
+                self.assertEqual(warning.get("type"), "warning")
+                self.assertEqual(warning.get("code"), "permission_denied:perm_power")
+                ws.send_json({"type": "ping", "id": "p1"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+        self.assertEqual(self.fake_backend.text_payloads, [])
 
     def test_ws_blocks_pointer_events_on_protected_launcher_window(self):
         """Validate scenario: pointer events must be blocked when target is protected launcher GUI."""

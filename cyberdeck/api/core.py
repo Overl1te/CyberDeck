@@ -43,6 +43,101 @@ def _safe_ram_percent() -> float:
     return _safe_stat(lambda: psutil.virtual_memory().percent, 0.0)
 
 
+def _safe_port(value: Any, *, scheme: str = "http") -> int:
+    """Return a validated TCP port with a scheme-specific default fallback."""
+    default_port = 443 if str(scheme).lower() == "https" else 80
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default_port
+    if port < 1 or port > 65535:
+        return default_port
+    return port
+
+
+def _normalized_public_origin(raw: Any) -> str:
+    """Normalize configured public origin into an absolute URL when possible."""
+    origin = str(raw or "").strip()
+    if not origin:
+        return ""
+    if "://" not in origin:
+        origin = f"https://{origin}"
+    return origin.rstrip("/")
+
+
+def _request_origin(request: Request) -> str:
+    """Resolve request origin using the same proxy-aware rules as stream offers."""
+    try:
+        from ..video.api import _public_base_url
+
+        resolved = str(_public_base_url(request) or "").strip().rstrip("/")
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+
+    try:
+        base = str(request.base_url or "").strip().rstrip("/")
+        if base:
+            return base
+    except Exception:
+        pass
+    return ""
+
+
+def _diag_access_payload(request: Request) -> Dict[str, Any]:
+    """Build access-layer diagnostics for the active authenticated request."""
+    scheme = str(getattr(config, "SCHEME", "http") or "http").strip().lower() or "http"
+    request_scheme = ""
+    request_host = ""
+    request_port = 0
+    try:
+        request_scheme = str(getattr(request.url, "scheme", "") or "").strip().lower()
+        request_host = str(getattr(request.url, "hostname", "") or "").strip()
+        request_port = int(getattr(request.url, "port", 0) or 0)
+    except Exception:
+        pass
+    request_origin = ""
+    if request_scheme and request_host:
+        request_origin = f"{request_scheme}://{request_host}:{_safe_port(request_port, scheme=request_scheme)}"
+    effective_origin = _request_origin(request)
+    public_origin_hint = _normalized_public_origin(getattr(config, "PUBLIC_ORIGIN_HINT", ""))
+    return {
+        "scheme": scheme,
+        "port": _safe_port(getattr(config, "PORT", 0), scheme=scheme),
+        "tls_enabled": bool(getattr(config, "TLS_ENABLED", False)),
+        "request_scheme": request_scheme,
+        "request_host": request_host,
+        "request_port": _safe_port(request_port, scheme=request_scheme or scheme),
+        "request_origin": request_origin,
+        "effective_origin": effective_origin,
+        "public_origin_hint": public_origin_hint or None,
+        "query_token_allowed": bool(getattr(config, "ALLOW_QUERY_TOKEN", False)),
+        "media_query_token_allowed": True,
+        "ws_query_token_allowed": True,
+        "remote_access_enabled": bool(getattr(config, "REMOTE_ACCESS_ENABLED", False)),
+    }
+
+
+def _diag_session_payload(token: str) -> Dict[str, Any]:
+    """Build authenticated device session diagnostics for the active token."""
+    session = device_manager.get_session(token, include_pending=True)
+    if session is None:
+        return {}
+    approved = bool(getattr(session, "approved", True))
+    return {
+        "device_id": str(getattr(session, "device_id", "") or ""),
+        "device_name": str(getattr(session, "device_name", "") or ""),
+        "device_ip": str(getattr(session, "ip", "") or ""),
+        "approved": approved,
+        "approval_pending": bool(not approved),
+        "websocket_attached": bool(getattr(session, "websocket", None) is not None),
+        "created_ts": float(getattr(session, "created_ts", 0.0) or 0.0),
+        "last_seen_ts": float(getattr(session, "last_seen_ts", 0.0) or 0.0),
+        "last_ws_seen_ts": float(getattr(session, "last_ws_seen_ts", 0.0) or 0.0),
+    }
+
+
 def _normalized_upload_name(raw_name: str) -> str:
     """Sanitize the upload filename while preserving extension."""
     raw = str(raw_name or "upload.bin").replace("\\", "/")
@@ -228,13 +323,17 @@ def get_stats(token: str = TokenDep):
 
 
 @router.get("/api/diag")
-def get_diag(token: str = TokenDep):
+def get_diag(request: Request, token: str = TokenDep):
     """Return extended diagnostics including stream and input runtime state."""
     require_perm(token, "perm_stream")
+    volume_state = get_volume_state_payload()
     out = {
         "cpu": _safe_cpu_percent(),
         "ram": _safe_ram_percent(),
         "hostname": config.HOSTNAME,
+        "access": _diag_access_payload(request),
+        "session": _diag_session_payload(token),
+        "volume": volume_state,
         **protocol_payload(),
     }
     try:

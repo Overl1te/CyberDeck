@@ -7,5 +7,20 @@
   "verbose_ws_log": true,
   "verbose_stream_log": true,
   "mdns_enabled": true,
-  "device_approval_required": true
+  "device_approval_required": true,
+  "stream_profile": "balanced",
+  "stream_offer_fps": 30,
+  "stream_offer_max_w": 1920,
+  "stream_offer_q": 55,
+  "stream_offer_gop": 60,
+  "stream_offer_preset": "veryfast",
+  "h264_bitrate_k": 6000,
+  "h265_bitrate_k": 4200,
+  "offer_audio_default": true,
+  "audio_bitrate_k": 128,
+  "audio_sample_rate": 48000,
+  "audio_channels": 2,
+  "audio_fallback_silent": false,
+  "stream_fast_resample_threshold": 60,
+  "stream_subsampling_threshold": 60
 }

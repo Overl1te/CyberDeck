@@ -14,6 +14,7 @@ $PortableDistDir = Join-Path $RepoRoot "dist-portable"
 $PortableOutDir = Join-Path $RepoRoot "Output"
 $PortableExeName = "CyberDeck.exe"
 $PortableOutExe = Join-Path $PortableOutDir $PortableExeName
+$BundledCloudflaredPath = Join-Path $RepoRoot "vendor\cloudflared\windows-amd64\cloudflared.exe"
 $PortableCoreFiles = @(
   "icon.png",
   "icon.ico",
@@ -130,6 +131,8 @@ $nuitkaArgs = @(
   "--windows-icon-from-ico=$IconIco"
   "--include-package=customtkinter"
   "--include-package-data=customtkinter"
+  "--include-package=pycaw"
+  "--include-package=comtypes"
   "--windows-console-mode=disable"
   "--windows-uac-admin"
   "--output-dir=$PortableDistDir"
@@ -195,6 +198,14 @@ foreach ($name in $portableExternalFiles) {
   if (Test-Path $src) {
     Copy-Item $src -Destination (Join-Path $PortableOutDir $name) -Force
   }
+}
+if (Test-Path $BundledCloudflaredPath) {
+  $PortableDistCloudflaredDir = Join-Path $PortableDistDir "tools\cloudflared"
+  $PortableOutCloudflaredDir = Join-Path $PortableOutDir "tools\cloudflared"
+  New-Item -ItemType Directory -Path $PortableDistCloudflaredDir -Force | Out-Null
+  New-Item -ItemType Directory -Path $PortableOutCloudflaredDir -Force | Out-Null
+  Copy-Item $BundledCloudflaredPath -Destination (Join-Path $PortableDistCloudflaredDir "cloudflared.exe") -Force
+  Copy-Item $BundledCloudflaredPath -Destination (Join-Path $PortableOutCloudflaredDir "cloudflared.exe") -Force
 }
 
 Write-Host ""

@@ -9,6 +9,7 @@ Set-Location $RepoRoot
 $IconIco = Join-Path $RepoRoot "icon.ico"
 $RequirementsBuild = Join-Path $RepoRoot "requirements-build.txt"
 $LauncherI18nJson = Join-Path $RepoRoot "cyberdeck\launcher\i18n.json"
+$BundledCloudflaredPath = Join-Path $RepoRoot "vendor\cloudflared\windows-amd64\cloudflared.exe"
 
 function Stop-CyberDeckFromDist {
   param(
@@ -114,6 +115,8 @@ $nuitkaArgs = @(
   "--windows-icon-from-ico=$IconIco"
   "--include-package=customtkinter"
   "--include-package-data=customtkinter"
+  "--include-package=pycaw"
+  "--include-package=comtypes"
   "--windows-console-mode=disable"
   "--windows-uac-admin"
   "--output-dir=dist"
@@ -122,6 +125,9 @@ $nuitkaArgs = @(
 foreach ($mediaPath in $timelineMedia) {
   $mediaName = [System.IO.Path]::GetFileName($mediaPath)
   $nuitkaArgs += "--include-data-file=$mediaPath=$mediaName"
+}
+if (Test-Path $BundledCloudflaredPath) {
+  $nuitkaArgs += "--include-data-file=$BundledCloudflaredPath=tools/cloudflared/cloudflared.exe"
 }
 
 if ($DryRun) {

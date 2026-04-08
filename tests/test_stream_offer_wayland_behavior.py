@@ -25,6 +25,14 @@ class StreamOfferWaylandBehaviorTests(unittest.TestCase):
         ), patch.object(
             video_api, "_get_ffmpeg_diag", return_value={"ffmpeg_available": True}
         ), patch.object(
+            video_api,
+            "_ffmpeg_audio_relay_capabilities",
+            return_value={
+                "real_audio_available": False,
+                "muxed_audio_available": False,
+                "silent_fallback_enabled": False,
+            },
+        ), patch.object(
             video_api, "protocol_payload", return_value={}
         ), patch.object(
             video_api, "_is_wayland_session", return_value=True
@@ -58,6 +66,14 @@ class StreamOfferWaylandBehaviorTests(unittest.TestCase):
         ), patch.object(
             video_api, "_get_ffmpeg_diag", return_value={"ffmpeg_available": True}
         ), patch.object(
+            video_api,
+            "_ffmpeg_audio_relay_capabilities",
+            return_value={
+                "real_audio_available": False,
+                "muxed_audio_available": False,
+                "silent_fallback_enabled": False,
+            },
+        ), patch.object(
             video_api, "protocol_payload", return_value={}
         ), patch.object(
             video_api, "_is_wayland_session", return_value=True
@@ -90,6 +106,14 @@ class StreamOfferWaylandBehaviorTests(unittest.TestCase):
             video_api, "_mjpeg_backend_order", return_value=["ffmpeg"]
         ), patch.object(
             video_api, "_get_ffmpeg_diag", return_value={"ffmpeg_available": True}
+        ), patch.object(
+            video_api,
+            "_ffmpeg_audio_relay_capabilities",
+            return_value={
+                "real_audio_available": False,
+                "muxed_audio_available": False,
+                "silent_fallback_enabled": False,
+            },
         ), patch.object(
             video_api, "protocol_payload", return_value={}
         ), patch.object(

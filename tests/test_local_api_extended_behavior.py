@@ -313,6 +313,14 @@ class LocalApiExtendedBehaviorTests(unittest.TestCase):
         self.assertEqual(out, fake_payload)
         self.assertTrue(mocked.called)
 
+    def test_local_update_install_returns_prepared_install_payload(self):
+        """Validate scenario: local update install endpoint should proxy staged installer result."""
+        fake_payload = {"ok": True, "status": "scheduled", "latest_tag": "v1.3.3", "shutdown_required": True}
+        with patch("cyberdeck.api.local.prepare_launcher_update_install", return_value=fake_payload) as mocked:
+            out = api_local.local_update_install(_Req("127.0.0.1"), force_refresh=1)
+        self.assertEqual(out, fake_payload)
+        self.assertTrue(mocked.called)
+
     def test_local_stats_tolerates_psutil_errors(self):
         """Validate scenario: test local stats tolerates psutil errors."""
         # Test body is intentionally explicit so regressions are easy to diagnose.

@@ -416,8 +416,12 @@ def _ffmpeg_audio_args_supported(args: list) -> bool:
     return True
 
 
-def _ffmpeg_audio_input_arg_sets() -> list[list]:
-    """Build optional ffmpeg audio-input candidates for system audio relay."""
+def _ffmpeg_audio_input_arg_sets(*, for_muxed_video: bool = False) -> list[list]:
+    """Build optional ffmpeg audio-input candidates for system audio relay.
+
+    `for_muxed_video=True` disables Windows "force soundcard" short-circuit so
+    muxed H.264/H.265 paths can still try ffmpeg-native audio inputs.
+    """
     raw = str(os.environ.get("CYBERDECK_AUDIO_INPUT_ARGS", "") or "").strip()
     if raw:
         if raw.lower() in {"0", "off", "none", "disabled"}:
@@ -443,30 +447,15 @@ def _ffmpeg_audio_input_arg_sets() -> list[list]:
     # Best-effort defaults; can be overridden via CYBERDECK_AUDIO_INPUT_ARGS.
     if os.name == "nt":
         force_soundcard = _env_bool("CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD", True)
-        fallback_from_force_soundcard = False
-        if force_soundcard:
-            soundcard_enabled = _env_bool("CYBERDECK_AUDIO_ENABLE_SOUNDCARD_LOOPBACK", True)
-            snd_ok, snd_name = _soundcard_loopback_probe() if soundcard_enabled else (False, None)
-            if snd_ok:
-                return []
-            fallback_from_force_soundcard = True
+        if force_soundcard and (not bool(for_muxed_video)):
             if _stream_log_enabled():
-                if soundcard_enabled:
-                    log.warning(
-                        "CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD=1 but soundcard loopback is unavailable; "
-                        "fallback to ffmpeg dshow/wasapi candidates (speaker=%s)",
-                        snd_name,
-                    )
-                else:
-                    log.warning(
-                        "CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD=1 but soundcard loopback is disabled; "
-                        "fallback to ffmpeg dshow/wasapi candidates"
-                    )
+                log.info("CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD=1 -> skip ffmpeg audio input probing")
+            return []
         out: list[list] = []
         max_candidates = max(1, min(8, int(_env_int("CYBERDECK_AUDIO_INPUT_MAX_CANDIDATES", 2))))
-        allow_mic_fallback = _env_bool("CYBERDECK_AUDIO_ALLOW_MIC_FALLBACK", False) or fallback_from_force_soundcard
+        allow_mic_fallback = _env_bool("CYBERDECK_AUDIO_ALLOW_MIC_FALLBACK", False)
         prefer_dshow = _env_bool("CYBERDECK_AUDIO_WINDOWS_PREFER_DSHOW", True)
-        enable_wasapi = _env_bool("CYBERDECK_AUDIO_ENABLE_WASAPI", True) or fallback_from_force_soundcard
+        enable_wasapi = _env_bool("CYBERDECK_AUDIO_ENABLE_WASAPI", True)
         dshow_out: list[list] = []
         wasapi_out: list[list] = []
 
@@ -523,6 +512,36 @@ def _ffmpeg_audio_input_arg_sets() -> list[list]:
         seen.add(sig)
         uniq.append(args)
     return uniq
+
+
+def _ffmpeg_audio_relay_capabilities() -> dict[str, Any]:
+    """Return current audio relay capability snapshot used by API offer logic."""
+    force_soundcard = bool(os.name == "nt" and _env_bool("CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD", True))
+    soundcard_enabled = bool(os.name == "nt" and _env_bool("CYBERDECK_AUDIO_ENABLE_SOUNDCARD_LOOPBACK", True))
+    soundcard_ok = False
+    soundcard_name: Optional[str] = None
+    if soundcard_enabled:
+        soundcard_ok, soundcard_name = _soundcard_loopback_probe()
+
+    ffmpeg_inputs = _ffmpeg_audio_input_arg_sets(for_muxed_video=False)
+    ffmpeg_mux_inputs = _ffmpeg_audio_input_arg_sets(for_muxed_video=True)
+    real_audio = bool(ffmpeg_inputs) or bool(soundcard_ok)
+    # Muxed TS paths can only use ffmpeg audio inputs today.
+    muxed = bool(ffmpeg_mux_inputs)
+    return {
+        "ffmpeg_inputs": ffmpeg_inputs,
+        "ffmpeg_input_count": len(ffmpeg_inputs),
+        "ffmpeg_mux_inputs": ffmpeg_mux_inputs,
+        "ffmpeg_mux_input_count": len(ffmpeg_mux_inputs),
+        "soundcard_loopback": bool(soundcard_ok),
+        "soundcard_speaker": soundcard_name,
+        "soundcard_speakers": _soundcard_speaker_names()[:16],
+        "windows_force_soundcard": bool(force_soundcard),
+        "soundcard_enabled": bool(soundcard_enabled),
+        "real_audio_available": bool(real_audio),
+        "muxed_audio_available": bool(muxed),
+        "silent_fallback_enabled": bool(_env_bool("CYBERDECK_AUDIO_FALLBACK_TO_SILENT", False)),
+    }
 
 
 def _build_ffmpeg_audio_silent_cmd() -> list:
@@ -767,6 +786,8 @@ def _build_ffmpeg_cmds(
     preset = str(preset or "ultrafast")
     max_w = max(0, int(max_w))
     audio_bitrate_k = max(48, min(256, int(_env_int("CYBERDECK_AUDIO_BITRATE_K", 128))))
+    audio_channels = max(1, min(2, int(_env_int("CYBERDECK_AUDIO_CHANNELS", 2))))
+    audio_rate = max(8000, min(96000, int(_env_int("CYBERDECK_AUDIO_SAMPLE_RATE", 48000))))
     video_input_queue = max(32, min(8192, int(_env_int("CYBERDECK_STREAM_INPUT_QUEUE_SIZE", 1024))))
     audio_input_queue = max(32, min(8192, int(_env_int("CYBERDECK_AUDIO_INPUT_QUEUE_SIZE", 1024))))
     stream_rtbuf_mb = max(16, min(1024, int(_env_int("CYBERDECK_STREAM_RTBUF_MB", 128))))
@@ -774,7 +795,7 @@ def _build_ffmpeg_cmds(
     input_arg_sets = _build_ffmpeg_input_arg_sets(monitor, fps)
     if not input_arg_sets:
         return []
-    audio_input_sets = _ffmpeg_audio_input_arg_sets() if bool(audio) else []
+    audio_input_sets = _ffmpeg_audio_input_arg_sets(for_muxed_video=True) if bool(audio) else []
     allow_silent_fallback = _env_bool("CYBERDECK_AUDIO_FALLBACK_TO_SILENT", True)
     if bool(audio) and (not audio_input_sets) and _stream_log_enabled():
         log.warning("audio relay requested but no audio input backend detected (override with CYBERDECK_AUDIO_INPUT_ARGS)")
@@ -832,6 +853,8 @@ def _build_ffmpeg_cmds(
             ]
         if codec == "h264" and enc_name == "libx264":
             cmd += ["-profile:v", "baseline" if low_latency else "main"]
+        if codec == "h265" and enc_name == "libx265":
+            cmd += ["-x265-params", "repeat-headers=1:log-level=error"]
         if include_audio and audio_args:
             cmd += [
                 "-map",
@@ -843,9 +866,9 @@ def _build_ffmpeg_cmds(
                 "-b:a",
                 f"{audio_bitrate_k}k",
                 "-ac",
-                "2",
+                str(audio_channels),
                 "-ar",
-                "48000",
+                str(audio_rate),
             ]
         else:
             cmd += ["-an"]
@@ -872,8 +895,6 @@ def _build_ffmpeg_cmds(
             "mpegts",
             "pipe:1",
         ]
-        if codec == "h265" and enc_name == "libx265":
-            cmd.extend(["-x265-params", "repeat-headers=1:log-level=error"])
         out_list.append(cmd)
 
     out_audio: list[list] = []
@@ -1368,7 +1389,7 @@ def _soundcard_loopback_stream() -> Any:
             except Exception:
                 pass
 
-    return StreamingResponse(_gen(), media_type="video/mp2t", headers=_stream_headers())
+    return StreamingResponse(_gen(), media_type="audio/mp2t", headers=_stream_headers())
 
 
 def _ffmpeg_audio_stream() -> Any:
@@ -1441,7 +1462,7 @@ def _ffmpeg_audio_stream() -> Any:
         cmd_timeout = max(0.35, min(float(cmd_timeout), float(remaining_s)))
         stream = _spawn_stream_process(
             cmd,
-            "video/mp2t",
+            "audio/mp2t",
             settle_s=0.08,
             stderr_lines=80,
             exit_tag="ffmpeg_audio_exited",
@@ -1462,7 +1483,7 @@ def _ffmpeg_audio_stream() -> Any:
         silent_cmd = _build_ffmpeg_audio_silent_cmd()
         stream = _spawn_stream_process(
             silent_cmd,
-            "video/mp2t",
+            "audio/mp2t",
             settle_s=0.05,
             stderr_lines=40,
             exit_tag="ffmpeg_audio_silent_exited",

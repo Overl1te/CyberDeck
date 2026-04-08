@@ -166,7 +166,7 @@ class AppUiMixin:
 
         self.sidebar = ctk.CTkFrame(
             self,
-            width=258,
+            width=264,
             corner_radius=0,
             fg_color=COLOR_PANEL,
             border_width=1,
@@ -187,7 +187,7 @@ class AppUiMixin:
         ctk.CTkLabel(
             brand,
             text="CYBERDECK",
-            font=("Consolas", 23, "bold"),
+            font=("Consolas", 24, "bold"),
             text_color=COLOR_TEXT,
         ).pack(anchor="w", padx=14, pady=(12, 0))
         ctk.CTkLabel(

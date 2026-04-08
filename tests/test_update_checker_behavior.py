@@ -40,6 +40,14 @@ class UpdateCheckerBehaviorTests(unittest.TestCase):
             "tag_name": "v1.3.7",
             "html_url": "https://github.com/Overl1te/CyberDeck/releases/tag/v1.3.7",
             "published_at": "2026-02-18T00:00:00Z",
+            "assets": [
+                {
+                    "name": "CyberDeck_Setup_v1.3.7.exe",
+                    "browser_download_url": "https://github.com/Overl1te/CyberDeck/releases/download/v1.3.7/CyberDeck_Setup_v1.3.7.exe",
+                    "content_type": "application/vnd.microsoft.portable-executable",
+                    "size": 123456,
+                }
+            ],
         }
         with patch("cyberdeck.update_checker.request.urlopen", return_value=_FakeResponse(payload)):
             out = update_checker.fetch_latest_release_tag("Overl1te/CyberDeck", timeout_s=1.0, ttl_s=30)
@@ -47,6 +55,8 @@ class UpdateCheckerBehaviorTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["latest_tag"], "v1.3.7")
         self.assertIn("github.com/Overl1te/CyberDeck", out["release_url"])
+        self.assertEqual(out["preferred_asset"]["kind"], "windows_installer")
+        self.assertEqual(out["preferred_asset"]["size"], 123456)
 
     def test_fetch_latest_release_tag_uses_ttl_cache(self):
         """Validate scenario: repeated fetch within TTL should reuse cached payload."""
@@ -98,7 +108,33 @@ class UpdateCheckerBehaviorTests(unittest.TestCase):
         self.assertTrue(out["launcher"]["has_update"])
         self.assertTrue(out["mobile"]["has_update"])
 
+    def test_fetch_latest_release_tag_prefers_mobile_apk_asset(self):
+        """Validate scenario: mobile repo should prefer APK asset over unrelated downloads."""
+        payload = {
+            "tag_name": "v1.1.3",
+            "html_url": "https://github.com/Overl1te/CyberDeck-Mobile/releases/tag/v1.1.3",
+            "published_at": "2026-02-18T00:00:00Z",
+            "assets": [
+                {
+                    "name": "notes.txt",
+                    "browser_download_url": "https://github.com/example/notes.txt",
+                    "content_type": "text/plain",
+                    "size": 12,
+                },
+                {
+                    "name": "CyberDeck-Mobile-v1.1.3.apk",
+                    "browser_download_url": "https://github.com/Overl1te/CyberDeck-Mobile/releases/download/v1.1.3/app.apk",
+                    "content_type": "application/vnd.android.package-archive",
+                    "size": 456789,
+                },
+            ],
+        }
+        with patch("cyberdeck.update_checker.request.urlopen", return_value=_FakeResponse(payload)):
+            out = update_checker.fetch_latest_release_tag("Overl1te/CyberDeck-Mobile", timeout_s=1.0, ttl_s=30)
+
+        self.assertEqual(out["preferred_asset"]["kind"], "android_apk")
+        self.assertTrue(out["preferred_asset"]["download_url"].endswith("/app.apk"))
+
 
 if __name__ == "__main__":
     unittest.main()
-

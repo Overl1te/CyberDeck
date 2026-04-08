@@ -109,6 +109,18 @@ class LauncherApiClientBehaviorTests(unittest.TestCase):
         self.assertEqual(c.describe_exception(requests.ConnectionError()), "connection failed")
         self.assertEqual(c.describe_exception(requests.exceptions.SSLError()), "TLS verification failed")
 
+    def test_install_update_posts_without_payload(self):
+        """Validate scenario: launcher should call localhost update installer endpoint without JSON body."""
+        c = LauncherApiClient("http://127.0.0.1:8080/api/local")
+        with patch("cyberdeck.launcher.api_client.requests.post") as mpost:
+            c.install_update(timeout=90.0, force_refresh=True)
+        mpost.assert_called_once_with(
+            "http://127.0.0.1:8080/api/local/update_install?force_refresh=1",
+            json=None,
+            timeout=90.0,
+            verify=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -81,7 +81,10 @@ class ContractSmokeTests(unittest.TestCase):
         diag = self.client.get("/api/diag", headers=self._auth_headers(token))
         self.assertEqual(diag.status_code, 200, diag.text)
         diag_body = diag.json()
+        self.assertIn("access", diag_body)
+        self.assertIn("session", diag_body)
         self.assertIn("stream", diag_body)
+        self.assertIn("volume", diag_body)
         self.assertIn("ws", diag_body)
         self.assertIn("protocol_version", diag_body)
 

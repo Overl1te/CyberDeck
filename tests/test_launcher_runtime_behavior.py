@@ -1,5 +1,6 @@
 ﻿import os
 import sys
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -170,6 +171,189 @@ class LauncherRuntimeBehaviorTests(unittest.TestCase):
         kwargs = captured["cfg_kwargs"]
         self.assertIsNone(kwargs["ssl_certfile"])
         self.assertIsNone(kwargs["ssl_keyfile"])
+
+    def test_sync_info_timeout_is_relaxed_during_startup_grace(self):
+        """Validate scenario: first launcher sync should use a larger timeout while server is booting."""
+        fake = types.SimpleNamespace(
+            _boot_server_ready_announced=False,
+            server_online=False,
+            _boot_started_ts=time.time(),
+            _startup_sync_grace_s=lambda: 8.0,
+        )
+        self.assertEqual(AppRuntimeMixin._sync_info_timeout(fake), 2.5)
+
+    def test_sync_info_timeout_returns_default_after_boot_ready(self):
+        """Validate scenario: normal sync timeout should be restored after boot is ready."""
+        fake = types.SimpleNamespace(
+            _boot_server_ready_announced=True,
+            server_online=True,
+            _boot_started_ts=time.time(),
+            _startup_sync_grace_s=lambda: 8.0,
+        )
+        self.assertEqual(AppRuntimeMixin._sync_info_timeout(fake), 1.0)
+
+    def test_startup_sync_timeout_is_suppressed_while_booting(self):
+        """Validate scenario: early transport noise should stay out of launcher logs during boot."""
+        fake = types.SimpleNamespace(
+            _boot_server_ready_announced=False,
+            server_online=False,
+            _boot_started_ts=time.time(),
+            _startup_sync_grace_s=lambda: 8.0,
+        )
+        self.assertTrue(AppRuntimeMixin._should_suppress_startup_sync_error(fake, "request timeout"))
+        self.assertTrue(AppRuntimeMixin._should_suppress_startup_sync_error(fake, "connection failed"))
+        self.assertFalse(AppRuntimeMixin._should_suppress_startup_sync_error(fake, "TLS verification failed"))
+
+    def test_startup_sync_timeout_is_not_suppressed_after_grace(self):
+        """Validate scenario: late startup failures should still be surfaced to the user."""
+        fake = types.SimpleNamespace(
+            _boot_server_ready_announced=False,
+            server_online=False,
+            _boot_started_ts=(time.time() - 20.0),
+            _startup_sync_grace_s=lambda: 8.0,
+        )
+        self.assertFalse(AppRuntimeMixin._should_suppress_startup_sync_error(fake, "request timeout"))
+
+    def test_rearm_server_startup_grace_resets_boot_state_for_restart(self):
+        """Validate scenario: restart should regain startup grace instead of logging a false timeout."""
+        fake = types.SimpleNamespace(
+            _boot_server_ready_announced=True,
+            server_online=True,
+            _boot_started_ts=0.0,
+        )
+        with patch("cyberdeck.launcher.app_runtime.time.time", return_value=1234.5):
+            AppRuntimeMixin._rearm_server_startup_grace(fake)
+        self.assertFalse(fake._boot_server_ready_announced)
+        self.assertFalse(fake.server_online)
+        self.assertEqual(fake._boot_started_ts, 1234.5)
+
+    def test_format_console_line_normalizes_launcher_prefix(self):
+        """Validate scenario: console mode should render launcher logs in a concise structured format."""
+        fake = types.SimpleNamespace(_console_timestamp=lambda: "11:35:07")
+        out = AppRuntimeMixin._format_console_line(fake, "[launcher] server process started\n")
+        self.assertEqual(out, "11:35:07 | launcher | server process started\n")
+
+    def test_format_console_line_preserves_server_structured_logs(self):
+        """Validate scenario: already-structured server logs should pass through unchanged."""
+        fake = types.SimpleNamespace(_console_timestamp=lambda: "11:35:07")
+        line = "2026-03-22 11:35:08,161 | INFO | cyberdeck | UDP discovery listening on 5555\n"
+        self.assertEqual(AppRuntimeMixin._format_console_line(fake, line), line)
+
+    def test_local_access_origin_uses_full_scheme_host_and_port(self):
+        """Validate scenario: Home screen should expose a complete local origin that can be copied directly."""
+        fake = types.SimpleNamespace(
+            server_ip="192.168.0.201",
+            server_port=8080,
+            api_scheme="https",
+            tls_enabled=True,
+            port=8080,
+        )
+        self.assertEqual(
+            AppRuntimeMixin._local_access_origin(fake),
+            "https://192.168.0.201:8080",
+        )
+
+    def test_log_console_state_changes_reports_local_and_public_ready(self):
+        """Validate scenario: console mode should emit readable runtime state transitions once."""
+        fake = types.SimpleNamespace(
+            logs_enabled=True,
+            server_online=True,
+            server_ip="192.168.0.201",
+            server_port=8080,
+            api_scheme="https",
+            cloudflare_status="online",
+            cloudflare_public_url="https://demo.trycloudflare.com",
+            cloudflare_last_error="",
+            _console_last_server_online=None,
+            _console_last_server_endpoint="",
+            _console_last_cloudflare_sig=None,
+            append_log=lambda text: fake.logs.append(str(text)),
+            logs=[],
+        )
+        AppRuntimeMixin._log_console_state_changes(fake)
+        self.assertEqual(
+            fake.logs,
+            [
+                "[launcher] local api ready: 192.168.0.201:8080 (HTTPS)\n",
+                "[cloudflare] public access ready: https://demo.trycloudflare.com\n",
+            ],
+        )
+
+    def test_friendly_remote_access_detail_maps_missing_cloudflare_token(self):
+        """Validate scenario: launcher should show short translated Cloudflare token guidance in Home card."""
+        fake = types.SimpleNamespace(
+            tr=lambda key, **_kwargs: {
+                "remote_access_cloudflare_token_needed": "Нужен токен Named Tunnel Cloudflare",
+            }.get(key, key)
+        )
+        self.assertEqual(
+            AppRuntimeMixin._friendly_remote_access_detail(
+                fake,
+                "cloudflared tunnel run --token requires a token value",
+            ),
+            "Нужен токен Named Tunnel Cloudflare",
+        )
+
+    def test_should_attempt_auto_update_requires_windows_packaged_launcher_update(self):
+        """Validate scenario: unattended install should start only for packaged Windows launcher updates with setup asset."""
+        fake = types.SimpleNamespace(
+            settings={"auto_update_check": True, "auto_update_install": True},
+            server_online=True,
+            _auto_update_request_inflight=False,
+            _auto_update_shutdown_scheduled=False,
+            _auto_update_last_attempt_tag="",
+            _auto_update_last_attempt_ts=0.0,
+            update_state={
+                "launcher": {
+                    "has_update": True,
+                    "latest_tag": "v1.3.3",
+                    "preferred_asset": {"kind": "windows_installer"},
+                }
+            },
+            _launcher_update_channel=lambda: {"has_update": True, "latest_tag": "v1.3.3", "preferred_asset": {"kind": "windows_installer"}},
+            _channel_has_update=AppRuntimeMixin._channel_has_update,
+            _channel_preferred_asset=AppRuntimeMixin._channel_preferred_asset,
+            _channel_latest_tag=AppRuntimeMixin._channel_latest_tag,
+            _auto_update_retry_cooldown_s=lambda: 21600.0,
+        )
+        with patch("cyberdeck.launcher.app_runtime.is_windows", return_value=True), patch(
+            "cyberdeck.launcher.app_runtime.is_packaged_runtime",
+            return_value=True,
+        ):
+            should_run, latest_tag = AppRuntimeMixin._should_attempt_auto_update(fake)
+        self.assertTrue(should_run)
+        self.assertEqual(latest_tag, "v1.3.3")
+
+    def test_should_attempt_auto_update_respects_retry_cooldown(self):
+        """Validate scenario: same release should not be retried immediately after a failed automatic install attempt."""
+        now_ts = time.time()
+        fake = types.SimpleNamespace(
+            settings={"auto_update_check": True, "auto_update_install": True},
+            server_online=True,
+            _auto_update_request_inflight=False,
+            _auto_update_shutdown_scheduled=False,
+            _auto_update_last_attempt_tag="v1.3.3",
+            _auto_update_last_attempt_ts=now_ts,
+            update_state={
+                "launcher": {
+                    "has_update": True,
+                    "latest_tag": "v1.3.3",
+                    "preferred_asset": {"kind": "windows_installer"},
+                }
+            },
+            _launcher_update_channel=lambda: {"has_update": True, "latest_tag": "v1.3.3", "preferred_asset": {"kind": "windows_installer"}},
+            _channel_has_update=AppRuntimeMixin._channel_has_update,
+            _channel_preferred_asset=AppRuntimeMixin._channel_preferred_asset,
+            _channel_latest_tag=AppRuntimeMixin._channel_latest_tag,
+            _auto_update_retry_cooldown_s=lambda: 21600.0,
+        )
+        with patch("cyberdeck.launcher.app_runtime.is_windows", return_value=True), patch(
+            "cyberdeck.launcher.app_runtime.is_packaged_runtime",
+            return_value=True,
+        ), patch("cyberdeck.launcher.app_runtime.time.time", return_value=now_ts + 120.0):
+            should_run, latest_tag = AppRuntimeMixin._should_attempt_auto_update(fake)
+        self.assertFalse(should_run)
+        self.assertEqual(latest_tag, "")
 
 
 if __name__ == "__main__":

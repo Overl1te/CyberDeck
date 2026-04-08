@@ -85,4 +85,20 @@ async def get_token(request: Request, token: Optional[str] = Query(None)) -> str
     raise HTTPException(403, detail="Unauthorized")
 
 
+async def get_media_token(request: Request, token: Optional[str] = Query(None)) -> str:
+    """Resolve auth token for direct media endpoints with media-query compatibility."""
+    if token and device_manager.get_session(token):
+        return token
+    auth = request.headers.get("Authorization")
+    if auth:
+        t = auth.replace("Bearer ", "")
+        if device_manager.get_session(t):
+            return t
+    ws_token = request.query_params.get("token")
+    if ws_token and device_manager.get_session(ws_token):
+        return ws_token
+    raise HTTPException(403, detail="Unauthorized")
+
+
 TokenDep = Depends(get_token)
+MediaTokenDep = Depends(get_media_token)

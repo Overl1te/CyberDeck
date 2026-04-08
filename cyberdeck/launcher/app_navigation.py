@@ -229,6 +229,13 @@ class AppNavigationMixin:
             "tls_ca_path",
             "qr_mode",
         )
+        cloudflare_runtime_keys = (
+            "cloudflare_enabled",
+            "cloudflare_binary_path",
+            "cloudflare_tunnel_token",
+            "cloudflare_hostname",
+            "cloudflare_auto_install",
+        )
         app_restart_keys = (
             "pairing_single_use",
             "ignore_vpn",
@@ -239,10 +246,26 @@ class AppNavigationMixin:
             "verbose_stream_log",
             "mdns_enabled",
             "device_approval_required",
+            "stream_profile",
+            "stream_offer_fps",
+            "stream_offer_max_w",
+            "stream_offer_q",
+            "stream_offer_gop",
+            "stream_offer_preset",
+            "h264_bitrate_k",
+            "h265_bitrate_k",
+            "offer_audio_default",
+            "audio_bitrate_k",
+            "audio_sample_rate",
+            "audio_channels",
+            "audio_fallback_silent",
+            "stream_fast_resample_threshold",
+            "stream_subsampling_threshold",
         )
         launcher_restart_keys = ("hotkey_enabled",)
         old_language = str(self.settings.get("language", "ru"))
         old_restart_values = {k: self.settings.get(k) for k in restart_keys}
+        old_cloudflare_values = {k: self.settings.get(k) for k in cloudflare_runtime_keys}
         old_app_restart_values = {k: self.app_config.get(k) for k in app_restart_keys}
         old_launcher_values = {k: self.settings.get(k) for k in launcher_restart_keys}
 
@@ -279,6 +302,17 @@ class AppNavigationMixin:
         self.settings["tls_cert_path"] = str(self.ent_tls_cert.get()).strip()
         self.settings["tls_key_path"] = str(self.ent_tls_key.get()).strip()
         self.settings["tls_ca_path"] = str(self.ent_tls_ca.get()).strip()
+        if hasattr(self, "sw_cloudflare_enabled"):
+            self.settings["cloudflare_enabled"] = bool(self.sw_cloudflare_enabled.get())
+        if hasattr(self, "ent_cloudflare_binary_path"):
+            self.settings["cloudflare_binary_path"] = str(self.ent_cloudflare_binary_path.get()).strip()
+        if hasattr(self, "ent_cloudflare_tunnel_token"):
+            self.settings["cloudflare_tunnel_token"] = str(self.ent_cloudflare_tunnel_token.get()).strip()
+        if hasattr(self, "ent_cloudflare_hostname"):
+            cloudflare_hostname = str(self.ent_cloudflare_hostname.get()).strip()
+            if cloudflare_hostname and ("://" not in cloudflare_hostname):
+                cloudflare_hostname = f"https://{cloudflare_hostname}"
+            self.settings["cloudflare_hostname"] = cloudflare_hostname
         self.settings["qr_mode"] = str(self.qr_mode_var.get() or DEFAULT_SETTINGS["qr_mode"]).strip().lower()
         if self.settings["qr_mode"] not in ("site", "app"):
             self.settings["qr_mode"] = DEFAULT_SETTINGS["qr_mode"]
@@ -303,6 +337,44 @@ class AppNavigationMixin:
             self.app_config["mdns_enabled"] = bool(self.sw_mdns_enabled.get())
         if hasattr(self, "sw_device_approval_required"):
             self.app_config["device_approval_required"] = bool(self.sw_device_approval_required.get())
+        if hasattr(self, "opt_stream_profile"):
+            profile = str(self.opt_stream_profile.get() or "balanced").strip().lower().replace("-", "_")
+            if profile not in ("balanced", "quality", "low_latency"):
+                profile = "balanced"
+            self.app_config["stream_profile"] = profile
+        if hasattr(self, "ent_stream_offer_fps"):
+            self.app_config["stream_offer_fps"] = max(5, _get_int(self.ent_stream_offer_fps, 30))
+        if hasattr(self, "ent_stream_offer_max_w"):
+            self.app_config["stream_offer_max_w"] = max(640, _get_int(self.ent_stream_offer_max_w, 1920))
+        if hasattr(self, "ent_stream_offer_q"):
+            self.app_config["stream_offer_q"] = max(20, min(95, _get_int(self.ent_stream_offer_q, 55)))
+        if hasattr(self, "ent_stream_offer_gop"):
+            self.app_config["stream_offer_gop"] = max(10, _get_int(self.ent_stream_offer_gop, 60))
+        if hasattr(self, "ent_stream_offer_preset"):
+            preset = str(self.ent_stream_offer_preset.get() or "veryfast").strip()
+            self.app_config["stream_offer_preset"] = preset or "veryfast"
+        if hasattr(self, "ent_h264_bitrate_k"):
+            self.app_config["h264_bitrate_k"] = max(500, _get_int(self.ent_h264_bitrate_k, 6000))
+        if hasattr(self, "ent_h265_bitrate_k"):
+            self.app_config["h265_bitrate_k"] = max(500, _get_int(self.ent_h265_bitrate_k, 4200))
+        if hasattr(self, "sw_offer_audio_default"):
+            self.app_config["offer_audio_default"] = bool(self.sw_offer_audio_default.get())
+        if hasattr(self, "ent_audio_bitrate_k"):
+            self.app_config["audio_bitrate_k"] = max(48, min(320, _get_int(self.ent_audio_bitrate_k, 128)))
+        if hasattr(self, "ent_audio_sample_rate"):
+            self.app_config["audio_sample_rate"] = max(8000, min(96000, _get_int(self.ent_audio_sample_rate, 48000)))
+        if hasattr(self, "ent_audio_channels"):
+            self.app_config["audio_channels"] = max(1, min(2, _get_int(self.ent_audio_channels, 2)))
+        if hasattr(self, "sw_audio_fallback_silent"):
+            self.app_config["audio_fallback_silent"] = bool(self.sw_audio_fallback_silent.get())
+        if hasattr(self, "ent_stream_fast_resample_threshold"):
+            self.app_config["stream_fast_resample_threshold"] = max(
+                30, _get_int(self.ent_stream_fast_resample_threshold, 60)
+            )
+        if hasattr(self, "ent_stream_subsampling_threshold"):
+            self.app_config["stream_subsampling_threshold"] = max(
+                30, _get_int(self.ent_stream_subsampling_threshold, 60)
+            )
         self._normalize_app_config()
 
         tls_auto_generated = False
@@ -415,6 +487,23 @@ class AppNavigationMixin:
                 text = self.tr("settings_applied")
             self.lbl_settings_status.configure(text=text, text_color=COLOR_ACCENT)
 
+        cloudflare_runtime_changed = False
+        try:
+            cloudflare_runtime_changed = any(
+                self.settings.get(k) != old_cloudflare_values.get(k) for k in cloudflare_runtime_keys
+            )
+        except Exception:
+            cloudflare_runtime_changed = False
+        if cloudflare_runtime_changed:
+            try:
+                self._apply_cloudflare_runtime()
+            except Exception:
+                pass
+            try:
+                self.request_sync(0)
+            except Exception:
+                pass
+
         restart_server_needed = False
         try:
             if any(self.settings.get(k) != old_restart_values.get(k) for k in restart_keys):
@@ -447,6 +536,63 @@ class AppNavigationMixin:
                 self.refresh_qr_code(force=True)
         except Exception:
             pass
+        if cloudflare_runtime_changed:
+            try:
+                self.refresh_qr_code(force=True)
+            except Exception:
+                pass
+
+    def toggle_remote_access_action(self) -> Any:
+        """Toggle remote access without forcing a full server restart."""
+        enabled = not bool(self.settings.get("cloudflare_enabled", False))
+        self.settings["cloudflare_enabled"] = enabled
+        try:
+            save_json(self.settings_path, self.settings)
+        except Exception as exc:
+            try:
+                self.show_toast(self.tr("toast_save_failed"), level="error")
+            except Exception:
+                pass
+            try:
+                self.append_log(f"[launcher] failed to save remote access setting: {exc}\n")
+            except Exception:
+                pass
+            return
+
+        try:
+            if hasattr(self, "sw_cloudflare_enabled"):
+                if enabled:
+                    self.sw_cloudflare_enabled.select()
+                else:
+                    self.sw_cloudflare_enabled.deselect()
+        except Exception:
+            pass
+
+        try:
+            self._apply_cloudflare_runtime()
+        except Exception as exc:
+            try:
+                self.append_log(f"[launcher] failed to apply remote access runtime: {exc}\n")
+            except Exception:
+                pass
+        try:
+            self.refresh_qr_code(force=True)
+        except Exception:
+            pass
+        try:
+            self.request_sync(0)
+        except Exception:
+            pass
+        try:
+            self._set_settings_status(
+                self._inline_text(
+                    "Удалённый доступ включён" if enabled else "Удалённый доступ выключен",
+                    "Remote access enabled" if enabled else "Remote access disabled",
+                ),
+                COLOR_ACCENT if enabled else COLOR_TEXT_DIM,
+            )
+        except Exception:
+            pass
 
     def select_frame(self, name: str) -> Any:
         """Select frame."""
@@ -456,7 +602,13 @@ class AppNavigationMixin:
         self.settings_frame.grid_forget()
 
         for btn in (self.btn_home, self.btn_devices, self.btn_settings):
-            btn.configure(text_color=COLOR_TEXT_DIM, fg_color="transparent", border_width=0, border_color=COLOR_BORDER)
+            btn.configure(
+                text_color=COLOR_TEXT_DIM,
+                fg_color="transparent",
+                border_width=0,
+                border_color=COLOR_BORDER,
+                hover_color=COLOR_PANEL_ALT,
+            )
 
         if name == "home":
             self.home_frame.grid(row=0, column=1, sticky="nsew")
@@ -550,12 +702,13 @@ class AppNavigationMixin:
 
         text = str(self._help_content() or "").strip()
         commands_text = str(self.tr("help_commands") or "").strip()
+        runtime_summary = self._help_runtime_summary()
         try:
             win = ctk.CTkToplevel(self)
             self._help_window = win
             win.title(self.tr("help_title"))
-            win.geometry("920x620")
-            win.minsize(760, 500)
+            win.geometry("1020x700")
+            win.minsize(820, 560)
             win.configure(fg_color=COLOR_BG)
             win.transient(self)
             win.protocol("WM_DELETE_WINDOW", self._close_help_window)
@@ -585,22 +738,30 @@ class AppNavigationMixin:
 
             header = ctk.CTkFrame(shell, fg_color=COLOR_PANEL_ALT, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
             header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+            header.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(
                 header,
                 text=self.tr("help_title"),
                 font=FONT_HEADER,
                 text_color=COLOR_TEXT,
-            ).pack(anchor="w", padx=14, pady=(10, 0))
+            ).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 0))
             ctk.CTkLabel(
                 header,
                 text=self.tr("help_subtitle", version=LAUNCHER_VERSION),
                 font=FONT_SMALL,
                 text_color=COLOR_TEXT_DIM,
-            ).pack(anchor="w", padx=14, pady=(2, 10))
+            ).grid(row=1, column=0, sticky="w", padx=14, pady=(2, 10))
+            CyberBtn(
+                header,
+                text=self.tr("help_close"),
+                command=self._close_help_window,
+                width=120,
+                height=34,
+            ).grid(row=0, column=1, rowspan=2, sticky="e", padx=14, pady=12)
 
             sidebar = ctk.CTkFrame(
                 shell,
-                width=245,
+                width=285,
                 fg_color=COLOR_PANEL_ALT,
                 corner_radius=10,
                 border_width=1,
@@ -620,6 +781,28 @@ class AppNavigationMixin:
                 text=self.tr("nav_support"),
                 command=self.open_support_page,
                 height=34,
+            ).pack(fill="x", padx=12, pady=(0, 6))
+            CyberBtn(
+                sidebar,
+                text=self.tr("help_open_logs"),
+                command=self._open_log_artifact,
+                height=34,
+            ).pack(fill="x", padx=12, pady=6)
+            CyberBtn(
+                sidebar,
+                text=self.tr("help_check_server"),
+                command=self._check_server_from_help,
+                height=34,
+            ).pack(fill="x", padx=12, pady=(6, 10))
+            CyberBtn(
+                sidebar,
+                text=self.tr("help_export_diag"),
+                command=self._export_help_diagnostics,
+                height=34,
+                fg_color=COLOR_ACCENT,
+                text_color="#04110A",
+                hover_color=COLOR_ACCENT_HOVER,
+                border_color=COLOR_ACCENT,
             ).pack(fill="x", padx=12, pady=(0, 6))
             CyberBtn(
                 sidebar,
@@ -660,12 +843,68 @@ class AppNavigationMixin:
 
             body = ctk.CTkFrame(shell, fg_color="transparent")
             body.grid(row=1, column=1, sticky="nsew", padx=(8, 12), pady=(0, 12))
-            body.grid_rowconfigure(0, weight=1)
+            body.grid_rowconfigure(1, weight=1)
             body.grid_columnconfigure(0, weight=1)
 
-            text_box = ctk.CTkTextbox(
+            runtime_card = ctk.CTkFrame(
                 body,
                 fg_color=COLOR_PANEL_ALT,
+                corner_radius=10,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            runtime_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            ctk.CTkLabel(
+                runtime_card,
+                text=self._inline_text("Снимок окружения", "Runtime Snapshot"),
+                font=FONT_UI_BOLD,
+                text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=14, pady=(12, 4))
+            ctk.CTkLabel(
+                runtime_card,
+                text=self._inline_text(
+                    "Текущие адреса доступа, режим сервера и состояние diagnostics.",
+                    "Current access endpoints, server mode, and diagnostics state.",
+                ),
+                font=FONT_SMALL,
+                text_color=COLOR_TEXT_DIM,
+                justify="left",
+                wraplength=640,
+            ).pack(anchor="w", padx=14, pady=(0, 8))
+            runtime_box = ctk.CTkTextbox(
+                runtime_card,
+                height=170,
+                fg_color=COLOR_BG,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                corner_radius=8,
+                text_color=COLOR_TEXT,
+                font=FONT_SMALL,
+                wrap="word",
+            )
+            runtime_box.pack(fill="x", padx=14, pady=(0, 14))
+            runtime_box.insert("1.0", runtime_summary)
+            runtime_box.configure(state="disabled")
+
+            guide_card = ctk.CTkFrame(
+                body,
+                fg_color=COLOR_PANEL_ALT,
+                corner_radius=10,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            guide_card.grid(row=1, column=0, sticky="nsew")
+            guide_card.grid_rowconfigure(1, weight=1)
+            guide_card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                guide_card,
+                text=self._inline_text("Памятка", "Guide"),
+                font=FONT_UI_BOLD,
+                text_color=COLOR_TEXT,
+            ).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 4))
+            text_box = ctk.CTkTextbox(
+                guide_card,
+                fg_color=COLOR_BG,
                 border_width=1,
                 border_color=COLOR_BORDER,
                 corner_radius=10,
@@ -673,7 +912,7 @@ class AppNavigationMixin:
                 font=FONT_UI,
                 wrap="word",
             )
-            text_box.grid(row=0, column=0, sticky="nsew")
+            text_box.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
             text_box.insert("1.0", text)
             text_box.configure(state="disabled")
 
@@ -694,6 +933,177 @@ class AppNavigationMixin:
                 messagebox.showinfo(self.tr("help_title"), text)
             except Exception:
                 pass
+
+    def _help_runtime_summary(self) -> str:
+        """Build compact launcher/server snapshot shown in the help window."""
+        local_origin = str(self._local_access_origin() or "").strip() or "-"
+        public_origin = str(self._public_access_origin() or "").strip() or self._inline_text("не активен", "not active")
+        remote_status = str(getattr(self, "cloudflare_status", "disabled") or "disabled")
+        mode = "PUBLIC" if remote_status == "online" else "LAN"
+        if not bool(getattr(self, "server_online", False)):
+            mode = "OFFLINE"
+
+        diag = self.server_diag if isinstance(getattr(self, "server_diag", None), dict) else {}
+        uptime_text = self._format_uptime_short(diag.get("uptime_s", 0))
+        cpu_text = f"{float(diag.get('cpu', 0.0) or 0.0):.0f}%"
+        ram_text = f"{float(diag.get('ram', 0.0) or 0.0):.0f}%"
+        last_sync = time.strftime("%H:%M:%S")
+        lines = [
+            f"{self._inline_text('Состояние', 'Status')}: {self.tr('server_online_state') if bool(getattr(self, 'server_online', False)) else self.tr('server_offline_state')}",
+            f"{self._inline_text('Режим', 'Mode')}: {mode}",
+            f"{self._inline_text('Локальный доступ', 'Local access')}: {local_origin}",
+            f"{self._inline_text('Публичный доступ', 'Public access')}: {public_origin}",
+            self.tr(
+                "server_version_line",
+                server=str(getattr(self, "server_version", self.tr("unknown_value")) or self.tr("unknown_value")),
+                launcher=LAUNCHER_VERSION,
+            ),
+            f"{self._inline_text('Диагностика', 'Diagnostics')}: uptime {uptime_text} | CPU {cpu_text} | RAM {ram_text}",
+            f"{self._inline_text('Лог-файл', 'Log file')}: {str(getattr(self, 'log_file', '') or '-')}",
+            f"{self._inline_text('Последний sync', 'Last sync')}: {last_sync}",
+        ]
+        last_error = str(getattr(self, "cloudflare_last_error", "") or "").strip()
+        if last_error:
+            lines.append(f"{self._inline_text('Проблема публичного доступа', 'Public access issue')}: {last_error}")
+        return "\n".join(lines)
+
+    def _scrub_sensitive_payload(self, value: Any) -> Any:
+        """Redact sensitive tokens/secrets from diagnostics exports."""
+        markers = ("token", "secret", "password", "authorization", "cookie", "qr_token", "nonce")
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key or "")
+                if any(marker in key_text.lower() for marker in markers):
+                    cleaned[key_text] = "<redacted>"
+                else:
+                    cleaned[key_text] = self._scrub_sensitive_payload(item)
+            return cleaned
+        if isinstance(value, list):
+            return [self._scrub_sensitive_payload(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._scrub_sensitive_payload(item) for item in value]
+        return value
+
+    def _build_help_diag_payload(self) -> dict[str, Any]:
+        """Build support-friendly diagnostics bundle for export."""
+        diag = self.server_diag if isinstance(getattr(self, "server_diag", None), dict) else {}
+        try:
+            recent_logs = "".join(list(self._server_log_ring)[-120:])
+        except Exception:
+            recent_logs = ""
+        return {
+            "collected_at": int(time.time()),
+            "launcher": {
+                "version": LAUNCHER_VERSION,
+                "language": str(self.settings.get("language", "ru") or "ru"),
+                "server_online": bool(getattr(self, "server_online", False)),
+                "server_ip": str(getattr(self, "server_ip", "") or ""),
+                "server_port": int(getattr(self, "server_port", getattr(self, "port", DEFAULT_PORT)) or DEFAULT_PORT),
+                "api_scheme": str(getattr(self, "api_scheme", "http") or "http"),
+                "server_version": str(getattr(self, "server_version", "") or ""),
+                "status_text": str(getattr(self, "status_text", "") or ""),
+                "local_access": str(self._local_access_origin() or ""),
+                "public_access": str(self._public_access_origin() or ""),
+                "log_file": str(getattr(self, "log_file", "") or ""),
+                "cloudflare": {
+                    "status": str(getattr(self, "cloudflare_status", "") or ""),
+                    "public_url": str(getattr(self, "cloudflare_public_url", "") or ""),
+                    "last_error": str(getattr(self, "cloudflare_last_error", "") or ""),
+                    "target_url": str(getattr(self, "cloudflare_target_url", "") or ""),
+                    "binary_path": str(getattr(self, "cloudflare_binary_resolved", "") or ""),
+                },
+                "settings": {
+                    "tls_enabled": bool(self.settings.get("tls_enabled", False)),
+                    "preferred_port": int(self.settings.get("preferred_port", DEFAULT_PORT) or DEFAULT_PORT),
+                    "cloudflare_enabled": bool(self.settings.get("cloudflare_enabled", False)),
+                    "cloudflare_auto_install": bool(self.settings.get("cloudflare_auto_install", True)),
+                    "cloudflare_hostname": str(self.settings.get("cloudflare_hostname", "") or ""),
+                    "qr_mode": str(self.settings.get("qr_mode", "app") or "app"),
+                    "devices_panel_visible": bool(self.settings.get("devices_panel_visible", True)),
+                },
+            },
+            "server_diag": self._scrub_sensitive_payload(diag),
+            "recent_logs_tail": recent_logs,
+        }
+
+    def _export_help_diagnostics(self) -> Any:
+        """Export launcher/server diagnostics to Downloads without blocking the UI thread."""
+        def _run() -> None:
+            try:
+                payload = self._build_help_diag_payload()
+                if bool(getattr(self, "server_online", False)):
+                    try:
+                        response = self.api_client.get_diag_bundle(timeout=2.5)
+                        if bool(getattr(response, "ok", False)):
+                            payload["server_diag"] = self._scrub_sensitive_payload(self.api_client.json_dict(response))
+                    except Exception:
+                        pass
+
+                export_dir = os.path.join(os.path.expanduser("~"), "Downloads", "CyberDeck")
+                os.makedirs(export_dir, exist_ok=True)
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                path = os.path.join(export_dir, f"cyberdeck-diagnostics-{stamp}.json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+                self.ui_call(lambda p=path: self.show_toast(self.tr("help_diag_exported", path=p), level="success"))
+            except Exception as exc:
+                self.ui_call(
+                    lambda msg=str(exc or "").strip() or exc.__class__.__name__: self.show_toast(
+                        self.tr("help_diag_export_failed", msg=msg),
+                        level="error",
+                    )
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _open_log_artifact(self) -> Any:
+        """Open the real log file, or fall back to a saved recent-log snapshot."""
+        path = str(getattr(self, "log_file", "") or "").strip()
+        try:
+            if (not path) or (not os.path.exists(path)):
+                export_dir = os.path.join(os.path.expanduser("~"), "Downloads", "CyberDeck")
+                os.makedirs(export_dir, exist_ok=True)
+                path = os.path.join(export_dir, "cyberdeck-recent-logs.txt")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("".join(list(self._server_log_ring)[-160:]))
+
+            if is_windows():
+                os.startfile(path)
+            elif sys.platform.startswith("linux"):
+                subprocess.Popen(["xdg-open", path], close_fds=True)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path], close_fds=True)
+            self.show_toast(self.tr("help_logs_opened"), level="success")
+        except Exception:
+            try:
+                self.show_toast(self.tr("open_file_failed", path=path), level="error")
+            except Exception:
+                pass
+
+    def _check_server_from_help(self) -> Any:
+        """Run a lightweight local API probe from the help window."""
+        def _run() -> None:
+            ok = False
+            try:
+                response = self.api_client.get_info(timeout=1.5)
+                ok = bool(getattr(response, "ok", False))
+            except Exception:
+                ok = False
+
+            def _finish() -> None:
+                if ok:
+                    try:
+                        self.request_sync(0)
+                    except Exception:
+                        pass
+                    self.show_toast(self.tr("help_server_ok"), level="success")
+                else:
+                    self.show_toast(self.tr("help_server_fail"), level="error")
+
+            self.ui_call(_finish)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _close_help_window(self) -> Any:
         """Close help window if it exists."""
@@ -789,6 +1199,12 @@ class AppNavigationMixin:
     def quit_app(self, icon: Any = None, item: Any = None) -> Any:
         """Stop background services and exit the launcher process."""
         self.stop_server_process()
+        try:
+            manager = getattr(self, "cloudflare_manager", None)
+            if manager is not None:
+                manager.stop()
+        except Exception:
+            pass
         try:
             if hasattr(self, "tray"):
                 self.tray.stop()

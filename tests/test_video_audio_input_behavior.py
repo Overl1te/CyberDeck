@@ -152,6 +152,61 @@ class VideoAudioInputBehaviorTests(unittest.TestCase):
             out = video_ffmpeg._ffmpeg_audio_input_arg_sets()
         self.assertEqual(out, [])
 
+    def test_windows_muxed_audio_input_sets_ignore_forced_soundcard_short_circuit(self):
+        """Validate scenario: muxed video path should still probe ffmpeg audio inputs when force-soundcard is enabled."""
+        with patch.dict(video_ffmpeg.os.environ, {"CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD": "1"}, clear=False), patch.object(
+            video_ffmpeg.os,
+            "name",
+            "nt",
+        ), patch.object(
+            video_ffmpeg,
+            "_ffmpeg_demuxer_available",
+            side_effect=lambda name: str(name).lower() == "dshow",
+        ), patch.object(
+            video_ffmpeg,
+            "_ffmpeg_dshow_audio_devices",
+            return_value=["Stereo Mix (Realtek)"],
+        ):
+            out = video_ffmpeg._ffmpeg_audio_input_arg_sets(for_muxed_video=True)
+        self.assertEqual(out, [["-f", "dshow", "-i", "audio=Stereo Mix (Realtek)"]])
+
+    def test_audio_relay_capabilities_include_muxed_probe_summary(self):
+        """Validate scenario: capabilities API should expose separate ffmpeg-input and muxed-input availability."""
+        def _audio_inputs(*_args, **kwargs):
+            for_muxed = bool(kwargs.get("for_muxed_video"))
+            if for_muxed:
+                return [["-f", "dshow", "-i", "audio=Stereo Mix"]]
+            return []
+
+        with patch.object(video_ffmpeg.os, "name", "nt"), patch.object(
+            video_ffmpeg,
+            "_ffmpeg_audio_input_arg_sets",
+            side_effect=_audio_inputs,
+        ), patch.object(
+            video_ffmpeg,
+            "_soundcard_loopback_probe",
+            return_value=(True, "Realtek Speakers"),
+        ), patch.object(
+            video_ffmpeg,
+            "_soundcard_speaker_names",
+            return_value=["Realtek Speakers"],
+        ), patch.object(
+            video_ffmpeg,
+            "_env_bool",
+            side_effect=lambda name, default: (
+                True
+                if str(name) in {"CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD", "CYBERDECK_AUDIO_ENABLE_SOUNDCARD_LOOPBACK"}
+                else bool(default)
+            ),
+        ):
+            out = video_ffmpeg._ffmpeg_audio_relay_capabilities()
+
+        self.assertEqual(int(out.get("ffmpeg_input_count") or 0), 0)
+        self.assertEqual(int(out.get("ffmpeg_mux_input_count") or 0), 1)
+        self.assertTrue(bool(out.get("soundcard_loopback")))
+        self.assertTrue(bool(out.get("real_audio_available")))
+        self.assertTrue(bool(out.get("muxed_audio_available")))
+
     def test_build_ffmpeg_cmds_can_disable_silent_fallback_when_audio_requested(self):
         """Validate scenario: when silent fallback is disabled and no audio source exists, command list should be empty."""
         with patch.object(video_ffmpeg, "_available_codec_encoders", return_value=["libx264"]), patch.object(
@@ -339,6 +394,40 @@ class VideoAudioInputBehaviorTests(unittest.TestCase):
             out = video_ffmpeg._ffmpeg_audio_stream()
         self.assertIsNone(out)
 
+    def test_ffmpeg_audio_stream_uses_audio_mp2t_media_type(self):
+        """Validate scenario: audio-only relay must expose audio/mp2t content type."""
+        with patch.object(video_ffmpeg, "_ffmpeg_available", return_value=True), patch.object(
+            video_ffmpeg,
+            "_build_ffmpeg_audio_cmds",
+            return_value=[["ffmpeg", "-f", "dshow", "-i", "audio=Stereo Mix"]],
+        ), patch.object(
+            video_ffmpeg,
+            "_spawn_stream_process",
+            return_value="audio_stream",
+        ) as mocked_spawn, patch.object(
+            video_ffmpeg,
+            "_env_bool",
+            side_effect=lambda name, default: False
+            if str(name) in {"CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD", "CYBERDECK_AUDIO_FALLBACK_TO_SILENT"}
+            else bool(default),
+        ), patch.object(
+            video_ffmpeg,
+            "_env_float",
+            side_effect=lambda _name, default: float(default),
+        ), patch.object(
+            video_ffmpeg,
+            "_env_int",
+            side_effect=lambda _name, default: int(default),
+        ), patch.object(
+            video_ffmpeg.os,
+            "name",
+            "posix",
+        ):
+            out = video_ffmpeg._ffmpeg_audio_stream()
+
+        self.assertEqual(out, "audio_stream")
+        self.assertEqual(mocked_spawn.call_args.args[1], "audio/mp2t")
+
     def test_ffmpeg_audio_stream_uses_soundcard_loopback_fallback_when_enabled(self):
         """Validate scenario: soundcard loopback fallback should be used when ffmpeg inputs are unavailable."""
         with patch.object(video_ffmpeg, "_ffmpeg_available", return_value=True), patch.object(
@@ -494,6 +583,145 @@ class VideoAudioInputBehaviorTests(unittest.TestCase):
             out = video_ffmpeg._ffmpeg_audio_stream()
 
         self.assertEqual(out, "silent_stream")
+
+    def test_ffmpeg_audio_stream_silent_fallback_uses_audio_mp2t_media_type(self):
+        """Validate scenario: silent audio fallback must keep audio/mp2t content type."""
+        with patch.object(video_ffmpeg, "_ffmpeg_available", return_value=True), patch.object(
+            video_ffmpeg,
+            "_build_ffmpeg_audio_cmds",
+            return_value=[],
+        ), patch.object(
+            video_ffmpeg,
+            "_build_ffmpeg_audio_silent_cmd",
+            return_value=["ffmpeg", "-f", "lavfi", "-i", "anullsrc"],
+        ), patch.object(
+            video_ffmpeg,
+            "_spawn_stream_process",
+            return_value="silent_stream",
+        ) as mocked_spawn, patch.object(
+            video_ffmpeg,
+            "_env_bool",
+            side_effect=lambda name, default: True if str(name) == "CYBERDECK_AUDIO_FALLBACK_TO_SILENT" else False,
+        ), patch.object(
+            video_ffmpeg,
+            "_env_float",
+            side_effect=lambda _name, default: float(default),
+        ), patch.object(
+            video_ffmpeg,
+            "_env_int",
+            side_effect=lambda _name, default: int(default),
+        ), patch.object(
+            video_ffmpeg.os,
+            "name",
+            "posix",
+        ):
+            out = video_ffmpeg._ffmpeg_audio_stream()
+
+        self.assertEqual(out, "silent_stream")
+        self.assertEqual(mocked_spawn.call_args.args[1], "audio/mp2t")
+
+    def test_soundcard_loopback_stream_uses_audio_mp2t_media_type(self):
+        """Validate scenario: Windows soundcard loopback response must expose audio/mp2t."""
+        class _FakeStdout:
+            def __init__(self):
+                self._sent = False
+
+            def read(self, _size):
+                if self._sent:
+                    return b""
+                self._sent = True
+                return b"ts-data"
+
+        class _FakeStderr:
+            def readline(self):
+                return b""
+
+        class _FakeStdin:
+            def write(self, _data):
+                return None
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class _FakeProc:
+            def __init__(self):
+                self.stdin = _FakeStdin()
+                self.stdout = _FakeStdout()
+                self.stderr = _FakeStderr()
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class _FakeThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                name = getattr(self._target, "__name__", "")
+                if name in {"_stdout_reader", "_stderr_reader"} and callable(self._target):
+                    self._target()
+
+        fake_soundcard = SimpleNamespace(get_microphone=lambda **_kwargs: object())
+
+        with patch.object(video_ffmpeg, "_soundcard_loopback_probe", return_value=(True, "Speakers")), patch.object(
+            video_ffmpeg,
+            "_ffmpeg_available",
+            return_value=True,
+        ), patch.object(
+            video_ffmpeg,
+            "_numpy_enable_fromstring_binary_compat",
+            return_value=None,
+        ), patch.object(
+            video_ffmpeg,
+            "_soundcard_pick_speaker",
+            return_value=(SimpleNamespace(name="Speakers"), "Speakers"),
+        ), patch.object(
+            video_ffmpeg,
+            "_soundcard",
+            fake_soundcard,
+        ), patch.object(
+            video_ffmpeg,
+            "_np",
+            SimpleNamespace(),
+        ), patch.object(
+            video_ffmpeg,
+            "_build_ffmpeg_audio_pipe_cmd",
+            return_value=["ffmpeg", "-i", "pipe:0"],
+        ), patch.object(
+            video_ffmpeg.subprocess,
+            "Popen",
+            return_value=_FakeProc(),
+        ), patch.object(
+            video_ffmpeg.threading,
+            "Thread",
+            _FakeThread,
+        ), patch.object(
+            video_ffmpeg,
+            "_env_int",
+            side_effect=lambda _name, default: int(default),
+        ), patch.object(
+            video_ffmpeg,
+            "_env_float",
+            side_effect=lambda _name, default: float(default),
+        ), patch.object(
+            video_ffmpeg,
+            "_env_bool",
+            side_effect=lambda _name, default: bool(default),
+        ):
+            stream = video_ffmpeg._soundcard_loopback_stream()
+
+        self.assertIsNotNone(stream)
+        self.assertEqual(getattr(stream, "media_type", None), "audio/mp2t")
 
 
 if __name__ == "__main__":

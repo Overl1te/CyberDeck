@@ -3,6 +3,7 @@ from collections import deque
 import ctypes
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+import psutil
 
 from .. import config
 from ..auth import get_perm
@@ -31,6 +33,7 @@ _ws_runtime_lock = threading.Lock()
 _ws_runtime = {}
 _ws_event_ids_lock = threading.Lock()
 _ws_event_ids = {}
+_power_guard_warned = set()
 _IS_WINDOWS = os.name == "nt"
 _IS_WAYLAND = (os.environ.get("XDG_SESSION_TYPE") or "").strip().lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
@@ -86,7 +89,10 @@ _windows_warned_input_block = set()
 _windows_gui_block_warned = set()
 _windows_protected_cache_lock = threading.Lock()
 _windows_protected_cache: dict[str, Any] = {"ts": 0.0, "items": []}
-_WINDOWS_GUI_PROTECT_ENABLED = _IS_WINDOWS and _env_bool("CYBERDECK_BLOCK_SELF_GUI_INPUT", True)
+# Default off: real-world remote sessions often need to interact with the
+# launcher itself while validating setup. Operators can re-enable protection
+# explicitly with `CYBERDECK_BLOCK_SELF_GUI_INPUT=1`.
+_WINDOWS_GUI_PROTECT_ENABLED = _IS_WINDOWS and _env_bool("CYBERDECK_BLOCK_SELF_GUI_INPUT", False)
 _WINDOWS_PROTECT_CACHE_TTL_S = max(0.05, min(2.0, _env_float("CYBERDECK_PROTECTED_GUI_CACHE_TTL_S", 0.35)))
 _WINDOWS_LAUNCHER_PID = max(0, _env_int("CYBERDECK_LAUNCHER_PID", 0))
 _WINDOWS_PROTECT_TITLE_TOKENS = tuple(
@@ -444,6 +450,123 @@ def _hotkey_variants(keys: list[str]) -> list[list[str]]:
     return variants
 
 
+_POWER_KEY_ALIASES = {"win", "winleft", "winright", "power", "sleep", "wake"}
+_POWER_HOTKEY_BLOCKLIST = (
+    frozenset(("alt", "f4")),
+    frozenset(("ctrl", "alt", "delete")),
+    frozenset(("ctrl", "shift", "esc")),
+    frozenset(("ctrl", "esc")),
+)
+_POWER_COMMAND_PATTERNS = (
+    "shutdown",
+    "poweroff",
+    "reboot",
+    "halt",
+    "systemctl poweroff",
+    "systemctl reboot",
+    "systemctl halt",
+    "systemctl suspend",
+    "systemctl hibernate",
+    "loginctl poweroff",
+    "loginctl reboot",
+    "pm-suspend",
+    "pm-hibernate",
+    "stop-computer",
+    "restart-computer",
+    "suspend-computer",
+    "rundll32.exe powrprof.dll,setsuspendstate",
+    "rundll32 powrprof.dll,setsuspendstate",
+    "start-process shutdown",
+)
+_POWER_FOREGROUND_HINTS = (
+    "startmenuexperiencehost",
+    "shellexperiencehost",
+    "lockapp",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "wt.exe",
+    "windowsterminal.exe",
+)
+
+
+def _hotkey_targets_power(keys: list[str]) -> bool:
+    """Return True when hotkey can be used to open power paths or force shutdown flows."""
+    normalized = {str(k or "").strip().lower() for k in (keys or []) if str(k or "").strip()}
+    if not normalized:
+        return False
+    if normalized.intersection({"win", "winleft", "winright"}):
+        return True
+    for blocked in _POWER_HOTKEY_BLOCKLIST:
+        if blocked.issubset(normalized):
+            return True
+    return False
+
+
+def _key_targets_power(key: str) -> bool:
+    """Return True for standalone key events that can trigger OS power paths."""
+    return str(key or "").strip().lower() in _POWER_KEY_ALIASES
+
+
+def _text_targets_power(text: str) -> bool:
+    """Return True when typed text resembles a shell/powershell power command."""
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    # Split chained shell fragments; match command starts with optional leading sudo.
+    parts = re.split(r"[\r\n;&|]+", raw)
+    for part in parts:
+        cmd = " ".join(part.strip().split())
+        if not cmd:
+            continue
+        if cmd.startswith("sudo "):
+            cmd = cmd[5:].strip()
+        for pattern in _POWER_COMMAND_PATTERNS:
+            if cmd.startswith(pattern):
+                return True
+    return False
+
+
+def _windows_foreground_process_name() -> str:
+    """Return lowercase process name of foreground window on Windows."""
+    if not _IS_WINDOWS:
+        return ""
+    try:
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        hwnd = 0
+    if hwnd <= 0:
+        return ""
+    pid = _windows_get_pid(hwnd)
+    if pid <= 0:
+        return ""
+    try:
+        proc = psutil.Process(int(pid))
+        return str(proc.name() or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _foreground_targets_power_surface() -> bool:
+    """Return True when current foreground UI is a known power-sensitive Windows surface."""
+    name = _windows_foreground_process_name()
+    if not name:
+        return False
+    return any(h in name for h in _POWER_FOREGROUND_HINTS)
+
+
+async def _notify_power_action_blocked(websocket: WebSocket, token: str) -> None:
+    """Send one warning per session when power-related action is denied by permissions."""
+    t = str(token or "")
+    if not t or t in _power_guard_warned:
+        return
+    _power_guard_warned.add(t)
+    try:
+        await _send_json(websocket, token, {"type": "warning", "code": "permission_denied:perm_power"})
+    except Exception:
+        pass
+
+
 def _ws_diag_init(token: str) -> None:
     """Initialize per-session websocket diagnostics state."""
     now = time.time()
@@ -709,7 +832,11 @@ async def _cursor_stream(websocket: WebSocket, token: str):
 @router.websocket("/ws/mouse")
 async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(None)):
     """Serve authenticated WebSocket events for remote input control."""
-    allow_query_token = bool(getattr(config, "ALLOW_QUERY_TOKEN", True))
+    # Keep query-token compatibility for WS control even when generic API
+    # query-token auth is disabled. Mobile/public relay paths may lose
+    # Authorization headers on websocket upgrades, so the token-in-query
+    # fallback remains intentionally enabled for this endpoint.
+    allow_query_token = True
     auth_header = str(websocket.headers.get("authorization") or "").strip()
     bearer = ""
     if auth_header.lower().startswith("bearer "):
@@ -943,16 +1070,6 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                         rem_y = 0.0
                     _mouse_remainders[token] = (rem_x, rem_y)
 
-                cur_x, cur_y, w, h = _get_virtual_cursor(token)
-                tgt_x = max(0, min(max(0, int(w) - 1), int(cur_x) + int(mx)))
-                tgt_y = max(0, min(max(0, int(h) - 1), int(cur_y) + int(my)))
-                if await _should_block_pointer_input(
-                    websocket,
-                    token,
-                    target_x=tgt_x,
-                    target_y=tgt_y,
-                ):
-                    continue
                 await _apply_pointer_move(websocket, token, mx, my)
 
             elif t == "move_abs":
@@ -984,17 +1101,13 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 with _mouse_remainders_lock:
                     _mouse_remainders[token] = (0.0, 0.0)
                     _mouse_last_move_ts[token] = time.monotonic()
-                if await _should_block_pointer_input(
-                    websocket,
-                    token,
-                    target_x=target_x,
-                    target_y=target_y,
-                ):
-                    continue
                 await _apply_pointer_move(websocket, token, move_x, move_y)
 
             elif t == "click":
                 if not get_perm(token, "perm_mouse"):
+                    continue
+                if (not get_perm(token, "perm_power")) and _foreground_targets_power_surface():
+                    await _notify_power_action_blocked(websocket, token)
                     continue
                 if await _should_block_pointer_input(websocket, token):
                     continue
@@ -1019,6 +1132,9 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "rclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if (not get_perm(token, "perm_power")) and _foreground_targets_power_surface():
+                    await _notify_power_action_blocked(websocket, token)
+                    continue
                 if await _should_block_pointer_input(websocket, token):
                     continue
                 clicked = False
@@ -1042,6 +1158,9 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "dclick":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if (not get_perm(token, "perm_power")) and _foreground_targets_power_surface():
+                    await _notify_power_action_blocked(websocket, token)
+                    continue
                 if await _should_block_pointer_input(websocket, token):
                     continue
                 clicked = False
@@ -1064,6 +1183,9 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
 
             elif t == "scroll":
                 if not get_perm(token, "perm_mouse"):
+                    continue
+                if (not get_perm(token, "perm_power")) and _foreground_targets_power_surface():
+                    await _notify_power_action_blocked(websocket, token)
                     continue
                 if await _should_block_pointer_input(websocket, token):
                     continue
@@ -1092,6 +1214,9 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             elif t == "drag_s":
                 if not get_perm(token, "perm_mouse"):
                     continue
+                if (not get_perm(token, "perm_power")) and _foreground_targets_power_surface():
+                    await _notify_power_action_blocked(websocket, token)
+                    continue
                 if await _should_block_pointer_input(websocket, token):
                     continue
                 ok = False
@@ -1114,6 +1239,9 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
 
             elif t == "drag_e":
                 if not get_perm(token, "perm_mouse"):
+                    continue
+                if (not get_perm(token, "perm_power")) and _foreground_targets_power_surface():
+                    await _notify_power_action_blocked(websocket, token)
                     continue
                 if await _should_block_pointer_input(websocket, token):
                     continue
@@ -1142,6 +1270,11 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                     continue
                 text = extract_text_payload(data)
                 if text:
+                    if (not get_perm(token, "perm_power")) and (
+                        _text_targets_power(text) or _foreground_targets_power_surface()
+                    ):
+                        await _notify_power_action_blocked(websocket, token)
+                        continue
                     delivered = False
                     if _IS_WINDOWS:
                         try:
@@ -1170,6 +1303,11 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 if await _should_block_keyboard_input(websocket, token):
                     continue
                 val = str(data.get("key", "")).lower()
+                if (not get_perm(token, "perm_power")) and (
+                    _key_targets_power(val) or _foreground_targets_power_surface()
+                ):
+                    await _notify_power_action_blocked(websocket, token)
+                    continue
                 if _IS_WINDOWS:
                     key_map = {"enter": 0x0D, "backspace": 0x08, "space": 0x20, "win": 0x5B}
                     vk = key_map.get(val)
@@ -1202,6 +1340,11 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 raw = data.get("keys") or []
                 if isinstance(raw, list) and raw:
                     keys = _normalize_hotkey_keys([str(k) for k in raw])
+                    if (not get_perm(token, "perm_power")) and (
+                        _hotkey_targets_power(keys) or _foreground_targets_power_surface()
+                    ):
+                        await _notify_power_action_blocked(websocket, token)
+                        continue
                     sent = False
                     for variant in _hotkey_variants(keys):
                         try:
@@ -1290,6 +1433,7 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
             pass
         try:
             _windows_gui_block_warned.discard(str(token or ""))
+            _power_guard_warned.discard(str(token or ""))
         except Exception:
             pass
         try:

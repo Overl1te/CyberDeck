@@ -14,6 +14,14 @@ from ..auth import TokenDep, require_perm
 from ..input import INPUT_BACKEND
 from ..logging_config import log
 
+try:
+    from comtypes import CLSCTX_ALL  # type: ignore
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # type: ignore
+except Exception:  # pragma: no cover - optional Windows dependency
+    CLSCTX_ALL = None
+    AudioUtilities = None
+    IAudioEndpointVolume = None
+
 
 router = APIRouter()
 _IS_WINDOWS = os.name == "nt"
@@ -37,6 +45,8 @@ _WPCTL_VOLUME_RE = re.compile(r"volume:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
 _WINDOWS_WAVEOUT_DEVICE = 0xFFFFFFFF
 _WINDOWS_WAVEOUT_MAX = 0xFFFF
 _WINDOWS_LAST_NONZERO_VOLUME = 50
+_WINDOWS_ENDPOINT_VOLUME = None
+_WINDOWS_ENDPOINT_VOLUME_LOADED = False
 
 
 def _run_first_ok(cmds: list[list[str]]) -> bool:
@@ -139,6 +149,77 @@ def _parse_bool_text(text: str) -> Optional[bool]:
 def _clamp_percent(value: int) -> int:
     """Clamp integer volume percentage into [0, 100] range."""
     return max(0, min(100, int(value)))
+
+
+def _windows_endpoint_volume():
+    """Return Windows CoreAudio endpoint volume object when optional deps are available."""
+    global _WINDOWS_ENDPOINT_VOLUME, _WINDOWS_ENDPOINT_VOLUME_LOADED
+    if _WINDOWS_ENDPOINT_VOLUME_LOADED:
+        return _WINDOWS_ENDPOINT_VOLUME
+    _WINDOWS_ENDPOINT_VOLUME_LOADED = True
+    if not _IS_WINDOWS or AudioUtilities is None or IAudioEndpointVolume is None or CLSCTX_ALL is None:
+        _WINDOWS_ENDPOINT_VOLUME = None
+        return None
+    try:
+        speakers = AudioUtilities.GetSpeakers()
+        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        _WINDOWS_ENDPOINT_VOLUME = ctypes.cast(interface, ctypes.POINTER(IAudioEndpointVolume))
+        return _WINDOWS_ENDPOINT_VOLUME
+    except Exception:
+        _WINDOWS_ENDPOINT_VOLUME = None
+        return None
+
+
+def _windows_endpoint_volume_state() -> Optional[dict[str, Any]]:
+    """Read Windows master volume through CoreAudio endpoint when available."""
+    endpoint = _windows_endpoint_volume()
+    if endpoint is None:
+        return None
+    try:
+        muted = bool(endpoint.GetMute())
+        scalar = float(endpoint.GetMasterVolumeLevelScalar())
+        pct = _clamp_percent(int(round(scalar * 100.0)))
+        return {
+            "supported": True,
+            "volume_percent": pct,
+            "muted": bool(muted or pct <= 0),
+            "backend": "pycaw",
+        }
+    except Exception:
+        return None
+
+
+def _windows_endpoint_set_volume(percent: int) -> bool:
+    """Set Windows master volume through CoreAudio endpoint when available."""
+    global _WINDOWS_LAST_NONZERO_VOLUME
+    endpoint = _windows_endpoint_volume()
+    if endpoint is None:
+        return False
+    pct = _clamp_percent(percent)
+    try:
+        endpoint.SetMasterVolumeLevelScalar(float(pct) / 100.0, None)
+        if pct > 0:
+            _WINDOWS_LAST_NONZERO_VOLUME = pct
+            try:
+                endpoint.SetMute(False, None)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _windows_endpoint_toggle_mute() -> bool:
+    """Toggle Windows mute state through CoreAudio endpoint when available."""
+    endpoint = _windows_endpoint_volume()
+    if endpoint is None:
+        return False
+    try:
+        current = bool(endpoint.GetMute())
+        endpoint.SetMute(not current, None)
+        return True
+    except Exception:
+        return False
 
 
 def _windows_waveout_volume_state() -> Optional[dict[str, Any]]:
@@ -319,7 +400,7 @@ def _mac_toggle_mute() -> bool:
 def _raw_volume_state() -> Optional[dict[str, Any]]:
     """Read current host output volume state from OS-specific backend."""
     if _IS_WINDOWS:
-        return _windows_waveout_volume_state()
+        return _windows_endpoint_volume_state() or _windows_waveout_volume_state()
     if sys.platform == "darwin":
         return _mac_volume_state()
     return _linux_volume_state()
@@ -328,7 +409,7 @@ def _raw_volume_state() -> Optional[dict[str, Any]]:
 def _set_volume_percent(percent: int) -> bool:
     """Set host output volume using OS-specific backend."""
     if _IS_WINDOWS:
-        return _windows_waveout_set_volume(percent)
+        return _windows_endpoint_set_volume(percent) or _windows_waveout_set_volume(percent)
     if sys.platform == "darwin":
         return _mac_set_volume_percent(percent)
     return _linux_set_volume_percent(percent)
@@ -337,7 +418,7 @@ def _set_volume_percent(percent: int) -> bool:
 def _toggle_system_mute() -> bool:
     """Toggle host output mute using OS-specific backend."""
     if _IS_WINDOWS:
-        return _windows_waveout_toggle_mute()
+        return _windows_endpoint_toggle_mute() or _windows_waveout_toggle_mute()
     if sys.platform == "darwin":
         return _mac_toggle_mute()
     return _linux_toggle_mute()

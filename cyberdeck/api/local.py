@@ -19,6 +19,7 @@ from ..pairing import pairing_meta, rotate_pairing_code
 from ..pin_limiter import pin_limiter
 from ..protocol import protocol_payload
 from ..qr_auth import qr_token_store
+from ..self_update import prepare_launcher_update_install
 from ..transfer import trigger_file_send_logic
 from ..update_checker import build_update_status
 
@@ -120,6 +121,32 @@ def _safe_process_rss() -> int:
         return int(psutil.Process(os.getpid()).memory_info().rss)
     except Exception:
         return 0
+
+
+def _normalized_public_origin(raw: Any) -> str:
+    """Normalize configured public origin into an absolute URL when possible."""
+    origin = str(raw or "").strip()
+    if not origin:
+        return ""
+    if "://" not in origin:
+        origin = f"https://{origin}"
+    return origin.rstrip("/")
+
+
+def _local_access_summary() -> Dict[str, Any]:
+    """Return access-mode diagnostics for launcher-side support exports."""
+    scheme = str(getattr(config, "SCHEME", "http") or "http").strip().lower() or "http"
+    return {
+        "scheme": scheme,
+        "port": _safe_port(getattr(config, "PORT", 0), scheme=scheme),
+        "tls_enabled": bool(getattr(config, "TLS_ENABLED", False)),
+        "local_ip": str(get_local_ip() or ""),
+        "public_origin_hint": _normalized_public_origin(getattr(config, "PUBLIC_ORIGIN_HINT", "")) or None,
+        "query_token_allowed": bool(getattr(config, "ALLOW_QUERY_TOKEN", False)),
+        "media_query_token_allowed": True,
+        "ws_query_token_allowed": True,
+        "remote_access_enabled": bool(getattr(config, "REMOTE_ACCESS_ENABLED", False)),
+    }
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -366,6 +393,21 @@ def local_updates(request: Request, force_refresh: int = 0):
             getattr(config, "CYBERDECK_MOBILE_GITHUB_REPO", "Overl1te/CyberDeck-Mobile")
             or "Overl1te/CyberDeck-Mobile"
         ),
+        timeout_s=timeout_s,
+        ttl_s=ttl_s,
+        force_refresh=bool(int(force_refresh or 0)),
+    )
+
+
+@router.post("/api/local/update_install")
+def local_update_install(request: Request, force_refresh: int = 1):
+    """Download latest Windows installer and schedule a silent self-update."""
+    _require_localhost(request)
+    timeout_s = max(0.5, min(15.0, float(getattr(config, "UPDATE_CHECK_TIMEOUT_S", 2.5) or 2.5)))
+    ttl_s = max(15, min(3600, int(getattr(config, "UPDATE_CHECK_TTL_S", 300) or 300)))
+    return prepare_launcher_update_install(
+        current_version=str(getattr(config, "VERSION", "") or ""),
+        repo_slug=str(getattr(config, "CYBERDECK_GITHUB_REPO", "Overl1te/CyberDeck") or "Overl1te/CyberDeck"),
         timeout_s=timeout_s,
         ttl_s=ttl_s,
         force_refresh=bool(int(force_refresh or 0)),
@@ -706,6 +748,7 @@ def local_diag_bundle(request: Request):
         "process_ram": _safe_process_rss(),
         "uptime_s": uptime,
         "pairing": pairing,
+        "access": _local_access_summary(),
         "security": input_guard.snapshot(),
         "pin_limiter": pin_limiter.stats(),
         "devices": device_manager.get_all_devices(),

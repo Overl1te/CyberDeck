@@ -18,6 +18,7 @@ from urllib import error, request
 _SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 _GH_API_TEMPLATE = "https://api.github.com/repos/{repo}/releases/latest"
 _CACHE_LOCK = threading.Lock()
+_WINDOWS_INSTALLER_RE = re.compile(r"(setup|installer).+\.exe$", re.IGNORECASE)
 
 
 @dataclass
@@ -75,6 +76,71 @@ def _read_latest_release_payload(repo_slug: str, timeout_s: float) -> dict[str, 
     return payload
 
 
+def _safe_asset_size(value: Any) -> int:
+    """Return a normalized non-negative asset size."""
+    try:
+        return max(0, int(value or 0))
+    except Exception:
+        return 0
+
+
+def _is_https_url(value: Any) -> bool:
+    """Return True when the asset URL is a non-empty HTTPS URL."""
+    text = str(value or "").strip()
+    return text.lower().startswith("https://")
+
+
+def _classify_release_asset(name: str) -> str:
+    """Classify a release asset into a coarse updater-friendly kind."""
+    lower = str(name or "").strip().lower()
+    if not lower:
+        return ""
+    if lower.endswith(".apk"):
+        return "android_apk"
+    if lower.endswith(".exe") and _WINDOWS_INSTALLER_RE.search(lower):
+        return "windows_installer"
+    if lower.endswith(".exe"):
+        return "windows_exe"
+    if lower.endswith(".zip"):
+        return "windows_archive"
+    return "asset"
+
+
+def _normalize_release_assets(raw_assets: Any) -> list[dict[str, Any]]:
+    """Normalize GitHub release assets into a stable compact payload list."""
+    out: list[dict[str, Any]] = []
+    for item in raw_assets if isinstance(raw_assets, list) else []:
+        asset = item if isinstance(item, dict) else {}
+        name = str(asset.get("name") or "").strip()
+        download_url = str(asset.get("browser_download_url") or "").strip()
+        if not name or not download_url:
+            continue
+        out.append(
+            {
+                "name": name,
+                "download_url": download_url,
+                "content_type": str(asset.get("content_type") or "").strip(),
+                "size": _safe_asset_size(asset.get("size")),
+                "kind": _classify_release_asset(name),
+            }
+        )
+    return out
+
+
+def _preferred_asset_for_repo(repo_slug: str, assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the most relevant downloadable asset for the repository."""
+    repo = str(repo_slug or "").strip().lower()
+    preferred_kinds = ("android_apk",) if "mobile" in repo else ("windows_installer", "windows_exe")
+    for kind in preferred_kinds:
+        for asset in assets:
+            if str(asset.get("kind") or "") != kind:
+                continue
+            if not _is_https_url(asset.get("download_url")):
+                continue
+            return dict(asset)
+    return {}
+
+
 def fetch_latest_release_tag(
     repo_slug: str,
     *,
@@ -117,9 +183,11 @@ def fetch_latest_release_tag(
             "latest_tag": tag,
             "release_url": str(parsed.get("html_url") or ""),
             "published_at": str(parsed.get("published_at") or ""),
+            "assets": _normalize_release_assets(parsed.get("assets")),
             "error": "",
             "checked_at": checked_at,
         }
+        result["preferred_asset"] = _preferred_asset_for_repo(repo, result["assets"])
     except error.HTTPError as exc:
         result = {
             "ok": False,
@@ -128,6 +196,8 @@ def fetch_latest_release_tag(
             "latest_tag": "",
             "release_url": "",
             "published_at": "",
+            "assets": [],
+            "preferred_asset": {},
             "error": f"http_{int(getattr(exc, 'code', 0) or 0)}",
             "checked_at": checked_at,
         }
@@ -139,6 +209,8 @@ def fetch_latest_release_tag(
             "latest_tag": "",
             "release_url": "",
             "published_at": "",
+            "assets": [],
+            "preferred_asset": {},
             "error": str(exc.__class__.__name__).lower() or "unknown_error",
             "checked_at": checked_at,
         }
@@ -160,6 +232,7 @@ def _status_from_release(current_version: str, release: dict[str, Any]) -> dict[
         "has_update": bool(ok and latest and is_newer_version(latest, current)),
         "release_url": str(release.get("release_url") or ""),
         "published_at": str(release.get("published_at") or ""),
+        "preferred_asset": dict(release.get("preferred_asset") or {}),
         "checked_at": int(release.get("checked_at") or int(time.time())),
         "error": str(release.get("error") or ""),
         "source_ok": ok,

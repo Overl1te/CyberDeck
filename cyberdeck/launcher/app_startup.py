@@ -4,9 +4,24 @@ from typing import Any
 import tkinter as tk
 
 from .shared import *
+from .cloudflare_manager import CloudflareManager
 
 ELEVATION_ATTEMPT_ENV = "CYBERDECK_ELEVATION_ATTEMPTED"
 ELEVATION_MARKER_ARG = "--cyberdeck-elevated"
+REMOTE_ACCESS_DISABLE_ENV = "CYBERDECK_DISABLE_REMOTE_ACCESS"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read bool env var supporting common truthy/falsy forms."""
+    raw = os.environ.get(name, None)
+    if raw is None:
+        return bool(default)
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on", "y", "t"}:
+        return True
+    if value in {"0", "false", "no", "off", "n", "f"}:
+        return False
+    return bool(default)
 
 class AppStartupMixin:
     """Startup/bootstrap methods for launcher application."""
@@ -73,6 +88,45 @@ class AppStartupMixin:
         self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
         self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
         self.tls_ca_path = str(self.settings.get("tls_ca_path") or "").strip()
+        legacy_remote_prefix = "n" "grok_"
+        legacy_remote_keys = tuple(
+            key for key in tuple(self.settings.keys()) if str(key or "").startswith(legacy_remote_prefix)
+        )
+        had_legacy_remote_keys = any(key in self.settings for key in legacy_remote_keys)
+        self.settings["cloudflare_enabled"] = bool(
+            self.settings.get("cloudflare_enabled", DEFAULT_SETTINGS["cloudflare_enabled"])
+        )
+        if _env_bool(REMOTE_ACCESS_DISABLE_ENV, False):
+            self.settings["cloudflare_enabled"] = False
+        self.settings["cloudflare_auto_install"] = bool(
+            self.settings.get("cloudflare_auto_install", DEFAULT_SETTINGS["cloudflare_auto_install"])
+        )
+        self.settings["auto_update_check"] = bool(
+            self.settings.get("auto_update_check", DEFAULT_SETTINGS["auto_update_check"])
+        )
+        self.settings["auto_update_install"] = bool(
+            self.settings.get("auto_update_install", DEFAULT_SETTINGS["auto_update_install"])
+        )
+        self.settings["cloudflare_binary_path"] = str(self.settings.get("cloudflare_binary_path") or "").strip()
+        self.settings["cloudflare_tunnel_token"] = str(self.settings.get("cloudflare_tunnel_token") or "").strip()
+        self.settings["cloudflare_hostname"] = str(self.settings.get("cloudflare_hostname") or "").strip()
+        if not self.settings["cloudflare_binary_path"]:
+            self.settings["cloudflare_binary_path"] = str(os.environ.get("CYBERDECK_CLOUDFLARED_BINARY") or "").strip()
+        if not self.settings["cloudflare_tunnel_token"]:
+            self.settings["cloudflare_tunnel_token"] = str(
+                os.environ.get("CYBERDECK_CLOUDFLARE_TUNNEL_TOKEN") or ""
+            ).strip()
+        if not self.settings["cloudflare_hostname"]:
+            self.settings["cloudflare_hostname"] = str(os.environ.get("CYBERDECK_CLOUDFLARE_HOSTNAME") or "").strip()
+        if self.settings["cloudflare_hostname"] and ("://" not in self.settings["cloudflare_hostname"]):
+            self.settings["cloudflare_hostname"] = f"https://{self.settings['cloudflare_hostname']}"
+        if had_legacy_remote_keys:
+            for key in legacy_remote_keys:
+                self.settings.pop(key, None)
+            try:
+                save_json(self.settings_path, self.settings)
+            except Exception:
+                pass
 
         self.icon_path_png = os.path.join(self.resource_dir, "icon.png")
         self.icon_path_qr_png = os.path.join(self.resource_dir, "icon-qr-code.png")
@@ -147,6 +201,21 @@ class AppStartupMixin:
         self.server_version = self.tr("unknown_value")
         self.status_text = self.tr("server_placeholder")
         self.server_online = False
+        self.server_diag = {}
+        self.cloudflare_status = "disabled"
+        self.cloudflare_public_url = ""
+        self.cloudflare_last_error = ""
+        self.cloudflare_binary_resolved = ""
+        self.cloudflare_target_url = ""
+        self._console_last_server_online = None
+        self._console_last_server_endpoint = ""
+        self._console_last_cloudflare_sig = None
+        self.cloudflare_manager = CloudflareManager(
+            log=self.append_log,
+            install_dir=str(os.environ.get("CYBERDECK_CLOUDFLARED_INSTALL_DIR") or "").strip(),
+            auto_install=bool(self.settings.get("cloudflare_auto_install", True)),
+            search_roots=[self.resource_dir, self.base_dir],
+        )
         self.update_state = {
             "checked_at": 0,
             "server": {"has_update": False, "latest_tag": "", "error": ""},
@@ -163,6 +232,15 @@ class AppStartupMixin:
         self._pending_prompted_tokens = set()
         self._seen_update_popup_keys = set()
         self._next_update_pull_ts = 0.0
+        self._next_diag_pull_ts = 0.0
+        self._auto_update_request_inflight = False
+        self._auto_update_shutdown_scheduled = False
+        self._auto_update_target_tag = ""
+        self._auto_update_last_attempt_tag = str(self.settings.get("_auto_update_last_attempt_tag") or "").strip()
+        try:
+            self._auto_update_last_attempt_ts = float(self.settings.get("_auto_update_last_attempt_ts", 0.0) or 0.0)
+        except Exception:
+            self._auto_update_last_attempt_ts = 0.0
         self._update_status_line = self.tr("updates_not_checked")
         self._update_status_has_updates = False
         self.current_frame_name = "home"
@@ -521,6 +599,33 @@ class AppStartupMixin:
         cfg["verbose_stream_log"] = bool(cfg.get("verbose_stream_log", True))
         cfg["mdns_enabled"] = bool(cfg.get("mdns_enabled", True))
         cfg["device_approval_required"] = bool(cfg.get("device_approval_required", True))
+
+        profile = str(cfg.get("stream_profile", "balanced") or "balanced").strip().lower().replace("-", "_")
+        if profile not in ("balanced", "quality", "low_latency"):
+            profile = "balanced"
+        cfg["stream_profile"] = profile
+
+        def _clamp_int(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                raw = int(cfg.get(name, default))
+            except Exception:
+                raw = int(default)
+            return max(int(lo), min(int(hi), int(raw)))
+
+        cfg["stream_offer_fps"] = _clamp_int("stream_offer_fps", 30, 5, 120)
+        cfg["stream_offer_max_w"] = _clamp_int("stream_offer_max_w", 1920, 640, 4096)
+        cfg["stream_offer_q"] = _clamp_int("stream_offer_q", 55, 20, 95)
+        cfg["stream_offer_gop"] = _clamp_int("stream_offer_gop", 60, 10, 600)
+        cfg["stream_offer_preset"] = str(cfg.get("stream_offer_preset", "veryfast") or "veryfast").strip() or "veryfast"
+        cfg["h264_bitrate_k"] = _clamp_int("h264_bitrate_k", 6000, 500, 30000)
+        cfg["h265_bitrate_k"] = _clamp_int("h265_bitrate_k", 4200, 500, 30000)
+        cfg["offer_audio_default"] = bool(cfg.get("offer_audio_default", True))
+        cfg["audio_bitrate_k"] = _clamp_int("audio_bitrate_k", 128, 48, 320)
+        cfg["audio_sample_rate"] = _clamp_int("audio_sample_rate", 48000, 8000, 96000)
+        cfg["audio_channels"] = _clamp_int("audio_channels", 2, 1, 2)
+        cfg["audio_fallback_silent"] = bool(cfg.get("audio_fallback_silent", False))
+        cfg["stream_fast_resample_threshold"] = _clamp_int("stream_fast_resample_threshold", 60, 30, 120)
+        cfg["stream_subsampling_threshold"] = _clamp_int("stream_subsampling_threshold", 60, 30, 120)
         self.app_config = cfg
 
     def _should_start_hidden_in_tray(self) -> bool:
@@ -559,6 +664,7 @@ class AppStartupMixin:
     def start_server_process(self) -> Any:
         """Manage lifecycle transition to start server process."""
         # Lifecycle transitions are centralized here to prevent partial-state bugs.
+        self._rearm_server_startup_grace()
         self._show_boot_overlay(self.tr("boot_stage_bootstrap"))
         self._prime_boot_overlay_render()
 
@@ -633,9 +739,42 @@ class AppStartupMixin:
         env["CYBERDECK_VERBOSE_STREAM_LOG"] = "1" if bool(self.app_config.get("verbose_stream_log", True)) else "0"
         env["CYBERDECK_MDNS"] = "1" if bool(self.app_config.get("mdns_enabled", True)) else "0"
         env["CYBERDECK_DEVICE_APPROVAL_REQUIRED"] = "1" if bool(self.app_config.get("device_approval_required", True)) else "0"
+        env["CYBERDECK_STREAM_PROFILE"] = str(self.app_config.get("stream_profile", "balanced") or "balanced")
+        env["CYBERDECK_STREAM_OFFER_FPS"] = str(int(self.app_config.get("stream_offer_fps", 30)))
+        env["CYBERDECK_STREAM_OFFER_MAX_W"] = str(int(self.app_config.get("stream_offer_max_w", 1920)))
+        env["CYBERDECK_STREAM_OFFER_Q"] = str(int(self.app_config.get("stream_offer_q", 55)))
+        env["CYBERDECK_STREAM_OFFER_GOP"] = str(int(self.app_config.get("stream_offer_gop", 60)))
+        env["CYBERDECK_STREAM_OFFER_PRESET"] = str(self.app_config.get("stream_offer_preset", "veryfast") or "veryfast")
+        env["CYBERDECK_H264_BITRATE_K"] = str(int(self.app_config.get("h264_bitrate_k", 6000)))
+        env["CYBERDECK_H265_BITRATE_K"] = str(int(self.app_config.get("h265_bitrate_k", 4200)))
+        env["CYBERDECK_OFFER_AUDIO_DEFAULT"] = "1" if bool(self.app_config.get("offer_audio_default", True)) else "0"
+        env["CYBERDECK_AUDIO_BITRATE_K"] = str(int(self.app_config.get("audio_bitrate_k", 128)))
+        env["CYBERDECK_AUDIO_SAMPLE_RATE"] = str(int(self.app_config.get("audio_sample_rate", 48000)))
+        env["CYBERDECK_AUDIO_CHANNELS"] = str(int(self.app_config.get("audio_channels", 2)))
+        env["CYBERDECK_AUDIO_FALLBACK_TO_SILENT"] = (
+            "1" if bool(self.app_config.get("audio_fallback_silent", False)) else "0"
+        )
+        env["CYBERDECK_HIGH_FPS_FAST_RESAMPLE_THRESHOLD"] = str(
+            int(self.app_config.get("stream_fast_resample_threshold", 60))
+        )
+        env["CYBERDECK_HIGH_FPS_SUBSAMPLING_THRESHOLD"] = str(
+            int(self.app_config.get("stream_subsampling_threshold", 60))
+        )
         env["CYBERDECK_LAUNCHER_PID"] = str(int(os.getpid()))
         env["CYBERDECK_HIDE_LAUNCHER_FROM_CAPTURE"] = (
             "1" if self._capture_exclusion_enabled() else "0"
+        )
+        remote_access_enabled = bool(self.settings.get("cloudflare_enabled", False))
+        env["CYBERDECK_REMOTE_ACCESS_ENABLED"] = "1" if remote_access_enabled else "0"
+        env["CYBERDECK_PUBLIC_ORIGIN_HINT"] = str(self.settings.get("cloudflare_hostname") or "").strip()
+        self.append_log(
+            (
+                "[launcher] boot config: "
+                f"port={int(self.port)} "
+                f"tls={'on' if self.tls_enabled else 'off'} "
+                f"remote={'on' if remote_access_enabled else 'off'} "
+                f"console={'on' if self.logs_enabled else 'off'}\n"
+            )
         )
 
         if self.tls_enabled and self.tls_cert_path and self.tls_key_path:
@@ -656,6 +795,7 @@ class AppStartupMixin:
             self.start_server_inprocess()
             _boot("server_wait", 0.96, detail=self.tr("boot_detail_server_wait"), visual_key="server")
             self.append_log("[launcher] server started (in-process)\n")
+            self._apply_cloudflare_runtime()
             return
         cmd = [sys.executable, self.server_exe]
         creationflags = 0
@@ -683,6 +823,7 @@ class AppStartupMixin:
             threading.Thread(target=self.server_stdout_loop, daemon=True).start()
             _boot("server_wait", 0.96, detail=self.tr("boot_detail_server_wait"), visual_key="server")
             self.append_log("[launcher] server process started\n")
+            self._apply_cloudflare_runtime()
         except Exception as e:
             self.append_log(f"[launcher] failed to start server process: {e}\n")
             self._show_server_start_error(str(e))

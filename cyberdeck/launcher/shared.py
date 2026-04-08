@@ -63,23 +63,23 @@ SYNC_INTERVAL_MS = 1000
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-COLOR_BG = "#050805"
-COLOR_PANEL = "#0A120D"
-COLOR_PANEL_ALT = "#0D1711"
-COLOR_BORDER = "#1D3A29"
-COLOR_ACCENT = "#3CFF91"
-COLOR_ACCENT_HOVER = "#69FFAD"
-COLOR_WARN = "#FFC24B"
-COLOR_FAIL = "#FF6B6B"
-COLOR_TEXT = "#D9FFE8"
-COLOR_TEXT_DIM = "#77A889"
+COLOR_BG = "#040706"
+COLOR_PANEL = "#09110E"
+COLOR_PANEL_ALT = "#101A16"
+COLOR_BORDER = "#1B3127"
+COLOR_ACCENT = "#55F2A2"
+COLOR_ACCENT_HOVER = "#7CFFC0"
+COLOR_WARN = "#FFC96A"
+COLOR_FAIL = "#FF7979"
+COLOR_TEXT = "#E8FFF1"
+COLOR_TEXT_DIM = "#86AD99"
 
-FONT_UI = ("Consolas", 12)
-FONT_UI_BOLD = ("Consolas", 12, "bold")
-FONT_HEADER = ("Consolas", 22, "bold")
-FONT_SMALL = ("Consolas", 10)
-FONT_MONO = ("Consolas", 12)
-FONT_CODE = ("Consolas", 44, "bold")
+FONT_UI = ("Consolas", 13)
+FONT_UI_BOLD = ("Consolas", 13, "bold")
+FONT_HEADER = ("Consolas", 23, "bold")
+FONT_SMALL = ("Consolas", 11)
+FONT_MONO = ("Consolas", 13)
+FONT_CODE = ("Consolas", 46, "bold")
 QR_IMAGE_SIZE = 240
 PORT_PICK_SPAN = 40
 
@@ -423,9 +423,9 @@ class CyberBtn(ctk.CTkButton):
             border_color=COLOR_BORDER,
             fg_color=COLOR_PANEL_ALT,
             text_color=COLOR_TEXT,
-            hover_color="#163020",
+            hover_color="#16251F",
             font=FONT_UI_BOLD,
-            height=34,
+            height=37,
         )
         defaults.update(kwargs)
         super().__init__(master, **defaults)

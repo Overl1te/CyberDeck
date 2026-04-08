@@ -99,6 +99,14 @@ class ContractSnapshotTests(unittest.TestCase):
         ), patch.object(
             video, "_get_ffmpeg_diag", return_value={"ffmpeg_available": True}
         ), patch.object(
+            video,
+            "_ffmpeg_audio_relay_capabilities",
+            return_value={
+                "real_audio_available": False,
+                "muxed_audio_available": False,
+                "silent_fallback_enabled": False,
+            },
+        ), patch.object(
             video._WIDTH_STABILIZER, "decide", return_value=1280
         ), patch.multiple(
             video,

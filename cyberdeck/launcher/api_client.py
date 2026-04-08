@@ -96,6 +96,11 @@ class LauncherApiClient:
         path = "updates?force_refresh=1" if force_refresh else "updates"
         return self._get(path, timeout=timeout)
 
+    def install_update(self, timeout: float = 180.0, force_refresh: bool = True):
+        """Trigger unattended launcher/server installer update via local API."""
+        path = "update_install?force_refresh=1" if force_refresh else "update_install"
+        return self._post(path, payload=None, timeout=timeout)
+
     def get_qr_payload(self, timeout: float = 1.0):
         """Retrieve data required to get qr payload."""
         # Read-path helpers should avoid mutating shared state where possible.
@@ -104,6 +109,10 @@ class LauncherApiClient:
     def get_events(self, since_id: int = 0, limit: int = 100, timeout: float = 1.5):
         """Retrieve local server events for launcher notifications."""
         return self._get(f"events?since_id={int(since_id)}&limit={int(limit)}", timeout=timeout)
+
+    def get_diag_bundle(self, timeout: float = 2.5):
+        """Retrieve bundled diagnostics payload for launcher UI and support export."""
+        return self._get("diag_bundle", timeout=timeout)
 
     def get_pending_devices(self, timeout: float = 1.5):
         """Retrieve pending device approval queue."""

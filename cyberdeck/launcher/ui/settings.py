@@ -1,5 +1,7 @@
 import customtkinter as ctk
 from tkinter import filedialog
+from typing import Any
+import webbrowser
 
 
 def setup_settings_ui(app, ui: dict):
@@ -67,7 +69,7 @@ def setup_settings_ui(app, ui: dict):
     except Exception:
         pass
 
-    def _section(title: str):
+    def _section(title: str, subtitle: str = ""):
         """Create a titled settings card."""
         box = ctk.CTkFrame(
             scroll,
@@ -80,6 +82,15 @@ def setup_settings_ui(app, ui: dict):
         ctk.CTkLabel(box, text=title, text_color=COLOR_TEXT, font=FONT_UI_BOLD).pack(
             anchor="w", padx=16, pady=(12, 8)
         )
+        if str(subtitle or "").strip():
+            ctk.CTkLabel(
+                box,
+                text=str(subtitle or ""),
+                text_color=COLOR_TEXT_DIM,
+                font=FONT_SMALL,
+                justify="left",
+                wraplength=860,
+            ).pack(anchor="w", padx=16, pady=(0, 12))
         return box
 
     def _styled_entry(parent, width: int = None):
@@ -104,11 +115,32 @@ def setup_settings_ui(app, ui: dict):
         height=74,
     )
     header.pack(fill="x", padx=20, pady=(20, 12))
-    ctk.CTkLabel(header, text=app.tr("settings_title"), font=FONT_HEADER, text_color=COLOR_TEXT).pack(
-        side="left", padx=20, pady=16
+    title_box = ctk.CTkFrame(header, fg_color="transparent")
+    title_box.pack(side="left", padx=20, pady=16)
+    ctk.CTkLabel(title_box, text=app.tr("settings_title"), font=FONT_HEADER, text_color=COLOR_TEXT).pack(
+        anchor="w"
     )
+    ctk.CTkLabel(
+        title_box,
+        text=app.tr("settings_subtitle"),
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+    ).pack(anchor="w", pady=(2, 0))
+    app.lbl_settings_header_meta = ctk.CTkLabel(
+        title_box,
+        text="TLS | LAN | --:--:--",
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+    )
+    app.lbl_settings_header_meta.pack(anchor="w", pady=(4, 0))
 
-    launcher_box = _section(app.tr("section_launcher"))
+    launcher_box = _section(
+        app.tr("section_launcher"),
+        _txt(
+            "Поведение окна, автозапуск, трей и локальный UX лаунчера.",
+            "Launcher window behavior, autostart, tray handling, and local desktop UX.",
+        ),
+    )
 
     app.sw_start_in_tray = ctk.CTkSwitch(
         launcher_box,
@@ -209,14 +241,13 @@ def setup_settings_ui(app, ui: dict):
     app.opt_language.pack(fill="x", padx=18, pady=(0, 14))
     app.opt_language.set(app.language_label(app.settings.get("language", "ru")))
 
-    server_box = _section(app.tr("section_server"))
-
-    ctk.CTkLabel(
-        server_box,
-        text=app.tr("server_params_auto_restart"),
-        text_color=COLOR_TEXT_DIM,
-        font=FONT_SMALL,
-    ).pack(anchor="w", padx=18, pady=(0, 8))
+    server_box = _section(
+        app.tr("section_server"),
+        _txt(
+            "Основной сетевой контур, PIN-сессии, TLS и QR. Изменения применяются автоматически и при необходимости перезапускают сервер.",
+            "Core network path, PIN sessions, TLS, and QR behavior. Changes are autosaved and restart the server when required.",
+        ),
+    )
 
     adv = ctk.CTkFrame(server_box, fg_color="transparent")
     adv.pack(fill="x", padx=18, pady=(0, 14))
@@ -344,8 +375,100 @@ def setup_settings_ui(app, ui: dict):
         side="left", padx=(16, 0)
     )
 
-    app_cfg_box = _section(app.tr("app_config_title", name=APP_CONFIG_FILE_NAME))
+    remote_box = _section(
+        app.tr("remote_access_title"),
+        _txt(
+            "Публичный доступ через Cloudflare Tunnel. Quick Tunnel подходит для временного внешнего адреса, Named Tunnel нужен для постоянного hostname.",
+            "Public access via Cloudflare Tunnel. Quick Tunnel is suitable for temporary external access, while Named Tunnel is for a stable hostname.",
+        ),
+    )
+
+    ctk.CTkLabel(
+        remote_box,
+        text=app.tr("remote_access_note"),
+        text_color=COLOR_TEXT_DIM,
+        font=FONT_SMALL,
+        justify="left",
+        wraplength=840,
+    ).pack(anchor="w", padx=18, pady=(4, 8))
+
+    ctk.CTkLabel(remote_box, text=app.tr("cloudflare_binary_path"), text_color=COLOR_TEXT_DIM, font=FONT_SMALL).pack(
+        anchor="w", padx=18, pady=(4, 2)
+    )
+    app.ent_cloudflare_binary_path = _styled_entry(remote_box)
+    app.ent_cloudflare_binary_path.pack(fill="x", padx=18)
+    app.ent_cloudflare_binary_path.insert(0, str(app.settings.get("cloudflare_binary_path", "")))
+    _bind_entry_autosave(app.ent_cloudflare_binary_path)
+
+    ctk.CTkLabel(remote_box, text=app.tr("cloudflare_tunnel_token"), text_color=COLOR_TEXT_DIM, font=FONT_SMALL).pack(
+        anchor="w", padx=18, pady=(8, 2)
+    )
+    app.ent_cloudflare_tunnel_token = _styled_entry(remote_box)
+    app.ent_cloudflare_tunnel_token.pack(fill="x", padx=18)
+    app.ent_cloudflare_tunnel_token.insert(0, str(app.settings.get("cloudflare_tunnel_token", "")))
+    _bind_entry_autosave(app.ent_cloudflare_tunnel_token)
+    ctk.CTkLabel(
+        remote_box,
+        text=app.tr("cloudflare_tunnel_token_hint"),
+        text_color=COLOR_TEXT_DIM,
+        font=FONT_SMALL,
+        justify="left",
+        wraplength=840,
+    ).pack(anchor="w", padx=18, pady=(6, 4))
+
+    cloudflare_help_row = ctk.CTkFrame(remote_box, fg_color="transparent")
+    cloudflare_help_row.pack(fill="x", padx=18, pady=(0, 4))
+    cloudflare_help_row.grid_columnconfigure(0, weight=1)
+    cloudflare_help_row.grid_columnconfigure(1, weight=1)
+
+    def _open_cloudflare_link(url: str) -> None:
+        """Open Cloudflare dashboard/docs page from remote access settings."""
+        try:
+            if webbrowser.open(str(url or "").strip(), new=2):
+                return
+            raise RuntimeError("browser_open_failed")
+        except Exception:
+            try:
+                app.show_toast(app.tr("cloudflare_open_failed"), level="error")
+            except Exception:
+                pass
+
+    CyberBtn(
+        cloudflare_help_row,
+        text=app.tr("cloudflare_quick_tunnel_btn"),
+        command=lambda: _open_cloudflare_link("https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/"),
+        height=32,
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    CyberBtn(
+        cloudflare_help_row,
+        text=app.tr("cloudflare_tunnel_token_btn"),
+        command=lambda: _open_cloudflare_link("https://one.dash.cloudflare.com/"),
+        height=32,
+    ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+    ctk.CTkLabel(remote_box, text=app.tr("cloudflare_hostname"), text_color=COLOR_TEXT_DIM, font=FONT_SMALL).pack(
+        anchor="w", padx=18, pady=(8, 2)
+    )
+    app.ent_cloudflare_hostname = _styled_entry(remote_box)
+    app.ent_cloudflare_hostname.pack(fill="x", padx=18)
+    app.ent_cloudflare_hostname.insert(0, str(app.settings.get("cloudflare_hostname", "")))
+    _bind_entry_autosave(app.ent_cloudflare_hostname)
+
+    app_cfg_box = _section(
+        app.tr("app_config_title", name=APP_CONFIG_FILE_NAME),
+        _txt(
+            "Политики безопасности, discoverability, лимиты передачи и параметры стрима.",
+            "Security policies, discoverability, transfer limits, and stream tuning.",
+        ),
+    )
     cfg = dict(getattr(app, "app_config", {}) or {})
+
+    ctk.CTkLabel(
+        app_cfg_box,
+        text=_txt("Сеть и безопасность", "Network and security"),
+        text_color=COLOR_TEXT_DIM,
+        font=FONT_SMALL,
+    ).pack(anchor="w", padx=18, pady=(2, 4))
 
     app.sw_pairing_single_use = ctk.CTkSwitch(
         app_cfg_box,
@@ -399,6 +522,13 @@ def setup_settings_ui(app, ui: dict):
     app.ent_upload_allowed_ext.insert(0, str(cfg.get("upload_allowed_ext", "")))
     _bind_entry_autosave(app.ent_upload_allowed_ext)
 
+    ctk.CTkLabel(
+        app_cfg_box,
+        text=_txt("Диагностика и журналы", "Diagnostics and logging"),
+        text_color=COLOR_TEXT_DIM,
+        font=FONT_SMALL,
+    ).pack(anchor="w", padx=18, pady=(12, 4))
+
     app.sw_verbose_http_log = ctk.CTkSwitch(
         app_cfg_box,
         text=app.tr("verbose_http"),
@@ -426,7 +556,90 @@ def setup_settings_ui(app, ui: dict):
     app.sw_verbose_stream_log.pack(anchor="w", padx=18, pady=(4, 12))
     app.sw_verbose_stream_log.select() if cfg.get("verbose_stream_log", True) else app.sw_verbose_stream_log.deselect()
 
-    action_box = _section(app.tr("section_actions"))
+    ctk.CTkLabel(app_cfg_box, text=app.tr("stream_tuning"), text_color=COLOR_TEXT_DIM, font=FONT_SMALL).pack(
+        anchor="w", padx=18, pady=(6, 4)
+    )
+
+    profile_row = ctk.CTkFrame(app_cfg_box, fg_color="transparent")
+    profile_row.pack(fill="x", padx=18, pady=(0, 4))
+    ctk.CTkLabel(profile_row, text=app.tr("stream_profile"), text_color=COLOR_TEXT).pack(side="left")
+    app.opt_stream_profile = ctk.CTkOptionMenu(
+        profile_row,
+        values=["balanced", "quality", "low_latency"],
+        corner_radius=8,
+        fg_color=COLOR_PANEL_ALT,
+        button_color=COLOR_BORDER,
+        button_hover_color=COLOR_PANEL,
+        text_color=COLOR_TEXT,
+        dropdown_fg_color=COLOR_PANEL,
+        dropdown_hover_color=COLOR_BORDER,
+        dropdown_text_color=COLOR_TEXT,
+        width=180,
+        command=lambda _choice: _autosave(120),
+    )
+    app.opt_stream_profile.pack(side="right")
+    app.opt_stream_profile.set(str(cfg.get("stream_profile", "balanced") or "balanced").strip().lower())
+
+    def _app_cfg_row(label: str, initial: Any):
+        """Create a labeled app-config row with autosave-enabled entry."""
+        row = ctk.CTkFrame(app_cfg_box, fg_color="transparent")
+        row.pack(fill="x", padx=18, pady=4)
+        ctk.CTkLabel(row, text=label, text_color=COLOR_TEXT).pack(side="left")
+        ent = _styled_entry(row, width=180)
+        ent.pack(side="right")
+        try:
+            ent.insert(0, str(initial))
+        except Exception:
+            pass
+        _bind_entry_autosave(ent)
+        return ent
+
+    app.ent_stream_offer_fps = _app_cfg_row(app.tr("stream_offer_fps"), cfg.get("stream_offer_fps", 30))
+    app.ent_stream_offer_max_w = _app_cfg_row(app.tr("stream_offer_max_w"), cfg.get("stream_offer_max_w", 1920))
+    app.ent_stream_offer_q = _app_cfg_row(app.tr("stream_offer_q"), cfg.get("stream_offer_q", 55))
+    app.ent_stream_offer_gop = _app_cfg_row(app.tr("stream_offer_gop"), cfg.get("stream_offer_gop", 60))
+    app.ent_stream_offer_preset = _app_cfg_row(app.tr("stream_offer_preset"), cfg.get("stream_offer_preset", "veryfast"))
+    app.ent_h264_bitrate_k = _app_cfg_row(app.tr("h264_bitrate_k"), cfg.get("h264_bitrate_k", 6000))
+    app.ent_h265_bitrate_k = _app_cfg_row(app.tr("h265_bitrate_k"), cfg.get("h265_bitrate_k", 4200))
+
+    app.sw_offer_audio_default = ctk.CTkSwitch(
+        app_cfg_box,
+        text=app.tr("offer_audio_default"),
+        text_color=COLOR_TEXT,
+        command=lambda: _autosave(120),
+    )
+    app.sw_offer_audio_default.pack(anchor="w", padx=18, pady=(6, 2))
+    app.sw_offer_audio_default.select() if cfg.get("offer_audio_default", True) else app.sw_offer_audio_default.deselect()
+
+    app.ent_audio_bitrate_k = _app_cfg_row(app.tr("audio_bitrate_k"), cfg.get("audio_bitrate_k", 128))
+    app.ent_audio_sample_rate = _app_cfg_row(app.tr("audio_sample_rate"), cfg.get("audio_sample_rate", 48000))
+    app.ent_audio_channels = _app_cfg_row(app.tr("audio_channels"), cfg.get("audio_channels", 2))
+
+    app.sw_audio_fallback_silent = ctk.CTkSwitch(
+        app_cfg_box,
+        text=app.tr("audio_fallback_silent"),
+        text_color=COLOR_TEXT,
+        command=lambda: _autosave(120),
+    )
+    app.sw_audio_fallback_silent.pack(anchor="w", padx=18, pady=(6, 2))
+    app.sw_audio_fallback_silent.select() if cfg.get("audio_fallback_silent", False) else app.sw_audio_fallback_silent.deselect()
+
+    app.ent_stream_fast_resample_threshold = _app_cfg_row(
+        app.tr("stream_fast_resample_threshold"),
+        cfg.get("stream_fast_resample_threshold", 60),
+    )
+    app.ent_stream_subsampling_threshold = _app_cfg_row(
+        app.tr("stream_subsampling_threshold"),
+        cfg.get("stream_subsampling_threshold", 60),
+    )
+
+    action_box = _section(
+        app.tr("section_actions"),
+        _txt(
+            "Быстрые действия для открытия конфигов, справки и ручной проверки сохранения.",
+            "Quick actions for opening configs, diagnostics, and forcing a manual save check.",
+        ),
+    )
     btn_row = ctk.CTkFrame(action_box, fg_color="transparent")
     btn_row.pack(fill="x", padx=18, pady=(0, 8))
     btn_row.grid_columnconfigure(0, weight=1)

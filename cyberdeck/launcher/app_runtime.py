@@ -53,6 +53,8 @@ class AppRuntimeMixin:
                 port=int(self.port),
                 log_level=log_level,
                 access_log=access_log,
+                proxy_headers=True,
+                forwarded_allow_ips="127.0.0.1",
                 ssl_certfile=os.environ.get("CYBERDECK_TLS_CERT") if tls_enabled else None,
                 ssl_keyfile=os.environ.get("CYBERDECK_TLS_KEY") if tls_enabled else None,
             )
@@ -90,10 +92,146 @@ class AppRuntimeMixin:
         self._uvicorn_server = None
         self.server_thread = None
 
+    def _cloudflare_target_origin(self) -> str:
+        """Return local origin exposed to the Cloudflare Tunnel."""
+        scheme = "https" if bool(self.tls_enabled) else "http"
+        return f"{scheme}://127.0.0.1:{int(self.port)}"
+
+    def _local_access_origin(self) -> str:
+        """Return full local origin shown and copied from the Home screen."""
+        host = str(getattr(self, "server_ip", "") or "").strip()
+        if (not host) or host == "0.0.0.0":
+            return ""
+        port = int(getattr(self, "server_port", getattr(self, "port", DEFAULT_PORT)) or DEFAULT_PORT)
+        scheme = str(getattr(self, "api_scheme", "") or "").strip().lower()
+        if scheme not in {"http", "https"}:
+            scheme = "https" if bool(getattr(self, "tls_enabled", False)) else "http"
+        return f"{scheme}://{host}:{port}"
+
+    def _public_access_origin(self) -> str:
+        """Return current public origin when Cloudflare Tunnel is online."""
+        return str(getattr(self, "cloudflare_public_url", "") or "").strip().rstrip("/")
+
+    def _set_readonly_textbox_value(self, widget: Any, text: str, *, text_color: str | None = None) -> None:
+        """Update a CTkTextbox used as a read-only access field."""
+        if widget is None:
+            return
+        try:
+            widget.configure(state="normal")
+            if text_color:
+                widget.configure(text_color=text_color)
+            widget.delete("1.0", "end")
+            widget.insert("1.0", str(text or ""))
+            try:
+                widget.see("1.0")
+            except Exception:
+                pass
+        finally:
+            try:
+                widget.configure(state="disabled")
+            except Exception:
+                pass
+
+    def _format_uptime_short(self, seconds: Any) -> str:
+        """Format uptime in a compact launcher-friendly form."""
+        try:
+            total = max(0, int(seconds or 0))
+        except Exception:
+            total = 0
+        days, rem = divmod(total, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        parts: list[str] = []
+        if days:
+            parts.append(f"{days}d")
+        if hours or days:
+            parts.append(f"{hours}h")
+        parts.append(f"{minutes}m")
+        return " ".join(parts)
+
+    def _header_meta_summary(self) -> str:
+        """Build compact header metadata line for page headers."""
+        parts: list[str] = []
+        parts.append("TLS" if bool(getattr(self, "tls_enabled", False)) else "HTTP")
+        if str(getattr(self, "cloudflare_status", "") or "") == "online":
+            parts.append("Public Relay")
+        else:
+            parts.append("LAN")
+        parts.append(self.tr("updated_at", time=time.strftime("%H:%M:%S")) if bool(getattr(self, "server_online", False)) else self.tr("updated_offline"))
+        return " | ".join(parts)
+
+    def _apply_cloudflare_snapshot(self, snap: Any) -> None:
+        """Copy Cloudflare Tunnel runtime snapshot into launcher state."""
+        public_url = str(getattr(snap, "public_url", "") or "").rstrip("/")
+        self.cloudflare_status = str(getattr(snap, "status", "disabled") or "disabled")
+        self.cloudflare_public_url = public_url
+        self.cloudflare_last_error = str(getattr(snap, "last_error", "") or "")
+        self.cloudflare_binary_resolved = str(getattr(snap, "binary_path", "") or "")
+        self.cloudflare_target_url = str(getattr(snap, "target_url", "") or "")
+
+    def _apply_cloudflare_runtime(self) -> Any:
+        """Start, stop, or reconfigure Cloudflare Tunnel according to launcher settings."""
+        manager = getattr(self, "cloudflare_manager", None)
+        if manager is None:
+            return
+        manager.configure(
+            enabled=bool(self.settings.get("cloudflare_enabled", False)),
+            binary_path=str(self.settings.get("cloudflare_binary_path") or "").strip(),
+            tunnel_token=str(self.settings.get("cloudflare_tunnel_token") or "").strip(),
+            configured_hostname=str(self.settings.get("cloudflare_hostname") or "").strip(),
+            target_url=self._cloudflare_target_origin(),
+            auto_install=bool(self.settings.get("cloudflare_auto_install", True)),
+            download_url=str(os.environ.get("CYBERDECK_CLOUDFLARE_DOWNLOAD_URL") or "").strip(),
+        )
+        self._apply_cloudflare_snapshot(manager.snapshot())
+
+    def _poll_cloudflare_runtime(self) -> Any:
+        """Refresh Cloudflare Tunnel status from the local process supervisor."""
+        manager = getattr(self, "cloudflare_manager", None)
+        if manager is None:
+            return
+        self._apply_cloudflare_snapshot(manager.poll())
+
+    def _startup_sync_grace_s(self) -> float:
+        """Return grace period during which early API probes should be tolerant."""
+        return 8.0
+
+    def _sync_info_timeout(self) -> float:
+        """Return `/info` timeout tuned for early startup versus steady state."""
+        if bool(getattr(self, "_boot_server_ready_announced", False)) or bool(getattr(self, "server_online", False)):
+            return 1.0
+        started = float(getattr(self, "_boot_started_ts", 0.0) or 0.0)
+        if started <= 0.0:
+            return 1.0
+        elapsed = max(0.0, time.time() - started)
+        if elapsed < self._startup_sync_grace_s():
+            return 2.5
+        return 1.0
+
+    def _should_suppress_startup_sync_error(self, detail: str) -> bool:
+        """Hide expected early boot transport noise before local API is ready."""
+        if bool(getattr(self, "_boot_server_ready_announced", False)) or bool(getattr(self, "server_online", False)):
+            return False
+        norm = str(detail or "").strip().lower()
+        if norm not in {"request timeout", "connection failed"}:
+            return False
+        started = float(getattr(self, "_boot_started_ts", 0.0) or 0.0)
+        if started <= 0.0:
+            return False
+        elapsed = max(0.0, time.time() - started)
+        return elapsed < self._startup_sync_grace_s()
+
+    def _rearm_server_startup_grace(self) -> None:
+        """Reset boot/readiness markers before each server launch or restart."""
+        self._boot_server_ready_announced = False
+        self._boot_started_ts = float(time.time())
+        self.server_online = False
+
     def restart_server(self) -> Any:
         """Manage lifecycle transition to restart server."""
         # Lifecycle transitions are centralized here to prevent partial-state bugs.
         self.append_log("[launcher] restarting server...\n")
+        self._rearm_server_startup_grace()
         self.stop_server_process()
         time.sleep(0.2)
         self.start_server_process()
@@ -117,6 +255,37 @@ class AppRuntimeMixin:
         except Exception:
             pass
 
+    def _console_timestamp(self) -> str:
+        """Return short local timestamp used in launcher console mode."""
+        return time.strftime("%H:%M:%S")
+
+    def _format_console_line(self, text: str) -> str:
+        """Normalize launcher console lines into a readable one-line format."""
+        raw = str(text or "")
+        stripped = raw.rstrip("\r\n")
+        if not stripped:
+            return raw
+        if len(stripped) >= 10 and stripped[4:5] == "-" and stripped[7:8] == "-":
+            return raw
+
+        source = "launcher"
+        body = stripped
+        if stripped.startswith("[launcher]"):
+            body = stripped[len("[launcher]") :].strip()
+            source = "launcher"
+        elif stripped.startswith("[wayland-setup]"):
+            body = stripped[len("[wayland-setup]") :].strip()
+            source = "wayland"
+        elif stripped.startswith("[cloudflare]"):
+            body = stripped[len("[cloudflare]") :].strip()
+            source = "cloudflare"
+        elif stripped.startswith("[CyberDeck]"):
+            return f"{self._console_timestamp()} | app | {stripped[len('[CyberDeck]'):].strip()}\n"
+        else:
+            source = "app"
+
+        return f"{self._console_timestamp()} | {source} | {body}\n"
+
     def append_log(self, text: str) -> Any:
         """Append log."""
         try:
@@ -128,9 +297,64 @@ class AppRuntimeMixin:
             return
 
         try:
-            print(text, end="")
+            payload = str(text or "")
+            if payload:
+                for chunk in payload.splitlines(True):
+                    print(self._format_console_line(chunk), end="")
+                if ("\n" not in payload) and ("\r" not in payload):
+                    return
         except Exception:
             pass
+
+    def _log_console_state_changes(self) -> None:
+        """Emit concise runtime state transitions in console mode."""
+        if not self.logs_enabled:
+            return
+
+        current_online = bool(getattr(self, "server_online", False))
+        last_online = getattr(self, "_console_last_server_online", None)
+        current_endpoint = f"{self.server_ip}:{self.server_port}"
+        last_endpoint = str(getattr(self, "_console_last_server_endpoint", "") or "")
+        if current_online:
+            if (last_online is not True) or (current_endpoint != last_endpoint):
+                self.append_log(
+                    f"[launcher] local api ready: {current_endpoint} ({str(self.api_scheme or '').upper()})\n"
+                )
+        elif last_online is True:
+            self.append_log("[launcher] local api unavailable\n")
+        self._console_last_server_online = current_online
+        self._console_last_server_endpoint = current_endpoint if current_online else ""
+
+        cloudflare_sig = (
+            str(getattr(self, "cloudflare_status", "") or ""),
+            str(getattr(self, "cloudflare_public_url", "") or ""),
+            str(getattr(self, "cloudflare_last_error", "") or ""),
+        )
+        if cloudflare_sig != getattr(self, "_console_last_cloudflare_sig", None):
+            status, public_url, detail = cloudflare_sig
+            if status == "online" and public_url:
+                self.append_log(f"[cloudflare] public access ready: {public_url}\n")
+            elif status == "installing":
+                self.append_log("[cloudflare] downloading cloudflared...\n")
+            elif status == "starting":
+                self.append_log("[cloudflare] starting tunnel...\n")
+            elif status in {"error", "missing_binary"} and detail:
+                self.append_log(f"[cloudflare] {detail}\n")
+            elif status == "disabled":
+                self.append_log("[cloudflare] disabled\n")
+            self._console_last_cloudflare_sig = cloudflare_sig
+
+    def _friendly_remote_access_detail(self, detail: str) -> str:
+        """Translate known Cloudflare/runtime errors into short UI-friendly copy."""
+        text = str(detail or "").strip()
+        if not text:
+            return ""
+        norm = text.lower()
+        if "trycloudflare" in norm:
+            return self.tr("remote_access_cloudflare_quick")
+        if ("token" in norm and "configured" in norm) or ("run --token" in norm):
+            return self.tr("remote_access_cloudflare_token_needed")
+        return text
 
     def _boot_mark_waiting(self) -> Any:
         """Update boot overlay while local API is still unavailable."""
@@ -700,8 +924,9 @@ class AppRuntimeMixin:
         def _fetch() -> None:
             """Fetch launcher status snapshot from local API."""
             was_online = bool(getattr(self, "server_online", False))
+            next_delay_ms = int(SYNC_INTERVAL_MS)
             try:
-                resp = self.api_client.get_info(timeout=1)
+                resp = self.api_client.get_info(timeout=self._sync_info_timeout())
                 if resp.status_code == 200:
                     data = self.api_client.json_dict(resp)
                     if not data:
@@ -766,6 +991,20 @@ class AppRuntimeMixin:
                                 self._next_update_pull_ts = now_mono + 60.0
                         except Exception:
                             self._next_update_pull_ts = now_mono + 45.0
+                    if now_mono >= float(getattr(self, "_next_diag_pull_ts", 0.0) or 0.0):
+                        try:
+                            diag_resp = self.api_client.get_diag_bundle(timeout=2.5)
+                            if diag_resp.status_code == 200:
+                                diag_payload = self.api_client.json_dict(diag_resp)
+                                if diag_payload:
+                                    self.server_diag = diag_payload
+                                self._next_diag_pull_ts = now_mono + 15.0
+                            else:
+                                self._next_diag_pull_ts = now_mono + 8.0
+                        except Exception:
+                            self._next_diag_pull_ts = now_mono + 8.0
+                    self._update_status_line = self._build_update_status_line()
+                    self._maybe_start_auto_update()
                     self._update_status_line = self._build_update_status_line()
                     try:
                         events_resp = self.api_client.get_events(since_id=self._last_local_event_id, limit=80, timeout=1.3)
@@ -790,17 +1029,24 @@ class AppRuntimeMixin:
                 else:
                     self.server_online = False
                     self.ui_call(self._boot_mark_waiting)
+                self._poll_cloudflare_runtime()
             except Exception as e:
+                detail = self.api_client.describe_exception(e)
                 try:
-                    self.append_log(f"[launcher] sync error: {self.api_client.describe_exception(e)}\n")
+                    if not self._should_suppress_startup_sync_error(detail):
+                        self.append_log(f"[launcher] sync error: {detail}\n")
+                    else:
+                        next_delay_ms = 350
                 except Exception:
                     pass
                 self.server_online = False
                 self.ui_call(self._boot_mark_waiting)
+                self._poll_cloudflare_runtime()
             finally:
                 self._sync_inflight = False
+                self._log_console_state_changes()
                 self.ui_call(self.update_gui_data)
-                self.ui_call(lambda: self._schedule_sync(SYNC_INTERVAL_MS))
+                self.ui_call(lambda delay_ms=next_delay_ms: self._schedule_sync(delay_ms))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -818,14 +1064,68 @@ class AppRuntimeMixin:
     def _iter_visible_devices(self) -> Any:
         """Iterate over visible devices."""
         visible = []
+        search = ""
+        try:
+            search = str(self.var_device_search.get() or "").strip().lower()
+        except Exception:
+            search = ""
+        filter_code = "all"
+        try:
+            filter_code = self._device_filter_code(self.var_device_filter.get())
+        except Exception:
+            filter_code = "all"
+        sort_code = "activity"
+        try:
+            sort_code = self._device_sort_code(self.var_device_sort.get())
+        except Exception:
+            sort_code = "activity"
+
         for d in self.devices_data or []:
             token = d.get("token")
             if not token:
                 continue
             online = bool(d.get("online")) and self.server_online
+            approved = bool(d.get("approved", True))
             if (not self.show_offline.get()) and (not online):
                 continue
+            if filter_code == "online" and (not online or not approved):
+                continue
+            if filter_code == "offline" and online:
+                continue
+            if filter_code == "pending" and approved:
+                continue
+            if search:
+                haystack = " ".join(
+                    [
+                        str(self._device_display_name(d) or ""),
+                        str(d.get("ip") or ""),
+                        str(d.get("device_id") or ""),
+                        str(self._device_platform_hint(d) or ""),
+                    ]
+                ).lower()
+                if search not in haystack:
+                    continue
             visible.append((token, d, online))
+
+        def _recent_ts(item: tuple[str, dict, bool]) -> float:
+            try:
+                return float(item[1].get("last_seen_ts") or 0.0)
+            except Exception:
+                return 0.0
+
+        if sort_code == "name":
+            visible.sort(key=lambda item: str(self._device_display_name(item[1]) or "").lower())
+        elif sort_code == "recent":
+            visible.sort(key=_recent_ts, reverse=True)
+        else:
+            visible.sort(
+                key=lambda item: (
+                    0 if (bool(item[1].get("approved", True)) and bool(item[2])) else 1,
+                    0 if not bool(item[1].get("approved", True)) else 1,
+                    -_recent_ts(item),
+                    str(self._device_display_name(item[1]) or "").lower(),
+                )
+            )
         return visible
 
     def _device_row_key(self, d: dict, online: bool, is_sel: bool) -> Any:
@@ -896,10 +1196,17 @@ class AppRuntimeMixin:
             text_color=COLOR_TEXT_DIM,
         )
         lbl_sub.pack(anchor="w")
+        lbl_meta = ctk.CTkLabel(
+            info,
+            text="...",
+            font=FONT_SMALL,
+            text_color=COLOR_TEXT_DIM,
+        )
+        lbl_meta.pack(anchor="w", pady=(4, 0))
 
         lbl_check = ctk.CTkLabel(content, text=self.tr("device_active"), text_color=COLOR_ACCENT, font=FONT_SMALL)
 
-        for w in (row, dot, info, lbl_title, lbl_sub):
+        for w in (row, dot, info, lbl_title, lbl_sub, lbl_meta):
             self._bind_device_select(w, token)
 
         return {
@@ -907,6 +1214,7 @@ class AppRuntimeMixin:
             "dot": dot,
             "lbl_title": lbl_title,
             "lbl_sub": lbl_sub,
+            "lbl_meta": lbl_meta,
             "lbl_check": lbl_check,
             "render_key": None,
         }
@@ -917,6 +1225,7 @@ class AppRuntimeMixin:
         dot = entry["dot"]
         lbl_title = entry["lbl_title"]
         lbl_sub = entry["lbl_sub"]
+        lbl_meta = entry["lbl_meta"]
         lbl_check = entry["lbl_check"]
 
         row.configure(
@@ -950,6 +1259,7 @@ class AppRuntimeMixin:
             status = self.tr("status_pending")
         else:
             status = self.tr("status_online") if online else self.tr("status_offline")
+        platform_hint = self._device_platform_hint(d) or self.tr("unknown_value")
 
         lbl_title.configure(text=name)
         lbl_sub.configure(
@@ -961,6 +1271,13 @@ class AppRuntimeMixin:
                 preset=preset,
                 last_label=self.tr("last_seen_label"),
                 last_seen=last_seen_text,
+            )
+        )
+        lbl_meta.configure(
+            text=self.tr(
+                "device_meta_line",
+                device_id=str(d.get("device_id") or token[:8]),
+                platform=platform_hint,
             )
         )
 
@@ -994,18 +1311,50 @@ class AppRuntimeMixin:
         self._device_row_order = [t for t in self._device_row_order if t in visible_set]
 
         if not visible:
-            if self._device_empty_label is None:
-                self._device_empty_label = ctk.CTkLabel(
+            if getattr(self, "_device_empty_frame", None) is None:
+                frame = ctk.CTkFrame(
                     self.device_list,
-                    text=self.tr("no_connections"),
-                    text_color=COLOR_TEXT_DIM,
-                    font=FONT_SMALL,
+                    fg_color=COLOR_PANEL_ALT,
+                    corner_radius=14,
+                    border_width=1,
+                    border_color=COLOR_BORDER,
                 )
-            if self._device_empty_label.winfo_manager() != "pack":
-                self._device_empty_label.pack(pady=20)
-        elif self._device_empty_label is not None:
+                self._device_empty_frame = frame
+                ctk.CTkLabel(
+                    frame,
+                    text="[ NO DEVICES ]",
+                    font=("Consolas", 16, "bold"),
+                    text_color=COLOR_TEXT_DIM,
+                ).pack(pady=(26, 6))
+                ctk.CTkLabel(
+                    frame,
+                    text=self.tr("devices_empty_title"),
+                    font=FONT_UI_BOLD,
+                    text_color=COLOR_TEXT,
+                ).pack()
+                ctk.CTkLabel(
+                    frame,
+                    text=self.tr("devices_empty_body"),
+                    font=FONT_SMALL,
+                    text_color=COLOR_TEXT_DIM,
+                    justify="center",
+                    wraplength=340,
+                ).pack(padx=22, pady=(8, 14))
+                CyberBtn(
+                    frame,
+                    text=self.tr("devices_empty_cta"),
+                    command=lambda: self.select_frame("home"),
+                    fg_color=COLOR_ACCENT,
+                    text_color="#04110A",
+                    hover_color=COLOR_ACCENT_HOVER,
+                    border_color=COLOR_ACCENT,
+                    height=36,
+                ).pack(fill="x", padx=20, pady=(0, 22))
+            if self._device_empty_frame.winfo_manager() != "pack":
+                self._device_empty_frame.pack(fill="x", padx=6, pady=18)
+        elif getattr(self, "_device_empty_frame", None) is not None:
             try:
-                self._device_empty_label.pack_forget()
+                self._device_empty_frame.pack_forget()
             except Exception:
                 pass
 
@@ -1056,8 +1405,130 @@ class AppRuntimeMixin:
         except Exception:
             return ""
 
+    @staticmethod
+    def _channel_preferred_asset(channel: dict[str, Any]) -> dict[str, Any]:
+        """Return normalized preferred release asset from a channel payload."""
+        try:
+            asset = channel.get("preferred_asset")
+            return asset if isinstance(asset, dict) else {}
+        except Exception:
+            return {}
+
+    def _launcher_update_channel(self) -> dict[str, Any]:
+        """Return launcher update channel payload from the latest status snapshot."""
+        state = self.update_state if isinstance(self.update_state, dict) else {}
+        payload = state.get("launcher")
+        return payload if isinstance(payload, dict) else {}
+
+    def _auto_update_retry_cooldown_s(self) -> float:
+        """Return retry cooldown between automatic installer attempts."""
+        return 6.0 * 3600.0
+
+    def _persist_auto_update_attempt(self, latest_tag: str) -> None:
+        """Persist last automatic update attempt metadata into launcher settings."""
+        now_ts = float(time.time())
+        self._auto_update_last_attempt_tag = str(latest_tag or "").strip()
+        self._auto_update_last_attempt_ts = now_ts
+        self.settings["_auto_update_last_attempt_tag"] = self._auto_update_last_attempt_tag
+        self.settings["_auto_update_last_attempt_ts"] = int(now_ts)
+        try:
+            save_json(self.settings_path, self.settings)
+        except Exception:
+            pass
+
+    def _should_attempt_auto_update(self) -> tuple[bool, str]:
+        """Return whether launcher should start unattended self-update now."""
+        if not bool(self.settings.get("auto_update_check", True)):
+            return False, ""
+        if not bool(self.settings.get("auto_update_install", True)):
+            return False, ""
+        if bool(getattr(self, "_auto_update_request_inflight", False)):
+            return False, ""
+        if bool(getattr(self, "_auto_update_shutdown_scheduled", False)):
+            return False, ""
+        if not bool(getattr(self, "server_online", False)):
+            return False, ""
+        if not is_windows() or (not is_packaged_runtime()):
+            return False, ""
+
+        launcher = self._launcher_update_channel()
+        if not self._channel_has_update(launcher):
+            return False, ""
+        asset = self._channel_preferred_asset(launcher)
+        if str(asset.get("kind") or "") != "windows_installer":
+            return False, ""
+        latest_tag = self._channel_latest_tag(launcher)
+        if not latest_tag:
+            return False, ""
+        last_tag = str(getattr(self, "_auto_update_last_attempt_tag", "") or "").strip()
+        try:
+            last_ts = float(getattr(self, "_auto_update_last_attempt_ts", 0.0) or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if latest_tag == last_tag and (time.time() - last_ts) < self._auto_update_retry_cooldown_s():
+            return False, ""
+        return True, latest_tag
+
+    def _finish_auto_update_prepare(self, latest_tag: str) -> None:
+        """Notify the user and close launcher so the detached installer can proceed."""
+        self._auto_update_request_inflight = False
+        self._auto_update_shutdown_scheduled = True
+        self._auto_update_target_tag = str(latest_tag or "").strip()
+        self._update_status_line = self.tr("updates_installing", version=self._auto_update_target_tag or "?")
+        self._update_status_has_updates = False
+        try:
+            self.show_toast(
+                self.tr("updates_installing_toast", version=self._auto_update_target_tag or "?"),
+                level="info",
+            )
+        except Exception:
+            pass
+        self.request_sync(0)
+        self._safe_after(1400, self.quit_app)
+
+    def _handle_auto_update_failure(self, latest_tag: str, detail: str) -> None:
+        """Record and surface automatic update failures without retry loops."""
+        self._auto_update_request_inflight = False
+        error_text = str(detail or "update_install_failed").strip() or "update_install_failed"
+        self.append_log(f"[launcher] auto-update failed for {latest_tag or '?'}: {error_text}\n")
+        self.ui_call(
+            lambda latest=latest_tag, error=error_text: self.show_toast(
+                self.tr("updates_auto_install_failed", version=latest or "?", error=error),
+                level="warning",
+            )
+        )
+
+    def _maybe_start_auto_update(self) -> None:
+        """Start unattended installer preparation when a newer launcher build is available."""
+        should_run, latest_tag = self._should_attempt_auto_update()
+        if not should_run:
+            return
+
+        self._auto_update_request_inflight = True
+        self._auto_update_target_tag = str(latest_tag or "").strip()
+        self._persist_auto_update_attempt(self._auto_update_target_tag)
+        self.append_log(f"[launcher] auto-update preparing {self._auto_update_target_tag}\n")
+        try:
+            resp = self.api_client.install_update(timeout=180.0, force_refresh=True)
+            payload = self.api_client.json_dict(resp)
+            if resp.status_code == 200 and bool(payload.get("ok")):
+                self.append_log(f"[launcher] auto-update scheduled for {self._auto_update_target_tag}\n")
+                self.ui_call(lambda latest=self._auto_update_target_tag: self._finish_auto_update_prepare(latest))
+                return
+            detail = self.api_client.describe_api_error(resp, default="update_install_failed")
+        except Exception as exc:
+            detail = self.api_client.describe_exception(exc)
+        self._handle_auto_update_failure(self._auto_update_target_tag, detail)
+
     def _build_update_status_line(self) -> str:
         """Build one-line update status summary for launcher home screen."""
+        if bool(getattr(self, "_auto_update_shutdown_scheduled", False)):
+            return self.tr("updates_installing", version=str(getattr(self, "_auto_update_target_tag", "") or "?"))
+        if bool(getattr(self, "_auto_update_request_inflight", False)):
+            return self.tr(
+                "updates_preparing_install",
+                version=str(getattr(self, "_auto_update_target_tag", "") or "?"),
+            )
         state = self.update_state if isinstance(self.update_state, dict) else {}
         server = state.get("server") if isinstance(state.get("server"), dict) else {}
         launcher = state.get("launcher") if isinstance(state.get("launcher"), dict) else {}
@@ -1130,6 +1601,10 @@ class AppRuntimeMixin:
         """Show one-time popup when a newer release is detected."""
         if not bool(getattr(self, "server_online", False)):
             return
+        if bool(getattr(self, "_auto_update_request_inflight", False)):
+            return
+        if bool(getattr(self, "_auto_update_shutdown_scheduled", False)):
+            return
         updates = self._collect_available_updates()
         if not updates:
             return
@@ -1188,12 +1663,71 @@ class AppRuntimeMixin:
             locked = bool((self.security_state or {}).get("locked", False))
             self.btn_toggle_input_lock.configure(text=(self.tr("security_unlock_btn") if locked else self.tr("security_lock_btn")))
 
-        self.lbl_server.configure(text=f"{self.server_ip}:{self.server_port}")
-        self.lbl_version.configure(text=self.tr("server_version_line", server=self.server_version, launcher=LAUNCHER_VERSION))
+        if hasattr(self, "lbl_header_meta"):
+            self.lbl_header_meta.configure(text=self._header_meta_summary())
+        if hasattr(self, "lbl_devices_header_meta"):
+            self.lbl_devices_header_meta.configure(text=self._header_meta_summary())
+        if hasattr(self, "lbl_settings_header_meta"):
+            self.lbl_settings_header_meta.configure(text=self._header_meta_summary())
+
+        diag = self.server_diag if isinstance(getattr(self, "server_diag", None), dict) else {}
+        uptime_text = self._format_uptime_short(diag.get("uptime_s", 0))
+        cpu_text = f"{float(diag.get('cpu', 0.0) or 0.0):.0f}%"
+        ram_text = f"{float(diag.get('ram', 0.0) or 0.0):.0f}%"
+        if hasattr(self, "lbl_server_uptime"):
+            self.lbl_server_uptime.configure(text=uptime_text)
+        if hasattr(self, "lbl_server_cpu"):
+            self.lbl_server_cpu.configure(text=cpu_text)
+        if hasattr(self, "lbl_server_ram"):
+            self.lbl_server_ram.configure(text=ram_text)
+        if hasattr(self, "lbl_server_mode"):
+            mode = "PUBLIC" if str(getattr(self, "cloudflare_status", "") or "") == "online" else "LAN"
+            if not bool(getattr(self, "server_online", False)):
+                mode = "OFFLINE"
+            self.lbl_server_mode.configure(text=mode, text_color=(COLOR_ACCENT if mode in {"PUBLIC", "LAN"} and self.server_online else COLOR_FAIL))
+        if hasattr(self, "lbl_server_port"):
+            self.lbl_server_port.configure(text=str(getattr(self, "server_port", getattr(self, "port", DEFAULT_PORT))))
+
+        local_origin = self._local_access_origin()
+        local_display = local_origin or f"{self.server_ip}:{self.server_port}"
+        if hasattr(self, "txt_local_access"):
+            self._set_readonly_textbox_value(self.txt_local_access, local_display, text_color=COLOR_TEXT)
+        if hasattr(self, "btn_copy_local_access"):
+            self.btn_copy_local_access.configure(state=("normal" if local_origin else "disabled"))
+
+        status = str(getattr(self, "cloudflare_status", "disabled") or "disabled")
+        public_origin = self._public_access_origin()
+        if status == "online" and public_origin:
+            public_text = public_origin
+            public_color = COLOR_ACCENT
+        elif status == "installing":
+            public_text = self.tr("remote_access_installing")
+            public_color = COLOR_WARN
+        elif bool(self.settings.get("cloudflare_enabled", False)):
+            detail = self._friendly_remote_access_detail(
+                str(getattr(self, "cloudflare_last_error", "") or "").strip()
+            )
+            public_text = self.tr("remote_access_error", detail=detail) if detail else self.tr("remote_access_starting")
+            public_color = COLOR_FAIL if status in {"error", "missing_binary"} else COLOR_WARN
+        else:
+            public_text = self.tr("remote_access_disabled")
+            public_color = COLOR_TEXT_DIM
+
+        if hasattr(self, "txt_public_access"):
+            self._set_readonly_textbox_value(self.txt_public_access, public_text, text_color=public_color)
+        if hasattr(self, "btn_copy_public_access"):
+            self.btn_copy_public_access.configure(state=("normal" if public_origin else "disabled"))
+        if hasattr(self, "lbl_version"):
+            self.lbl_version.configure(text=self.tr("server_version_line", server=self.server_version, launcher=LAUNCHER_VERSION))
         if hasattr(self, "lbl_updates"):
             default_line = self.tr("updates_not_checked")
             text = str(getattr(self, "_update_status_line", default_line) or default_line)
-            color = COLOR_WARN if bool(getattr(self, "_update_status_has_updates", False)) else COLOR_TEXT_DIM
+            if bool(getattr(self, "_auto_update_request_inflight", False)) or bool(
+                getattr(self, "_auto_update_shutdown_scheduled", False)
+            ):
+                color = COLOR_ACCENT
+            else:
+                color = COLOR_WARN if bool(getattr(self, "_update_status_has_updates", False)) else COLOR_TEXT_DIM
             self.lbl_updates.configure(text=text, text_color=color)
 
         if self.server_online:

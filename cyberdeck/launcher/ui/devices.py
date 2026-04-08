@@ -89,6 +89,19 @@ def setup_devices_ui(app, ui: dict):
     left = ctk.CTkFrame(header, fg_color="transparent")
     left.grid(row=0, column=0, sticky="w", padx=16, pady=14)
     ctk.CTkLabel(left, text=app.tr("devices_title"), font=FONT_HEADER, text_color=COLOR_TEXT).pack(anchor="w")
+    ctk.CTkLabel(
+        left,
+        text=app.tr("devices_subtitle"),
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+    ).pack(anchor="w", pady=(2, 0))
+    app.lbl_devices_header_meta = ctk.CTkLabel(
+        left,
+        text="TLS | LAN | --:--:--",
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+    )
+    app.lbl_devices_header_meta.pack(anchor="w", pady=(4, 0))
     app.lbl_devices_status = ctk.CTkLabel(
         left,
         text=app.tr("updated_offline"),
@@ -100,23 +113,82 @@ def setup_devices_ui(app, ui: dict):
     header_actions = ctk.CTkFrame(header, fg_color="transparent")
     header_actions.grid(row=0, column=1, sticky="e", padx=14, pady=14)
 
+    app.var_device_search = ctk.StringVar(value="")
+    app.var_device_filter = ctk.StringVar(value=app._device_filter_label("all"))
+    app.var_device_sort = ctk.StringVar(value=app._device_sort_label("activity"))
+
+    filter_row = ctk.CTkFrame(header_actions, fg_color="transparent")
+    filter_row.pack(side="right")
+
+    app.ent_device_search = ctk.CTkEntry(
+        filter_row,
+        width=190,
+        height=36,
+        corner_radius=10,
+        fg_color=COLOR_PANEL_ALT,
+        border_color=COLOR_BORDER,
+        text_color=COLOR_TEXT,
+        textvariable=app.var_device_search,
+        placeholder_text=app.tr("device_search_placeholder"),
+    )
+    app.ent_device_search.pack(side="left", padx=(0, 8))
+
+    app.opt_device_filter = ctk.CTkOptionMenu(
+        filter_row,
+        values=[app._device_filter_label(code) for code in ("all", "online", "offline", "pending")],
+        variable=app.var_device_filter,
+        width=138,
+        corner_radius=10,
+        fg_color=COLOR_PANEL_ALT,
+        button_color=COLOR_BORDER,
+        button_hover_color=COLOR_PANEL,
+        text_color=COLOR_TEXT,
+        dropdown_fg_color=COLOR_PANEL,
+        dropdown_hover_color=COLOR_PANEL_ALT,
+        dropdown_text_color=COLOR_TEXT,
+        command=lambda _value: app.update_gui_data(),
+    )
+    app.opt_device_filter.pack(side="left", padx=(0, 8))
+
+    app.opt_device_sort = ctk.CTkOptionMenu(
+        filter_row,
+        values=[app._device_sort_label(code) for code in ("activity", "name", "recent")],
+        variable=app.var_device_sort,
+        width=138,
+        corner_radius=10,
+        fg_color=COLOR_PANEL_ALT,
+        button_color=COLOR_BORDER,
+        button_hover_color=COLOR_PANEL,
+        text_color=COLOR_TEXT,
+        dropdown_fg_color=COLOR_PANEL,
+        dropdown_hover_color=COLOR_PANEL_ALT,
+        dropdown_text_color=COLOR_TEXT,
+        command=lambda _value: app.update_gui_data(),
+    )
+    app.opt_device_sort.pack(side="left", padx=(0, 10))
+
     app.sw_show_offline = ctk.CTkSwitch(
-        header_actions,
+        filter_row,
         text=app.tr("show_offline"),
         text_color=COLOR_TEXT,
         variable=app.show_offline,
         command=app.update_gui_data,
     )
-    app.sw_show_offline.pack(side="right", padx=(10, 0))
+    app.sw_show_offline.pack(side="left", padx=(0, 10))
 
     app.btn_toggle_devices_panel = CyberBtn(
-        header_actions,
+        filter_row,
         text=app.tr("hide_panel"),
         command=app.toggle_devices_panel,
         width=150,
         font=FONT_SMALL,
     )
-    app.btn_toggle_devices_panel.pack(side="right")
+    app.btn_toggle_devices_panel.pack(side="left")
+
+    try:
+        app.var_device_search.trace_add("write", lambda *_args: app.update_gui_data())
+    except Exception:
+        pass
 
     split = ctk.CTkFrame(page, fg_color="transparent")
     split.pack(fill="both", expand=True)
@@ -142,7 +214,7 @@ def setup_devices_ui(app, ui: dict):
     ctk.CTkLabel(list_card, text=app.tr("devices_title"), font=FONT_UI_BOLD, text_color=COLOR_TEXT).pack(
         anchor="w", padx=14, pady=(12, 2)
     )
-    ctk.CTkLabel(list_card, text=app.tr("choose_device"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM).pack(
+    ctk.CTkLabel(list_card, text=app.tr("devices_list_subtitle"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM).pack(
         anchor="w", padx=14, pady=(0, 10)
     )
 
@@ -181,7 +253,7 @@ def setup_devices_ui(app, ui: dict):
     app.devices_panel = panel
 
     ctk.CTkLabel(panel, text=app.tr("target"), font=FONT_UI_BOLD, text_color=COLOR_TEXT_DIM).pack(pady=(16, 4))
-    app.lbl_target = ctk.CTkLabel(panel, text=app.tr("none"), font=FONT_UI_BOLD, text_color=COLOR_TEXT)
+    app.lbl_target = ctk.CTkLabel(panel, text=app.tr("none"), font=("Consolas", 18, "bold"), text_color=COLOR_TEXT)
     app.lbl_target.pack(pady=(0, 4))
     app.lbl_target_status = ctk.CTkLabel(
         panel,
@@ -190,6 +262,14 @@ def setup_devices_ui(app, ui: dict):
         text_color=COLOR_TEXT_DIM,
     )
     app.lbl_target_status.pack(pady=(0, 12))
+    app.lbl_target_meta = ctk.CTkLabel(
+        panel,
+        text=app.tr("device_meta_placeholder"),
+        font=FONT_SMALL,
+        text_color=COLOR_TEXT_DIM,
+        justify="center",
+    )
+    app.lbl_target_meta.pack(pady=(0, 10))
 
     action_row = ctk.CTkFrame(panel, fg_color="transparent")
     action_row.pack(padx=18, fill="x", pady=(0, 8))

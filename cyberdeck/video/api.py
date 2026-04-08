@@ -1,16 +1,59 @@
 ﻿from __future__ import annotations
 
-from typing import Any
+import ipaddress
+from typing import Any, Dict, Optional
 import sys
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
+from ..auth import MediaTokenDep
 from .core import *
 from .streamer import video_streamer
 from .mjpeg import *
 from .ffmpeg import *
 from .wayland import *
 from .stream_adaptation import feedback_store
+from fastapi.responses import Response
 
 router = APIRouter()
+
+
+def _stream_preflight_headers(detail: Optional[str] = None) -> dict[str, str]:
+    """Return headers for lightweight stream preflight responses."""
+    headers = dict(_facade_call("_stream_headers", _stream_headers) or {})
+    if detail:
+        headers["X-CyberDeck-Stream-Error"] = str(detail)[:180]
+    return headers
+
+
+def _stream_preflight_response(status_code: int, detail: Optional[str] = None) -> Response:
+    """Build empty response used by HEAD requests to avoid spawning streaming backends."""
+    return Response(status_code=int(status_code), headers=_stream_preflight_headers(detail))
+
+
+def _codec_stream_preflight_ok(codec: str, monitor: int, fps: int) -> tuple[bool, str]:
+    """Return whether codec stream is likely startable without spawning ffmpeg."""
+    can_capture = bool(_facade_call("_capture_input_available", _capture_input_available, int(monitor), int(fps)))
+    capture_reliable = bool(
+        can_capture
+        and _facade_call("_ffmpeg_wayland_capture_reliable", _ffmpeg_wayland_capture_reliable)
+    )
+    if not can_capture or not capture_reliable:
+        diag = _get_ffmpeg_diag()
+        detail = str(diag.get("ffmpeg_last_error") or "ffmpeg_capture_unavailable")
+        return False, detail
+    if not bool(_facade_call("_codec_encoder_available", _codec_encoder_available, codec)):
+        return False, f"ffmpeg_missing_encoder:{codec}"
+    return True, ""
+
+
+def _audio_stream_preflight_ok() -> tuple[bool, str]:
+    """Return whether audio relay is likely startable without spawning encoder process."""
+    caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+    if bool(caps.get("real_audio_available")) or bool(caps.get("silent_fallback_enabled")):
+        return True, ""
+    diag = _get_ffmpeg_diag()
+    detail = str(diag.get("ffmpeg_last_error") or "audio_capture_unavailable")
+    return False, detail
 
 
 def _facade_attr(name: str, default: Any) -> Any:
@@ -68,6 +111,160 @@ def _clamp_int(value: int, lo: int, hi: int) -> int:
     lo_i = int(min(lo, hi))
     hi_i = int(max(lo, hi))
     return max(lo_i, min(hi_i, int(value)))
+
+
+def _public_base_url(request: Request) -> str:
+    """Build public-facing base URL, preferring configured or forwarded origin."""
+    hinted = str(getattr(config, "PUBLIC_ORIGIN_HINT", "") or "").strip()
+    if hinted:
+        if "://" not in hinted:
+            hinted = f"https://{hinted}"
+        parsed_hint = urlsplit(hinted)
+        if parsed_hint.scheme and parsed_hint.netloc:
+            hint_path = parsed_hint.path or "/"
+            return urlunsplit((parsed_hint.scheme, parsed_hint.netloc, hint_path, "", "")).rstrip("/")
+
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        try:
+            proto = str(headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+            host = str(headers.get("x-forwarded-host") or headers.get("host") or "").split(",", 1)[0].strip()
+            port = str(headers.get("x-forwarded-port") or "").split(",", 1)[0].strip()
+            if host:
+                if port and (":" not in host) and (not host.startswith("[")):
+                    host = f"{host}:{port}"
+                base_path = urlsplit(str(request.base_url)).path or "/"
+                base_scheme = proto or (urlsplit(str(request.base_url)).scheme or "http")
+                return urlunsplit((base_scheme, host, base_path, "", "")).rstrip("/")
+        except Exception:
+            pass
+
+    return str(request.base_url).rstrip("/")
+
+
+def _host_is_private_or_local(host: str) -> bool:
+    """Return whether host points to a private/local origin."""
+    normalized = str(host or "").strip().lower().strip("[]")
+    if not normalized:
+        return True
+    if normalized in {"localhost", "0.0.0.0", "::", "::1"}:
+        return True
+    if normalized.endswith(".local") or "." not in normalized:
+        return True
+
+    zone_free = normalized.split("%", 1)[0]
+    try:
+        parsed = ipaddress.ip_address(zone_free)
+    except ValueError:
+        return False
+
+    if parsed.is_loopback or parsed.is_link_local or parsed.is_private:
+        return True
+    if parsed.version == 4:
+        octets = zone_free.split(".")
+        if len(octets) == 4:
+            try:
+                a = int(octets[0])
+                b = int(octets[1])
+            except Exception:
+                return False
+            if a == 100 and 64 <= b <= 127:
+                return True
+    return False
+
+
+def _base_prefers_compatibility_transport(base_url: str) -> bool:
+    """Return whether public-facing origin should prefer compatibility-first transports."""
+    try:
+        host = str(urlsplit(str(base_url or "")).hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if not host:
+        return False
+    if host.endswith(".trycloudflare.com"):
+        return True
+    return not _host_is_private_or_local(host)
+
+
+def _stream_profile_for_request(profile: Optional[str], low_latency: bool) -> str:
+    """Resolve effective stream profile for request with low-latency override."""
+    if str(profile or "").strip():
+        return _normalize_stream_profile(profile)
+    if bool(low_latency):
+        return "low_latency"
+    return _normalize_stream_profile(_facade_attr("_STREAM_PROFILE_DEFAULT", _STREAM_PROFILE_DEFAULT))
+
+
+def _offer_audio_requested(value: Optional[int]) -> bool:
+    """Resolve whether audio should be requested for offer/video endpoints."""
+    if value is None:
+        return bool(int(_facade_attr("_DEFAULT_OFFER_AUDIO", _DEFAULT_OFFER_AUDIO)))
+    return bool(_to_int(value, 0))
+
+
+def _apply_stream_profile(
+    *,
+    profile: str,
+    fps: int,
+    max_w: int,
+    quality: int,
+    bitrate_k: int,
+    gop: int,
+    preset: str,
+    force_low_latency: bool,
+) -> tuple[str, int, int, int, int, int, str, bool]:
+    """Apply stream profile to normalize quality/FPS/bitrate and latency intent."""
+    out_profile = _normalize_stream_profile(profile)
+    out_fps = _clamp_int(int(fps), 5, 120)
+    out_w = _clamp_int(int(max_w), 640, 4096)
+    out_quality = _clamp_int(int(quality), 10, 95)
+    out_bitrate = _clamp_int(int(bitrate_k), 200, 30000)
+    out_gop = _clamp_int(int(gop), 10, 600)
+    out_preset = str(preset or "veryfast")
+    out_low = bool(force_low_latency) or out_profile == "low_latency"
+
+    if out_profile == "quality":
+        out_fps = max(out_fps, 24)
+        out_quality = max(out_quality, 65)
+        out_bitrate = _clamp_int(int(round(out_bitrate * 1.25)), 300, 30000)
+        if out_preset in {"ultrafast", "superfast"}:
+            out_preset = "veryfast"
+    elif out_profile == "balanced":
+        out_quality = max(out_quality, _MIN_MJPEG_Q)
+
+    if out_low:
+        out_fps = min(out_fps, _LOW_LATENCY_MAX_FPS)
+        out_w = min(out_w, _LOW_LATENCY_MAX_W)
+        out_quality = max(_MIN_MJPEG_Q_LOWLAT, min(out_quality, _LOW_LATENCY_MAX_Q))
+        out_bitrate = min(out_bitrate, _lowlat_bitrate_cap_k(out_w, out_fps, "h264"))
+        out_gop = min(out_gop, max(10, out_fps))
+        out_preset = "ultrafast"
+
+    return out_profile, out_fps, out_w, out_quality, out_bitrate, out_gop, out_preset, out_low
+
+
+def _apply_mjpeg_profile(
+    *,
+    profile: str,
+    fps: int,
+    max_w: int,
+    quality: int,
+    force_low_latency: bool,
+) -> tuple[str, int, int, int, bool]:
+    """Apply profile tuning for MJPEG endpoints."""
+    out_profile = _normalize_stream_profile(profile)
+    out_fps = _clamp_int(int(fps), 5, 120)
+    out_w = _clamp_int(int(max_w), 640, 4096)
+    out_q = _clamp_int(int(quality), _MIN_MJPEG_Q, 95)
+    out_low = bool(force_low_latency) or out_profile == "low_latency"
+    if out_profile == "quality":
+        out_fps = max(out_fps, 24)
+        out_q = max(out_q, 65)
+    if out_low:
+        out_fps = min(out_fps, _LOW_LATENCY_MAX_FPS)
+        out_w = min(out_w, _LOW_LATENCY_MAX_W)
+        out_q = max(_MIN_MJPEG_Q_LOWLAT, min(out_q, _LOW_LATENCY_MAX_Q))
+    return out_profile, out_fps, out_w, out_q, out_low
 
 
 def _feedback_tuning_for_offer(
@@ -150,16 +347,18 @@ def _feedback_tuning_for_offer(
 
 @router.api_route("/video_feed", methods=["GET", "HEAD"])
 def video_feed(
-    token: str = TokenDep,
+    request: Request,
+    token: str = MediaTokenDep,
     w: Optional[int] = None,
     q: Optional[int] = None,
     max_w: Optional[int] = None,
     quality: Optional[int] = None,
-    fps: int = 30,
+    fps: int = _DEFAULT_OFFER_FPS,
     cursor: int = 1,
     low_latency: int = _DEFAULT_MJPEG_LOW_LATENCY,
     monitor: int = 1,
     backend: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> Any:
     """Serve MJPEG endpoint by selecting best backend for current runtime health and request profile."""
     require_perm(token, "perm_stream")
@@ -167,21 +366,23 @@ def video_feed(
     requested_w = int(max_w if max_w is not None else (w if w is not None else _DEFAULT_MJPEG_W))
     eff_w = _WIDTH_STABILIZER.decide(token, requested_w)
     eff_q = int(quality if quality is not None else (q if q is not None else _DEFAULT_MJPEG_Q))
-    eff_fps = int(fps)
+    eff_fps = int(fps if fps is not None else _DEFAULT_OFFER_FPS)
     eff_monitor = int(monitor)
-    eff_q = max(eff_q, _MIN_MJPEG_Q)
-
-    if int(low_latency) == 1:
-        eff_w = min(eff_w, _LOW_LATENCY_MAX_W)
-        eff_q = max(_MIN_MJPEG_Q_LOWLAT, min(eff_q, _LOW_LATENCY_MAX_Q))
-        eff_fps = min(eff_fps, _LOW_LATENCY_MAX_FPS)
+    req_profile = _stream_profile_for_request(profile, bool(int(low_latency)))
+    _, eff_fps, eff_w, eff_q, _ = _apply_mjpeg_profile(
+        profile=req_profile,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=eff_q,
+        force_low_latency=bool(int(low_latency)),
+    )
 
     requested_backend = _normalize_mjpeg_backend(backend)
     status = _mjpeg_backend_status(eff_monitor, eff_fps)
     order = _mjpeg_backend_order(requested_backend, status)
     if _stream_log_enabled():
         log.info(
-            "video_feed request: backend=%s monitor=%s fps=%s req_w=%s eff_w=%s q=%s low_latency=%s order=%s available=%s",
+            "video_feed request: backend=%s monitor=%s fps=%s req_w=%s eff_w=%s q=%s low_latency=%s profile=%s order=%s available=%s",
             requested_backend,
             eff_monitor,
             eff_fps,
@@ -189,6 +390,7 @@ def video_feed(
             eff_w,
             eff_q,
             int(low_latency),
+            req_profile,
             ",".join(order) if order else "-",
             status,
         )
@@ -199,6 +401,14 @@ def video_feed(
         for x in _MJPEG_BACKENDS:
             if x not in order:
                 order.append(x)
+
+    if request.method == "HEAD":
+        if order:
+            return _stream_preflight_response(204)
+        diag = _get_ffmpeg_diag()
+        reason = video_streamer.disabled_reason() or "mjpeg_backends_failed"
+        detail = str(diag.get("ffmpeg_last_error") or f"stream_unavailable:{reason}")
+        return _stream_preflight_response(501, detail)
 
     for name in order:
         stream = _mjpeg_stream_for_backend(
@@ -250,16 +460,7 @@ def stream_stats(token: str = TokenDep) -> Any:
         out["input_can_keyboard"] = bool(getattr(INPUT_BACKEND, "can_keyboard", False))
         out["wayland_session"] = bool(_is_wayland_session())
         out["feedback"] = feedback_store.recommend(token)
-        audio_inputs = _ffmpeg_audio_input_arg_sets()
-        snd_ok, snd_name = _soundcard_loopback_probe()
-        out["audio"] = {
-            "ffmpeg_inputs": audio_inputs,
-            "ffmpeg_input_count": len(audio_inputs),
-            "soundcard_loopback": bool(snd_ok),
-            "soundcard_speaker": snd_name,
-            "soundcard_speakers": _soundcard_speaker_names()[:16],
-            "windows_force_soundcard": bool(_env_bool("CYBERDECK_AUDIO_WINDOWS_FORCE_SOUNDCARD", True)),
-        }
+        out["audio"] = _ffmpeg_audio_relay_capabilities()
     except Exception:
         pass
     try:
@@ -298,36 +499,44 @@ def stream_offer(
     request: Request,
     token: str = TokenDep,
     monitor: int = 1,
-    fps: int = 30,
+    fps: int = _DEFAULT_OFFER_FPS,
     max_w: int = _DEFAULT_OFFER_MAX_W,
     quality: int = _DEFAULT_OFFER_Q,
     bitrate_k: int = _DEFAULT_H264_BITRATE_K,
-    gop: int = 60,
-    preset: str = "veryfast",
+    gop: int = _DEFAULT_OFFER_GOP,
+    preset: str = _DEFAULT_OFFER_PRESET,
     low_latency: int = _DEFAULT_OFFER_LOW_LATENCY,
-    audio: int = 0,
+    audio: Optional[int] = None,
     cursor: int = _DEFAULT_OFFER_CURSOR,
     backend: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> Any:
     """Build candidate stream transports (TS/MJPEG) for adaptive client negotiation."""
     require_perm(token, "perm_stream")
     width_stabilizer = _facade_attr("_WIDTH_STABILIZER", _WIDTH_STABILIZER)
 
     eff_monitor = int(monitor)
-    eff_fps = max(5, int(fps))
+    eff_fps = max(5, int(fps if fps is not None else _DEFAULT_OFFER_FPS))
     req_w = max(0, int(max_w))
     eff_w = width_stabilizer.decide(token, req_w if req_w > 0 else _DEFAULT_OFFER_MAX_W)
     eff_q = max(10, min(95, int(quality)))
     eff_bitrate = max(200, int(bitrate_k))
     eff_gop = max(10, int(gop))
-    eff_preset = str(preset or "veryfast")
+    eff_preset = str(preset or _DEFAULT_OFFER_PRESET)
     eff_low = bool(int(low_latency))
-    eff_audio = bool(int(audio))
+    req_profile = _stream_profile_for_request(profile, eff_low)
+    eff_audio_requested = _offer_audio_requested(audio)
     eff_cursor = 1 if int(cursor) == 1 else 0
-    if eff_low:
-        eff_fps = min(eff_fps, _LOW_LATENCY_MAX_FPS)
-        eff_w = min(eff_w, _LOW_LATENCY_MAX_W)
-        eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h264"))
+    _, eff_fps, eff_w, eff_q, eff_bitrate, eff_gop, eff_preset, eff_low = _apply_stream_profile(
+        profile=req_profile,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=eff_q,
+        bitrate_k=eff_bitrate,
+        gop=eff_gop,
+        preset=eff_preset,
+        force_low_latency=eff_low,
+    )
 
     eff_fps, eff_w, eff_q, eff_bitrate, eff_low, feedback_hint = _feedback_tuning_for_offer(
         token,
@@ -342,6 +551,18 @@ def stream_offer(
         eff_w = min(eff_w, _LOW_LATENCY_MAX_W)
         eff_q = max(_MIN_MJPEG_Q_LOWLAT, min(eff_q, _LOW_LATENCY_MAX_Q))
         eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h264"))
+        eff_gop = min(eff_gop, max(10, eff_fps))
+        eff_preset = "ultrafast"
+
+    audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+    audio_relay_ok = bool(audio_caps.get("real_audio_available"))
+    audio_mux_ok = bool(audio_caps.get("muxed_audio_available"))
+    silent_audio_ok = bool(audio_caps.get("silent_fallback_enabled"))
+    audio_stream_ok = bool(audio_relay_ok or silent_audio_ok)
+    eff_audio_muxed = bool(eff_audio_requested and audio_mux_ok)
+    eff_audio_separate = bool(eff_audio_requested and (not eff_audio_muxed) and audio_stream_ok)
+    if eff_audio_requested and (not audio_stream_ok) and _stream_log_enabled():
+        log.warning("stream_offer requested audio but no audio backend is available")
 
     can_capture = _facade_call("_capture_input_available", _capture_input_available, eff_monitor, eff_fps)
     ffmpeg_codec_capture_ok = can_capture and _facade_call(
@@ -358,13 +579,13 @@ def stream_offer(
         mjpeg_status,
     )
     mjpeg_ok = any(mjpeg_status.values())
-    prefer_mjpeg_offer = (
-        os.name != "nt"
-        and _is_wayland_session()
-        and _env_bool("CYBERDECK_PREFER_MJPEG_OFFER", True)
-    )
-
-    base = str(request.base_url).rstrip("/")
+    base = _public_base_url(request)
+    prefer_compatibility_relay = _base_prefers_compatibility_transport(base)
+    prefer_mjpeg_offer = False
+    if prefer_compatibility_relay:
+        prefer_mjpeg_offer = _env_bool("CYBERDECK_PREFER_COMPATIBILITY_RELAY_OFFER", True)
+    elif os.name != "nt" and _is_wayland_session():
+        prefer_mjpeg_offer = _env_bool("CYBERDECK_PREFER_MJPEG_OFFER", True)
 
     def _url(path: str, params: Dict[str, Any]) -> str:
         """Build absolute URL with filtered query parameters for stream candidate payloads."""
@@ -399,6 +620,7 @@ def stream_offer(
                             "cursor": eff_cursor,
                             "low_latency": 1 if eff_low else 0,
                             "backend": mj_backend,
+                            "profile": req_profile,
                         },
                     ),
                 }
@@ -425,20 +647,17 @@ def stream_offer(
                         "preset": eff_preset,
                         "max_w": eff_w,
                         "low_latency": 1 if eff_low else 0,
-                        "audio": 1 if eff_audio else None,
+                        "profile": req_profile,
+                        "audio": 1 if eff_audio_muxed else None,
                     },
                 ),
             }
         )
 
-    if prefer_mjpeg_offer:
-        _append_mjpeg_candidates()
-        _append_h264_candidate()
-    else:
-        _append_h264_candidate()
-        _append_mjpeg_candidates()
-
-    if h265_ok:
+    def _append_h265_candidate() -> None:
+        """Append H.265 transport candidate."""
+        if not h265_ok:
+            return
         candidates.append(
             {
                 "id": "h265_ts",
@@ -456,22 +675,55 @@ def stream_offer(
                         "preset": eff_preset,
                         "max_w": eff_w,
                         "low_latency": 1 if eff_low else 0,
-                        "audio": 1 if eff_audio else None,
+                        "profile": req_profile,
+                        "audio": 1 if eff_audio_muxed else None,
                     },
                 ),
             }
         )
 
+    def _append_audio_candidate() -> None:
+        """Append optional separate audio relay candidate when muxed audio is unavailable."""
+        if not eff_audio_separate:
+            return
+        candidates.append(
+            {
+                "id": "audio_ts",
+                "codec": "aac",
+                "container": "mpegts",
+                "mime": "audio/mp2t",
+                "url": _url(
+                    "/audio_stream",
+                    {
+                        "token": token,
+                    },
+                ),
+            }
+        )
+
+    if prefer_mjpeg_offer:
+        _append_mjpeg_candidates()
+        _append_h264_candidate()
+    else:
+        _append_h264_candidate()
+        _append_mjpeg_candidates()
+    _append_h265_candidate()
+    _append_audio_candidate()
+
     if _stream_log_enabled():
         cand_ids = [str(c.get("id") or "") for c in candidates]
         log.info(
-            "stream_offer monitor=%s fps=%s req_w=%s eff_w=%s q=%s low_latency=%s candidates=%s mjpeg=%s h264=%s h265=%s",
+            "stream_offer monitor=%s fps=%s req_w=%s eff_w=%s q=%s low_latency=%s profile=%s audio_req=%s audio_mux=%s audio_sep=%s candidates=%s mjpeg=%s h264=%s h265=%s",
             eff_monitor,
             eff_fps,
             req_w,
             eff_w,
             eff_q,
             int(eff_low),
+            req_profile,
+            int(eff_audio_requested),
+            int(eff_audio_muxed),
+            int(eff_audio_separate),
             ",".join(cand_ids) if cand_ids else "-",
             mjpeg_status,
             bool(h264_ok),
@@ -484,6 +736,15 @@ def stream_offer(
         "fallback_policy": "ordered_candidates",
         "reconnect_hint_ms": int(_facade_attr("_STREAM_RECONNECT_HINT_MS", _STREAM_RECONNECT_HINT_MS)),
         "feedback": feedback_hint,
+        "audio": {
+            "requested": bool(eff_audio_requested),
+            "muxed": bool(eff_audio_muxed),
+            "separate": bool(eff_audio_separate),
+            "relay_available": bool(audio_relay_ok),
+            "muxed_available": bool(audio_mux_ok),
+            "silent_fallback_available": bool(silent_audio_ok),
+            "separate_url": _url("/audio_stream", {"token": token}) if eff_audio_separate else None,
+        },
         "adaptive_hint": {
             "min_quality": int(
                 _facade_attr(
@@ -569,26 +830,39 @@ def list_monitors(token: str = TokenDep) -> Any:
 
 @router.api_route("/video_h264", methods=["GET", "HEAD"])
 def video_h264(
-    token: str = TokenDep,
+    request: Request,
+    token: str = MediaTokenDep,
     monitor: int = 1,
-    fps: int = 30,
+    fps: int = _DEFAULT_OFFER_FPS,
     bitrate_k: int = _DEFAULT_H264_BITRATE_K,
-    gop: int = 60,
-    preset: str = "veryfast",
+    gop: int = _DEFAULT_OFFER_GOP,
+    preset: str = _DEFAULT_OFFER_PRESET,
     max_w: int = _DEFAULT_OFFER_MAX_W,
-    low_latency: int = 1,
-    audio: int = 0,
+    low_latency: int = _DEFAULT_OFFER_LOW_LATENCY,
+    audio: Optional[int] = None,
+    profile: Optional[str] = None,
 ) -> Any:
     """Serve H.264 MPEG-TS stream with low-latency caps and bitrate guardrails."""
     require_perm(token, "perm_stream")
     eff_monitor = int(monitor)
-    eff_fps = int(fps)
+    eff_fps = int(fps if fps is not None else _DEFAULT_OFFER_FPS)
     eff_bitrate = int(bitrate_k)
-    eff_gop = int(gop)
-    eff_preset = str(preset or "veryfast")
-    eff_w = int(max_w)
+    eff_gop = int(gop if gop is not None else _DEFAULT_OFFER_GOP)
+    eff_preset = str(preset or _DEFAULT_OFFER_PRESET)
+    eff_w = int(max_w if max_w is not None else _DEFAULT_OFFER_MAX_W)
     eff_low = bool(int(low_latency))
-    eff_audio = bool(int(audio))
+    req_profile = _stream_profile_for_request(profile, eff_low)
+    eff_audio_requested = _offer_audio_requested(audio)
+    _, eff_fps, eff_w, _, eff_bitrate, eff_gop, eff_preset, eff_low = _apply_stream_profile(
+        profile=req_profile,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=_DEFAULT_OFFER_Q,
+        bitrate_k=eff_bitrate,
+        gop=eff_gop,
+        preset=eff_preset,
+        force_low_latency=eff_low,
+    )
     eff_fps, eff_w, _, eff_bitrate, eff_low, _ = _feedback_tuning_for_offer(
         token,
         fps=eff_fps,
@@ -603,6 +877,13 @@ def video_h264(
         eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h264"))
         eff_gop = min(eff_gop, max(10, eff_fps))
         eff_preset = "ultrafast"
+    audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+    eff_audio = bool(eff_audio_requested and bool(audio_caps.get("muxed_audio_available")))
+    if eff_audio_requested and (not eff_audio) and _stream_log_enabled():
+        log.warning("video_h264 requested muxed audio but muxed audio backend is unavailable")
+    if request.method == "HEAD":
+        ok, detail = _codec_stream_preflight_ok("h264", eff_monitor, eff_fps)
+        return _stream_preflight_response(204 if ok else 502, detail or None)
     stream = _ffmpeg_stream(
         "h264",
         eff_monitor,
@@ -624,26 +905,39 @@ def video_h264(
 
 @router.api_route("/video_h265", methods=["GET", "HEAD"])
 def video_h265(
-    token: str = TokenDep,
+    request: Request,
+    token: str = MediaTokenDep,
     monitor: int = 1,
-    fps: int = 30,
+    fps: int = _DEFAULT_OFFER_FPS,
     bitrate_k: int = _DEFAULT_H265_BITRATE_K,
-    gop: int = 60,
-    preset: str = "veryfast",
+    gop: int = _DEFAULT_OFFER_GOP,
+    preset: str = _DEFAULT_OFFER_PRESET,
     max_w: int = _DEFAULT_OFFER_MAX_W,
-    low_latency: int = 1,
-    audio: int = 0,
+    low_latency: int = _DEFAULT_OFFER_LOW_LATENCY,
+    audio: Optional[int] = None,
+    profile: Optional[str] = None,
 ) -> Any:
     """Serve H.265 MPEG-TS stream with low-latency caps and bitrate guardrails."""
     require_perm(token, "perm_stream")
     eff_monitor = int(monitor)
-    eff_fps = int(fps)
+    eff_fps = int(fps if fps is not None else _DEFAULT_OFFER_FPS)
     eff_bitrate = int(bitrate_k)
-    eff_gop = int(gop)
-    eff_preset = str(preset or "veryfast")
-    eff_w = int(max_w)
+    eff_gop = int(gop if gop is not None else _DEFAULT_OFFER_GOP)
+    eff_preset = str(preset or _DEFAULT_OFFER_PRESET)
+    eff_w = int(max_w if max_w is not None else _DEFAULT_OFFER_MAX_W)
     eff_low = bool(int(low_latency))
-    eff_audio = bool(int(audio))
+    req_profile = _stream_profile_for_request(profile, eff_low)
+    eff_audio_requested = _offer_audio_requested(audio)
+    _, eff_fps, eff_w, _, eff_bitrate, eff_gop, eff_preset, eff_low = _apply_stream_profile(
+        profile=req_profile,
+        fps=eff_fps,
+        max_w=eff_w,
+        quality=_DEFAULT_OFFER_Q,
+        bitrate_k=eff_bitrate,
+        gop=eff_gop,
+        preset=eff_preset,
+        force_low_latency=eff_low,
+    )
     eff_fps, eff_w, _, eff_bitrate, eff_low, _ = _feedback_tuning_for_offer(
         token,
         fps=eff_fps,
@@ -658,6 +952,13 @@ def video_h265(
         eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h265"))
         eff_gop = min(eff_gop, max(10, eff_fps))
         eff_preset = "ultrafast"
+    audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+    eff_audio = bool(eff_audio_requested and bool(audio_caps.get("muxed_audio_available")))
+    if eff_audio_requested and (not eff_audio) and _stream_log_enabled():
+        log.warning("video_h265 requested muxed audio but muxed audio backend is unavailable")
+    if request.method == "HEAD":
+        ok, detail = _codec_stream_preflight_ok("h265", eff_monitor, eff_fps)
+        return _stream_preflight_response(204 if ok else 502, detail or None)
     stream = _ffmpeg_stream(
         "h265",
         eff_monitor,
@@ -678,9 +979,12 @@ def video_h265(
 
 
 @router.api_route("/audio_stream", methods=["GET", "HEAD"])
-def audio_stream(token: str = TokenDep) -> Any:
+def audio_stream(request: Request, token: str = MediaTokenDep) -> Any:
     """Serve low-latency audio relay stream captured from the host audio backend."""
     require_perm(token, "perm_stream")
+    if request.method == "HEAD":
+        ok, detail = _audio_stream_preflight_ok()
+        return _stream_preflight_response(204 if ok else 503, detail or None)
     stream = _ffmpeg_audio_stream()
     if stream is None:
         from fastapi import HTTPException

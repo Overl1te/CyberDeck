@@ -254,9 +254,13 @@ class _VideoStreamer:
 
         if w and img.width > w:
             h = int(img.height * (w / img.width))
-            resample = Image.Resampling.BILINEAR if int(target_fps) >= 45 else _RESAMPLE_FILTER
+            resample = (
+                Image.Resampling.BILINEAR
+                if int(target_fps) >= int(_HIGH_FPS_FAST_RESAMPLE_THRESHOLD)
+                else _RESAMPLE_FILTER
+            )
             img = img.resize((w, max(1, h)), resample)
-        high_fps = int(target_fps) >= 45
+        high_fps = int(target_fps) >= int(_HIGH_FPS_SUBSAMPLING_THRESHOLD)
         subsampling = 2 if high_fps else None
         return _save_jpeg(img, q, subsampling_override=subsampling)
 

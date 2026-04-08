@@ -112,6 +112,53 @@ class ApiBehaviorTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403, r.text)
         self.assertIn("Unauthorized", r.text)
 
+    def test_media_endpoints_accept_query_token_for_transport_compatibility(self):
+        """Validate scenario: direct media endpoints should keep query-token compatibility even when API auth is header-only."""
+        token = self._token()
+        with patch("cyberdeck.video.api._ffmpeg_stream", return_value={"status": "ok"}) as mvideo, patch(
+            "cyberdeck.video.api._ffmpeg_audio_stream",
+            return_value={"status": "ok"},
+        ) as maudio:
+            video_resp = self.client.get(f"/video_h264?token={token}")
+            audio_resp = self.client.get(f"/audio_stream?token={token}")
+        self.assertEqual(video_resp.status_code, 200, video_resp.text)
+        self.assertEqual(audio_resp.status_code, 200, audio_resp.text)
+        self.assertEqual(video_resp.json().get("status"), "ok")
+        self.assertEqual(audio_resp.json().get("status"), "ok")
+        mvideo.assert_called_once()
+        maudio.assert_called_once()
+
+    def test_video_h264_head_preflight_does_not_spawn_stream_backend(self):
+        """Validate scenario: TS HEAD probe should not spawn ffmpeg stream process."""
+        token = self._token()
+        with patch("cyberdeck.video.api._codec_stream_preflight_ok", return_value=(True, "")), patch(
+            "cyberdeck.video.api._ffmpeg_stream"
+        ) as mocked_stream:
+            r = self.client.head("/video_h264", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 204, r.text)
+        mocked_stream.assert_not_called()
+
+    def test_video_h264_head_preflight_reports_unavailable_without_spawn(self):
+        """Validate scenario: TS HEAD probe should fail fast without opening backend process."""
+        token = self._token()
+        with patch("cyberdeck.video.api._codec_stream_preflight_ok", return_value=(False, "capture_not_ready")), patch(
+            "cyberdeck.video.api._ffmpeg_stream"
+        ) as mocked_stream:
+            r = self.client.head("/video_h264", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 502, r.text)
+        self.assertEqual(r.headers.get("x-cyberdeck-stream-error"), "capture_not_ready")
+        mocked_stream.assert_not_called()
+
+    def test_audio_stream_head_preflight_does_not_spawn_backend(self):
+        """Validate scenario: audio HEAD probe should avoid spawning relay backend."""
+        token = self._token()
+        with patch("cyberdeck.video.api._audio_stream_preflight_ok", return_value=(True, "")), patch(
+            "cyberdeck.video.api._ffmpeg_audio_stream"
+        ) as mocked_audio:
+            r = self.client.head("/audio_stream", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 204, r.text)
+        mocked_audio.assert_not_called()
+
     def test_handshake_rejects_expired_pairing_window(self):
         """Validate scenario: test handshake rejects expired pairing window."""
         # Test body is intentionally explicit so regressions are easy to diagnose.
@@ -176,6 +223,20 @@ class ApiBehaviorTests(unittest.TestCase):
         self.assertTrue(body.get("pairing_rotated"))
         mrotate.assert_called_once()
         mreset.assert_called_once()
+
+    def test_handshake_allows_pin_pairing_when_remote_access_mode_is_enabled(self):
+        """Validate scenario: remote tunnel mode should keep the same PIN handshake flow as LAN."""
+        old_remote_access = config.REMOTE_ACCESS_ENABLED
+        try:
+            config.REMOTE_ACCESS_ENABLED = True
+            r = self.client.post(
+                "/api/handshake",
+                json={"code": "1234", "device_id": "remote-pin-1", "device_name": "Remote Pin"},
+            )
+        finally:
+            config.REMOTE_ACCESS_ENABLED = old_remote_access
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json().get("status") or "").lower(), "ok")
 
     def test_pairing_status_reports_pending_then_approved(self):
         """Validate scenario: pairing status endpoint should reflect approval transitions for the same token."""
@@ -243,6 +304,34 @@ class ApiBehaviorTests(unittest.TestCase):
         self.assertEqual(body.get("cpu"), 0.0)
         self.assertEqual(body.get("ram"), 0.0)
 
+    def test_diag_includes_access_session_and_volume_metadata(self):
+        """Validate scenario: diag should expose access, session, and volume summaries."""
+        token = self._token()
+        old_public_origin = config.PUBLIC_ORIGIN_HINT
+        old_remote_access = config.REMOTE_ACCESS_ENABLED
+        try:
+            config.PUBLIC_ORIGIN_HINT = "relay.example.com"
+            config.REMOTE_ACCESS_ENABLED = True
+            context.device_manager.register_socket(token, object())
+            r = self.client.get("/api/diag", headers=self._auth_headers(token))
+        finally:
+            config.PUBLIC_ORIGIN_HINT = old_public_origin
+            config.REMOTE_ACCESS_ENABLED = old_remote_access
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        access = body.get("access") or {}
+        session = body.get("session") or {}
+        volume = body.get("volume") or {}
+        self.assertEqual(access.get("effective_origin"), "https://relay.example.com")
+        self.assertEqual(access.get("public_origin_hint"), "https://relay.example.com")
+        self.assertTrue(bool(access.get("remote_access_enabled")))
+        self.assertFalse(bool(access.get("query_token_allowed")))
+        self.assertEqual(session.get("device_id"), "api-behavior-1")
+        self.assertEqual(session.get("device_name"), "API Behavior")
+        self.assertTrue(bool(session.get("approved")))
+        self.assertTrue(bool(session.get("websocket_attached")))
+        self.assertIn("supported", volume)
+
     def test_audio_stream_returns_503_when_backend_is_unavailable(self):
         """Validate scenario: audio relay endpoint should surface backend failure as 503."""
         token = self._token()
@@ -261,6 +350,62 @@ class ApiBehaviorTests(unittest.TestCase):
             r = self.client.get("/audio_stream", headers=self._auth_headers(token))
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json().get("status"), "ok")
+
+    def test_stream_offer_adds_separate_audio_candidate_when_muxed_audio_is_unavailable(self):
+        """Validate scenario: offer should expose `/audio_stream` candidate when muxed audio cannot be attached."""
+        token = self._token()
+        with patch.object(video, "_capture_input_available", return_value=True), patch.object(
+            video, "_ffmpeg_wayland_capture_reliable", return_value=True
+        ), patch.object(
+            video,
+            "_codec_encoder_available",
+            side_effect=lambda codec: str(codec).lower() in ("h264", "h265"),
+        ), patch.object(
+            video,
+            "_mjpeg_backend_status",
+            return_value={"native": True, "ffmpeg": False, "gstreamer": False, "screenshot": False},
+        ), patch.object(
+            video, "_mjpeg_backend_order", return_value=["native"]
+        ), patch.object(
+            video,
+            "_ffmpeg_audio_relay_capabilities",
+            return_value={
+                "real_audio_available": True,
+                "muxed_audio_available": False,
+                "silent_fallback_enabled": False,
+            },
+        ), patch.object(
+            video._WIDTH_STABILIZER, "decide", side_effect=lambda _token, requested: int(requested)
+        ):
+            r = self.client.get(
+                "/api/stream_offer",
+                params={"monitor": 1, "fps": 30, "max_w": 1600, "quality": 55, "audio": 1},
+                headers=self._auth_headers(token),
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        audio = body.get("audio") or {}
+        self.assertTrue(bool(audio.get("requested")))
+        self.assertFalse(bool(audio.get("muxed")))
+        self.assertTrue(bool(audio.get("separate")))
+        self.assertTrue(str(audio.get("separate_url") or "").endswith(f"/audio_stream?token={token}"))
+        ids = [str(item.get("id") or "") for item in (body.get("candidates") or [])]
+        self.assertIn("audio_ts", ids)
+
+        h264 = next((c for c in (body.get("candidates") or []) if c.get("id") == "h264_ts"), {})
+        parsed = parse_qs(urlparse(str(h264.get("url") or "")).query)
+        self.assertNotIn("audio", parsed)
+
+    def test_video_h264_disables_muxed_audio_when_audio_backend_does_not_support_muxing(self):
+        """Validate scenario: direct H.264 endpoint should not force muxed audio when backend cannot mux."""
+        token = self._token()
+        with patch("cyberdeck.video.api._ffmpeg_audio_relay_capabilities", return_value={"muxed_audio_available": False}), patch(
+            "cyberdeck.video.api._ffmpeg_stream",
+            return_value={"status": "ok"},
+        ) as mocked_stream:
+            r = self.client.get("/video_h264?audio=1", headers=self._auth_headers(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(bool(mocked_stream.call_args.kwargs.get("audio")))
 
     def test_stream_offer_applies_recent_feedback_tuning(self):
         """Validate scenario: recent critical feedback should tune stream offer parameters down."""
@@ -322,6 +467,77 @@ class ApiBehaviorTests(unittest.TestCase):
         first_url = str(candidates[0].get("url") or "")
         parsed = parse_qs(urlparse(first_url).query)
         self.assertEqual(parsed.get("low_latency"), ["1"])
+
+    def test_stream_offer_uses_forwarded_public_origin_when_present(self):
+        """Validate scenario: stream offer should return public URLs when reverse-proxy headers are provided."""
+        token = self._token()
+        with patch.object(video, "_capture_input_available", return_value=True), patch.object(
+            video, "_ffmpeg_wayland_capture_reliable", return_value=True
+        ), patch.object(
+            video,
+            "_codec_encoder_available",
+            side_effect=lambda codec: str(codec).lower() in ("h264", "h265"),
+        ), patch.object(
+            video,
+            "_mjpeg_backend_status",
+            return_value={"native": True, "ffmpeg": False, "gstreamer": False, "screenshot": False},
+        ), patch.object(
+            video, "_mjpeg_backend_order", return_value=["native"]
+        ), patch.object(
+            video._WIDTH_STABILIZER, "decide", side_effect=lambda _token, requested: int(requested)
+        ):
+            r = self.client.get(
+                "/api/stream_offer",
+                headers=self._auth_headers(
+                    token,
+                    **{
+                        "X-Forwarded-Proto": "https",
+                        "X-Forwarded-Host": "demo.trycloudflare.com",
+                    },
+                ),
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        candidates = body.get("candidates") or []
+        self.assertTrue(candidates)
+        self.assertTrue(str(candidates[0].get("url") or "").startswith("https://demo.trycloudflare.com/"))
+
+    def test_stream_offer_prefers_mjpeg_first_for_public_compatibility_relay(self):
+        """Validate scenario: public relay should prefer MJPEG-first ordering for client compatibility."""
+        token = self._token()
+        with patch.object(video, "_capture_input_available", return_value=True), patch.object(
+            video, "_ffmpeg_wayland_capture_reliable", return_value=True
+        ), patch.object(
+            video,
+            "_codec_encoder_available",
+            side_effect=lambda codec: str(codec).lower() in ("h264", "h265"),
+        ), patch.object(
+            video,
+            "_mjpeg_backend_status",
+            return_value={"native": True, "ffmpeg": False, "gstreamer": False, "screenshot": False},
+        ), patch.object(
+            video, "_mjpeg_backend_order", return_value=["native"]
+        ), patch.object(
+            video._WIDTH_STABILIZER, "decide", side_effect=lambda _token, requested: int(requested)
+        ):
+            r = self.client.get(
+                "/api/stream_offer",
+                headers=self._auth_headers(
+                    token,
+                    **{
+                        "X-Forwarded-Proto": "https",
+                        "X-Forwarded-Host": "demo.trycloudflare.com",
+                    },
+                ),
+            )
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        candidates = body.get("candidates") or []
+        self.assertGreaterEqual(len(candidates), 2)
+        self.assertEqual(body.get("recommended"), "mjpeg")
+        self.assertEqual((candidates[0] or {}).get("codec"), "mjpeg")
+        self.assertEqual((candidates[1] or {}).get("codec"), "h264")
 
 
 if __name__ == "__main__":

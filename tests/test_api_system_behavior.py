@@ -182,6 +182,40 @@ class ApiSystemBehaviorTests(unittest.TestCase):
         self.assertEqual(body.get("muted"), False)
         self.assertEqual(body.get("supported"), True)
 
+    def test_windows_volume_prefers_endpoint_backend_when_available(self):
+        """Validate scenario: Windows volume helpers should prefer CoreAudio endpoint backend over waveOut fallback."""
+        with patch.object(api_system, "_IS_WINDOWS", True), patch.object(
+            api_system,
+            "_windows_endpoint_volume_state",
+            return_value={"supported": True, "volume_percent": 44, "muted": False, "backend": "pycaw"},
+        ) as mendpoint_state, patch.object(
+            api_system,
+            "_windows_waveout_volume_state",
+            return_value={"supported": True, "volume_percent": 15, "muted": False, "backend": "winmm"},
+        ) as mwave_state, patch.object(
+            api_system, "_windows_endpoint_set_volume", return_value=True
+        ) as mendpoint_set, patch.object(
+            api_system, "_windows_waveout_set_volume", return_value=False
+        ) as mwave_set, patch.object(
+            api_system, "_windows_endpoint_toggle_mute", return_value=True
+        ) as mendpoint_mute, patch.object(
+            api_system, "_windows_waveout_toggle_mute", return_value=False
+        ) as mwave_mute:
+            state = api_system.get_volume_state_payload()
+            set_ok = api_system._set_volume_percent(55)
+            mute_ok = api_system._toggle_system_mute()
+
+        self.assertEqual(state.get("backend"), "pycaw")
+        self.assertEqual(state.get("volume_percent"), 44)
+        self.assertTrue(set_ok)
+        self.assertTrue(mute_ok)
+        mendpoint_state.assert_called_once()
+        mwave_state.assert_not_called()
+        mendpoint_set.assert_called_once_with(55)
+        mwave_set.assert_not_called()
+        mendpoint_mute.assert_called_once()
+        mwave_mute.assert_not_called()
+
     def test_volume_set_updates_volume_when_backend_available(self):
         """Validate scenario: volume set endpoint should call backend setter and return fresh state."""
         token = "tok-vol-set"

@@ -141,10 +141,17 @@ _ALLOW_GNOME_SCREENSHOT = _env_bool("CYBERDECK_ALLOW_GNOME_SCREENSHOT", False)
 _DEFAULT_MJPEG_W = max(640, _env_int("CYBERDECK_MJPEG_DEFAULT_W", 1280))
 _DEFAULT_MJPEG_Q = max(20, min(95, _env_int("CYBERDECK_MJPEG_DEFAULT_Q", 55)))
 _DEFAULT_MJPEG_LOW_LATENCY = 1 if _env_bool("CYBERDECK_MJPEG_LOWLAT_DEFAULT", True) else 0
+_STREAM_PROFILE_DEFAULT = str(os.environ.get("CYBERDECK_STREAM_PROFILE", "balanced") or "balanced").strip().lower()
+if _STREAM_PROFILE_DEFAULT not in {"balanced", "quality", "low_latency"}:
+    _STREAM_PROFILE_DEFAULT = "balanced"
 _DEFAULT_OFFER_MAX_W = max(640, _env_int("CYBERDECK_STREAM_OFFER_MAX_W", 1920))
+_DEFAULT_OFFER_FPS = max(5, _env_int("CYBERDECK_STREAM_OFFER_FPS", 30))
 _DEFAULT_OFFER_Q = max(20, min(95, _env_int("CYBERDECK_STREAM_OFFER_Q", 55)))
 _DEFAULT_H264_BITRATE_K = max(500, _env_int("CYBERDECK_H264_BITRATE_K", 6000))
 _DEFAULT_H265_BITRATE_K = max(500, _env_int("CYBERDECK_H265_BITRATE_K", 4200))
+_DEFAULT_OFFER_GOP = max(10, _env_int("CYBERDECK_STREAM_OFFER_GOP", 60))
+_DEFAULT_OFFER_PRESET = str(os.environ.get("CYBERDECK_STREAM_OFFER_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
+_DEFAULT_OFFER_AUDIO = 1 if _env_bool("CYBERDECK_OFFER_AUDIO_DEFAULT", True) else 0
 _LOW_LATENCY_MAX_W = max(640, _env_int("CYBERDECK_LOWLAT_MAX_W", 1280))
 _LOW_LATENCY_MAX_Q = max(20, min(95, _env_int("CYBERDECK_LOWLAT_MAX_Q", 50)))
 _LOW_LATENCY_MAX_FPS = max(10, _env_int("CYBERDECK_LOWLAT_MAX_FPS", 30 if _ENV_WAYLAND else 60))
@@ -153,7 +160,7 @@ _MIN_MJPEG_Q_LOWLAT = max(10, min(95, _env_int("CYBERDECK_MJPEG_MIN_Q_LOWLAT", 3
 _SCREENSHOT_MAX_W = max(480, _env_int("CYBERDECK_SCREENSHOT_MAX_W", 1280))
 _SCREENSHOT_MAX_Q = max(20, min(95, _env_int("CYBERDECK_SCREENSHOT_MAX_Q", 50)))
 _SCREENSHOT_MAX_FPS = max(2, _env_int("CYBERDECK_SCREENSHOT_MAX_FPS", 10 if _ENV_WAYLAND else 15))
-_JPEG_SUBSAMPLING = _env_int("CYBERDECK_JPEG_SUBSAMPLING", 1 if _ENV_WAYLAND else 1)
+_JPEG_SUBSAMPLING = _env_int("CYBERDECK_JPEG_SUBSAMPLING", 1 if _ENV_WAYLAND else 0)
 if _JPEG_SUBSAMPLING not in (0, 1, 2):
     _JPEG_SUBSAMPLING = 1 if _ENV_WAYLAND else 0
 _FAST_RESIZE = _env_bool("CYBERDECK_FAST_RESIZE", _ENV_WAYLAND)
@@ -164,7 +171,12 @@ _STREAM_STALE_FRAME_KEEPALIVE_S = max(0.2, _env_float("CYBERDECK_STREAM_STALE_KE
 _STREAM_STDOUT_QUEUE_SIZE = max(1, _env_int("CYBERDECK_STREAM_STDOUT_QUEUE_SIZE", 1))
 _STREAM_STDOUT_READ_CHUNK = max(4096, _env_int("CYBERDECK_STREAM_STDOUT_READ_CHUNK", 32768))
 _STREAM_RECONNECT_HINT_MS = max(250, _env_int("CYBERDECK_STREAM_RECONNECT_HINT_MS", 700))
-_DEFAULT_OFFER_LOW_LATENCY = 1 if _env_bool("CYBERDECK_OFFER_LOW_LATENCY_DEFAULT", True) else 0
+_DEFAULT_OFFER_LOW_LATENCY = 1 if _env_bool(
+    "CYBERDECK_OFFER_LOW_LATENCY_DEFAULT",
+    _STREAM_PROFILE_DEFAULT == "low_latency",
+) else 0
+_HIGH_FPS_FAST_RESAMPLE_THRESHOLD = max(30, _env_int("CYBERDECK_HIGH_FPS_FAST_RESAMPLE_THRESHOLD", 60))
+_HIGH_FPS_SUBSAMPLING_THRESHOLD = max(30, _env_int("CYBERDECK_HIGH_FPS_SUBSAMPLING_THRESHOLD", 60))
 _ADAPTIVE_WIDTH_LADDER = parse_width_ladder(
     os.environ.get("CYBERDECK_ADAPT_WIDTH_LADDER", ""),
     [1920, 1600, 1440, 1366, 1280, 1152, 1024, 960, 854, 768, 640],
@@ -188,6 +200,28 @@ _WIDTH_STABILIZER = WidthStabilizer(
     min_floor=_STREAM_MIN_W_FLOOR,
     enabled=(not _env_bool("CYBERDECK_DISABLE_WIDTH_STABILIZER", False)),
 )
+
+
+def _normalize_stream_profile(value: Any) -> str:
+    """Normalize stream profile aliases into canonical profile identifiers."""
+    raw = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "": "balanced",
+        "auto": "balanced",
+        "default": "balanced",
+        "balanced": "balanced",
+        "normal": "balanced",
+        "quality": "quality",
+        "hq": "quality",
+        "high": "quality",
+        "high_quality": "quality",
+        "low_latency": "low_latency",
+        "lowlat": "low_latency",
+        "low": "low_latency",
+        "ll": "low_latency",
+    }
+    return aliases.get(raw, "balanced")
+
 
 def _stream_log_enabled() -> bool:
     """Return whether stream-level verbose logs should be emitted."""
