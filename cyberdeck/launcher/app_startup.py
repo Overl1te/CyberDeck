@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
 import tkinter as tk
@@ -33,6 +33,17 @@ class AppStartupMixin:
         self._enforce_admin_rights()
 
         super().__init__()
+
+        # Make window fully transparent to prevent an empty-frame flash
+        # while the boot overlay and UI are being constructed.  Opacity is
+        # restored in _prime_boot_overlay_render() once everything is painted.
+        # Using alpha instead of withdraw/deiconify because CTk on Windows
+        # can fail to restore a withdrawn window reliably.
+        try:
+            self.attributes('-alpha', 0)
+            self._window_hidden_for_boot = True
+        except Exception:
+            self._window_hidden_for_boot = False
 
         packaged_runtime = is_packaged_runtime()
         if self.console_mode:
@@ -83,7 +94,6 @@ class AppStartupMixin:
         self.start_in_tray = bool(self.settings.get("start_in_tray", True))
         self.show_on_start = bool(self.settings.get("show_on_start", True))
         self._tray_reason_cached = tray_unavailable_reason()
-        self._window_hidden_for_boot = False
         self.tls_enabled = bool(self.settings.get("tls_enabled"))
         self.tls_cert_path = str(self.settings.get("tls_cert_path") or "").strip()
         self.tls_key_path = str(self.settings.get("tls_key_path") or "").strip()
@@ -93,36 +103,31 @@ class AppStartupMixin:
             key for key in tuple(self.settings.keys()) if str(key or "").startswith(legacy_remote_prefix)
         )
         had_legacy_remote_keys = any(key in self.settings for key in legacy_remote_keys)
-        self.settings["cloudflare_enabled"] = bool(
-            self.settings.get("cloudflare_enabled", DEFAULT_SETTINGS["cloudflare_enabled"])
-        )
-        if _env_bool(REMOTE_ACCESS_DISABLE_ENV, False):
-            self.settings["cloudflare_enabled"] = False
-        self.settings["cloudflare_auto_install"] = bool(
-            self.settings.get("cloudflare_auto_install", DEFAULT_SETTINGS["cloudflare_auto_install"])
-        )
+        old_remote_settings = {
+            "cloudflare_enabled": bool(self.settings.get("cloudflare_enabled", DEFAULT_SETTINGS["cloudflare_enabled"])),
+            "cloudflare_auto_install": bool(
+                self.settings.get("cloudflare_auto_install", DEFAULT_SETTINGS["cloudflare_auto_install"])
+            ),
+            "cloudflare_binary_path": str(self.settings.get("cloudflare_binary_path") or "").strip(),
+            "cloudflare_tunnel_token": str(self.settings.get("cloudflare_tunnel_token") or "").strip(),
+            "cloudflare_hostname": str(self.settings.get("cloudflare_hostname") or "").strip(),
+        }
+        self.settings["cloudflare_enabled"] = False
+        self.settings["cloudflare_auto_install"] = False
         self.settings["auto_update_check"] = bool(
             self.settings.get("auto_update_check", DEFAULT_SETTINGS["auto_update_check"])
         )
         self.settings["auto_update_install"] = bool(
             self.settings.get("auto_update_install", DEFAULT_SETTINGS["auto_update_install"])
         )
-        self.settings["cloudflare_binary_path"] = str(self.settings.get("cloudflare_binary_path") or "").strip()
-        self.settings["cloudflare_tunnel_token"] = str(self.settings.get("cloudflare_tunnel_token") or "").strip()
-        self.settings["cloudflare_hostname"] = str(self.settings.get("cloudflare_hostname") or "").strip()
-        if not self.settings["cloudflare_binary_path"]:
-            self.settings["cloudflare_binary_path"] = str(os.environ.get("CYBERDECK_CLOUDFLARED_BINARY") or "").strip()
-        if not self.settings["cloudflare_tunnel_token"]:
-            self.settings["cloudflare_tunnel_token"] = str(
-                os.environ.get("CYBERDECK_CLOUDFLARE_TUNNEL_TOKEN") or ""
-            ).strip()
-        if not self.settings["cloudflare_hostname"]:
-            self.settings["cloudflare_hostname"] = str(os.environ.get("CYBERDECK_CLOUDFLARE_HOSTNAME") or "").strip()
-        if self.settings["cloudflare_hostname"] and ("://" not in self.settings["cloudflare_hostname"]):
-            self.settings["cloudflare_hostname"] = f"https://{self.settings['cloudflare_hostname']}"
+        self.settings["cloudflare_binary_path"] = ""
+        self.settings["cloudflare_tunnel_token"] = ""
+        self.settings["cloudflare_hostname"] = ""
+        remote_settings_changed = any(self.settings.get(key) != value for key, value in old_remote_settings.items())
         if had_legacy_remote_keys:
             for key in legacy_remote_keys:
                 self.settings.pop(key, None)
+        if had_legacy_remote_keys or remote_settings_changed:
             try:
                 save_json(self.settings_path, self.settings)
             except Exception:
@@ -130,15 +135,30 @@ class AppStartupMixin:
 
         self.icon_path_png = os.path.join(self.resource_dir, "icon.png")
         self.icon_path_qr_png = os.path.join(self.resource_dir, "icon-qr-code.png")
-        self.icon_path_ico = os.path.join(self.resource_dir, "icon.ico")
         if not os.path.exists(self.icon_path_png):
             self.icon_path_png = os.path.join(self.base_dir, "icon.png")
         if not os.path.exists(self.icon_path_qr_png):
             self.icon_path_qr_png = os.path.join(self.base_dir, "icon-qr-code.png")
-        if not os.path.exists(self.icon_path_ico):
-            self.icon_path_ico = os.path.join(self.base_dir, "icon.ico")
+        self.icon_asset_paths = []
+        for icon_name in (
+            "cyberdeck_controls_256x256.ico",
+            "cyberdeck_controls_128x128.ico",
+            "cyberdeck_controls_64x64.ico",
+            "cyberdeck_controls_48x48.ico",
+            "cyberdeck_controls_32x32.ico",
+            "cyberdeck_controls_24x24.ico",
+            "cyberdeck_controls_16x16.ico",
+        ):
+            for icon_dir in (self.resource_dir, self.base_dir):
+                candidate = os.path.join(icon_dir, icon_name)
+                if os.path.exists(candidate) and candidate not in self.icon_asset_paths:
+                    self.icon_asset_paths.append(candidate)
+                    break
+        if (not self.icon_asset_paths) and os.path.exists(self.icon_path_png):
+            self.icon_asset_paths.append(self.icon_path_png)
         self.log_file = str(getattr(server_config, "LOG_FILE", os.path.join(self.base_dir, "cyberdeck.log")))
         self._window_icon_photo = None
+        self._window_icon_photos = []
 
         self.title("CyberDeck")
         self.geometry("1100x720")
@@ -148,27 +168,22 @@ class AppStartupMixin:
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         try:
-            if os.path.exists(self.icon_path_ico):
-                self.iconbitmap(self.icon_path_ico)
-        except Exception:
-            pass
-        try:
-            if os.path.exists(self.icon_path_png):
-                self._window_icon_photo = tk.PhotoImage(file=self.icon_path_png)
-                self.iconphoto(True, self._window_icon_photo)
+            for icon_path in self.icon_asset_paths:
+                if str(icon_path).lower().endswith(".ico"):
+                    with Image.open(icon_path) as img:
+                        self._window_icon_photos.append(ImageTk.PhotoImage(img.convert("RGBA")))
+                else:
+                    self._window_icon_photos.append(tk.PhotoImage(file=icon_path))
+            if self._window_icon_photos:
+                self._window_icon_photo = self._window_icon_photos[0]
+                self.iconphoto(True, *self._window_icon_photos)
         except Exception:
             self._window_icon_photo = None
+            self._window_icon_photos = []
 
         self._capture_exclusion_job = None
         self._schedule_capture_exclusion_refresh(120)
         self._apply_topmost()
-        if sys.platform.startswith("linux"):
-            # Hide window until the boot overlay is ready to avoid UI flash on Linux compositors.
-            try:
-                self.withdraw()
-                self._window_hidden_for_boot = True
-            except Exception:
-                self._window_hidden_for_boot = False
 
         self.server_process = None
         self.server_thread = None
@@ -205,6 +220,7 @@ class AppStartupMixin:
         self.cloudflare_status = "disabled"
         self.cloudflare_public_url = ""
         self.cloudflare_last_error = ""
+        self.cloudflare_last_error_sticky = ""
         self.cloudflare_binary_resolved = ""
         self.cloudflare_target_url = ""
         self._console_last_server_online = None
@@ -641,6 +657,7 @@ class AppStartupMixin:
         if bool(getattr(self, "_window_hidden_for_boot", False)):
             try:
                 self.deiconify()
+                self.attributes('-alpha', 1)
             except Exception:
                 pass
             self._window_hidden_for_boot = False
@@ -764,9 +781,9 @@ class AppStartupMixin:
         env["CYBERDECK_HIDE_LAUNCHER_FROM_CAPTURE"] = (
             "1" if self._capture_exclusion_enabled() else "0"
         )
-        remote_access_enabled = bool(self.settings.get("cloudflare_enabled", False))
-        env["CYBERDECK_REMOTE_ACCESS_ENABLED"] = "1" if remote_access_enabled else "0"
-        env["CYBERDECK_PUBLIC_ORIGIN_HINT"] = str(self.settings.get("cloudflare_hostname") or "").strip()
+        remote_access_enabled = False
+        env["CYBERDECK_REMOTE_ACCESS_ENABLED"] = "0"
+        env["CYBERDECK_PUBLIC_ORIGIN_HINT"] = ""
         self.append_log(
             (
                 "[launcher] boot config: "

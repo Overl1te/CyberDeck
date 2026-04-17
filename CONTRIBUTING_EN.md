@@ -1,4 +1,4 @@
-﻿# Contributing to CyberDeck
+# Contributing to CyberDeck
 
 <p align="left">
   <a href="CONTRIBUTING.md">Russian version</a> •
@@ -145,28 +145,22 @@ Focused run:
 pytest -q tests/test_launcher_shared_behavior.py
 ```
 
-Docker run:
+## Build (Windows)
 
-```bash
-docker compose -f docker-compose.tests.yml build
-docker compose -f docker-compose.tests.yml run --rm tests
-```
+See the full build guide in [Building for Windows](README_EN.md#building-for-windows) section of the README.
 
-Note: Docker tests intentionally use `requirements-dev.txt` (without `requirements-desktop-input.txt`).
-
-## Build
-
-Windows (Nuitka):
+Nuitka standalone:
 
 ```powershell
 pip install -r requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_nuitka.ps1
 ```
 
-Linux (Arch helper script):
+Nuitka portable (onefile):
 
-```bash
-bash ./scripts/build_arch_linux.sh
+```powershell
+pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_portable_nuitka.ps1
 ```
 
 ## Code standards

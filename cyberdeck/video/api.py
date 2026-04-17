@@ -554,10 +554,14 @@ def stream_offer(
         eff_gop = min(eff_gop, max(10, eff_fps))
         eff_preset = "ultrafast"
 
-    audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
-    audio_relay_ok = bool(audio_caps.get("real_audio_available"))
-    audio_mux_ok = bool(audio_caps.get("muxed_audio_available"))
-    silent_audio_ok = bool(audio_caps.get("silent_fallback_enabled"))
+    audio_relay_ok = False
+    audio_mux_ok = False
+    silent_audio_ok = False
+    if eff_audio_requested:
+        audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+        audio_relay_ok = bool(audio_caps.get("real_audio_available"))
+        audio_mux_ok = bool(audio_caps.get("muxed_audio_available"))
+        silent_audio_ok = bool(audio_caps.get("silent_fallback_enabled"))
     audio_stream_ok = bool(audio_relay_ok or silent_audio_ok)
     eff_audio_muxed = bool(eff_audio_requested and audio_mux_ok)
     eff_audio_separate = bool(eff_audio_requested and (not eff_audio_muxed) and audio_stream_ok)
@@ -581,11 +585,9 @@ def stream_offer(
     mjpeg_ok = any(mjpeg_status.values())
     base = _public_base_url(request)
     prefer_compatibility_relay = _base_prefers_compatibility_transport(base)
-    prefer_mjpeg_offer = False
+    prefer_mjpeg_offer = _env_bool("CYBERDECK_PREFER_MJPEG_OFFER", True)
     if prefer_compatibility_relay:
-        prefer_mjpeg_offer = _env_bool("CYBERDECK_PREFER_COMPATIBILITY_RELAY_OFFER", True)
-    elif os.name != "nt" and _is_wayland_session():
-        prefer_mjpeg_offer = _env_bool("CYBERDECK_PREFER_MJPEG_OFFER", True)
+        prefer_mjpeg_offer = _env_bool("CYBERDECK_PREFER_COMPATIBILITY_RELAY_OFFER", prefer_mjpeg_offer)
 
     def _url(path: str, params: Dict[str, Any]) -> str:
         """Build absolute URL with filtered query parameters for stream candidate payloads."""
@@ -877,8 +879,10 @@ def video_h264(
         eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h264"))
         eff_gop = min(eff_gop, max(10, eff_fps))
         eff_preset = "ultrafast"
-    audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
-    eff_audio = bool(eff_audio_requested and bool(audio_caps.get("muxed_audio_available")))
+    eff_audio = False
+    if eff_audio_requested:
+        audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+        eff_audio = bool(audio_caps.get("muxed_audio_available"))
     if eff_audio_requested and (not eff_audio) and _stream_log_enabled():
         log.warning("video_h264 requested muxed audio but muxed audio backend is unavailable")
     if request.method == "HEAD":
@@ -952,8 +956,10 @@ def video_h265(
         eff_bitrate = min(eff_bitrate, _lowlat_bitrate_cap_k(eff_w, eff_fps, "h265"))
         eff_gop = min(eff_gop, max(10, eff_fps))
         eff_preset = "ultrafast"
-    audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
-    eff_audio = bool(eff_audio_requested and bool(audio_caps.get("muxed_audio_available")))
+    eff_audio = False
+    if eff_audio_requested:
+        audio_caps = _facade_call("_ffmpeg_audio_relay_capabilities", _ffmpeg_audio_relay_capabilities) or {}
+        eff_audio = bool(audio_caps.get("muxed_audio_available"))
     if eff_audio_requested and (not eff_audio) and _stream_log_enabled():
         log.warning("video_h265 requested muxed audio but muxed audio backend is unavailable")
     if request.method == "HEAD":

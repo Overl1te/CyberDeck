@@ -1,4 +1,5 @@
-"""Пакет серверной части CyberDeck.
+"""CyberDeck server package.
 
-`main.py` остаётся точкой входа для обратной совместимости (лаунчер / PyInstaller).
+``main.py`` remains the entry point for backward compatibility
+(launcher / PyInstaller / Nuitka).
 """

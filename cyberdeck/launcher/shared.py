@@ -233,16 +233,23 @@ def ensure_console() -> None:
     except Exception:
         pass
     try:
+        kernel32 = ctypes.windll.kernel32
         has_console = False
         try:
-            has_console = bool(ctypes.windll.kernel32.GetConsoleWindow())
+            has_console = bool(kernel32.GetConsoleWindow())
         except Exception:
             has_console = False
         if not has_console:
-            ctypes.windll.kernel32.AllocConsole()
+            attached = False
+            try:
+                attached = bool(kernel32.AttachConsole(-1))
+            except Exception:
+                attached = False
+            if not attached:
+                kernel32.AllocConsole()
         try:
-            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-            ctypes.windll.kernel32.SetConsoleCP(65001)
+            kernel32.SetConsoleOutputCP(65001)
+            kernel32.SetConsoleCP(65001)
         except Exception:
             pass
         if sys.stdout is None:

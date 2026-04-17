@@ -23,13 +23,13 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
     def test_default_tls_enabled_for_new_installs(self):
         """Validate scenario: launcher should default to TLS enabled."""
         self.assertTrue(bool(DEFAULT_SETTINGS.get("tls_enabled")))
-        self.assertTrue(bool(DEFAULT_SETTINGS.get("cloudflare_enabled")))
-        self.assertTrue(bool(DEFAULT_SETTINGS.get("cloudflare_auto_install")))
+        self.assertFalse(bool(DEFAULT_SETTINGS.get("cloudflare_enabled")))
+        self.assertFalse(bool(DEFAULT_SETTINGS.get("cloudflare_auto_install")))
         self.assertTrue(bool(DEFAULT_SETTINGS.get("auto_update_check")))
         self.assertTrue(bool(DEFAULT_SETTINGS.get("auto_update_install")))
 
     def test_qr_payload_can_be_rewritten_for_public_cloudflare_origin(self):
-        """Validate scenario: launcher should publish public Cloudflare origin in QR payload for remote pairing."""
+        """Validate scenario: legacy helper can still rewrite payloads for explicit public-origin inputs."""
         payload = {
             "type": "cyberdeck_qr_v1",
             "ip": "192.168.0.10",
@@ -54,6 +54,33 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
         self.assertIn("demo.trycloudflare.com", rewritten_url)
         self.assertIn("ip=demo.trycloudflare.com", rewritten_url)
         self.assertIn("port=443", rewritten_url)
+
+    def test_prepare_qr_payload_for_render_keeps_local_origin_in_lan_only_mode(self):
+        """Validate scenario: QR render path should stay on the local address even if a public origin is passed."""
+        data = {
+            "payload": {
+                "type": "cyberdeck_qr_v1",
+                "ip": "192.168.0.10",
+                "port": 8080,
+                "scheme": "https",
+                "pairing_code": "1234",
+                "qr_token": "qr-1",
+            },
+            "url": (
+                "https://192.168.0.10:8080/?type=cyberdeck_qr_v1"
+                "&ip=192.168.0.10&port=8080&code=1234&qr_token=qr-1"
+            ),
+        }
+
+        payload, url = AppDevicesMixin._prepare_qr_payload_for_render(
+            data,
+            public_origin="https://demo.trycloudflare.com",
+        )
+
+        self.assertEqual(payload.get("ip"), "192.168.0.10")
+        self.assertEqual(int(payload.get("port")), 8080)
+        self.assertNotIn("lan_ip", payload)
+        self.assertTrue(url.startswith("https://192.168.0.10:8080/"))
 
     def test_normalize_app_config_removes_legacy_token_login_key(self):
         """Validate scenario: deprecated token URL login should be removed from launcher config."""
@@ -115,8 +142,8 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
         self.assertEqual(int(fake.app_config.get("stream_fast_resample_threshold")), 30)
         self.assertEqual(int(fake.app_config.get("stream_subsampling_threshold")), 120)
 
-    def test_apply_cloudflare_runtime_uses_auto_install_and_download_override(self):
-        """Validate scenario: launcher should pass auto-install options into Cloudflare runtime configuration."""
+    def test_apply_cloudflare_runtime_forces_disabled_state_in_lan_only_mode(self):
+        """Validate scenario: launcher should keep the Cloudflare supervisor disabled regardless of old settings."""
 
         class _Manager:
             def __init__(self) -> None:
@@ -127,9 +154,9 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
 
             def snapshot(self):
                 return types.SimpleNamespace(
-                    enabled=True,
+                    enabled=False,
                     running=False,
-                    status="starting",
+                    status="disabled",
                     public_url="",
                     last_error="",
                     binary_path="",
@@ -161,14 +188,18 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
             AppRuntimeMixin._apply_cloudflare_runtime(fake)
 
         self.assertEqual(len(manager.calls), 1)
-        self.assertTrue(bool(manager.calls[0].get("auto_install")))
-        self.assertEqual(manager.calls[0].get("download_url"), "https://example.com/cloudflared.exe")
+        self.assertFalse(bool(manager.calls[0].get("enabled")))
+        self.assertFalse(bool(manager.calls[0].get("auto_install")))
+        self.assertEqual(manager.calls[0].get("binary_path"), "")
+        self.assertEqual(manager.calls[0].get("tunnel_token"), "")
+        self.assertEqual(manager.calls[0].get("configured_hostname"), "")
+        self.assertEqual(manager.calls[0].get("download_url"), "")
         self.assertEqual(manager.calls[0].get("target_url"), "https://127.0.0.1:9443")
         self.assertEqual(len(applied), 1)
-        self.assertEqual(str(applied[0].status), "starting")
+        self.assertEqual(str(applied[0].status), "disabled")
 
-    def test_toggle_remote_access_action_persists_setting_and_requests_refresh(self):
-        """Validate scenario: Home button should toggle remote access without a server restart."""
+    def test_toggle_remote_access_action_keeps_lan_only_state(self):
+        """Validate scenario: remote access toggle should collapse into a persisted LAN-only state."""
 
         class _Switch:
             def __init__(self) -> None:
@@ -188,7 +219,13 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
             sync_calls = []
             status_lines = []
             fake = types.SimpleNamespace(
-                settings={"cloudflare_enabled": False},
+                settings={
+                    "cloudflare_enabled": True,
+                    "cloudflare_auto_install": True,
+                    "cloudflare_binary_path": "C:/tools/cloudflared.exe",
+                    "cloudflare_tunnel_token": "token",
+                    "cloudflare_hostname": "https://demo.trycloudflare.com",
+                },
                 settings_path=settings_path,
                 sw_cloudflare_enabled=sw,
                 _apply_cloudflare_runtime=lambda: applied.append("ok"),
@@ -198,13 +235,19 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
                 _inline_text=lambda ru_text, en_text: ru_text,
                 show_toast=lambda *args, **kwargs: None,
                 append_log=lambda *args, **kwargs: None,
-                tr=lambda key, **kwargs: key,
+                tr=lambda key, **kwargs: {
+                    "remote_access_lan_only": "Только локальная сеть",
+                }.get(key, key),
             )
 
             AppNavigationMixin.toggle_remote_access_action(fake)
 
-            self.assertTrue(bool(fake.settings.get("cloudflare_enabled")))
-            self.assertTrue(bool(sw.state))
+            self.assertFalse(bool(fake.settings.get("cloudflare_enabled")))
+            self.assertFalse(bool(fake.settings.get("cloudflare_auto_install")))
+            self.assertEqual(fake.settings.get("cloudflare_binary_path"), "")
+            self.assertEqual(fake.settings.get("cloudflare_tunnel_token"), "")
+            self.assertEqual(fake.settings.get("cloudflare_hostname"), "")
+            self.assertFalse(bool(sw.state))
             self.assertEqual(applied, ["ok"])
             self.assertEqual(qr_calls, [True])
             self.assertEqual(sync_calls, [0])
@@ -250,22 +293,19 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
         self.assertEqual(clipboard, ["https://demo.trycloudflare.com"])
         self.assertEqual(toasts, [("Публичный адрес скопирован", "success")])
 
-
     def test_help_runtime_summary_includes_access_points_and_diag(self):
         """Validate scenario: help window should show a concise runtime snapshot with addresses and diagnostics."""
         fake = types.SimpleNamespace(
             _local_access_origin=lambda: "https://192.168.0.201:8080",
-            _public_access_origin=lambda: "https://demo.trycloudflare.com",
             _format_uptime_short=lambda _seconds: "12m",
             _inline_text=lambda ru_text, en_text: ru_text,
             tr=lambda key, **kwargs: {
                 "server_online_state": "Сервер: онлайн",
                 "server_offline_state": "Сервер: нет связи",
                 "server_version_line": f"Сервер: {kwargs.get('server')} | Лаунчер: {kwargs.get('launcher')}",
+                "remote_access_lan_only": "Только локальная сеть",
             }.get(key, key),
             server_online=True,
-            cloudflare_status="online",
-            cloudflare_last_error="",
             server_diag={"uptime_s": 720, "cpu": 18.0, "ram": 41.0},
             server_version="v1.3.2",
             log_file="C:/tmp/cyberdeck.log",
@@ -274,7 +314,7 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
         summary = AppNavigationMixin._help_runtime_summary(fake)
 
         self.assertIn("Локальный доступ: https://192.168.0.201:8080", summary)
-        self.assertIn("Публичный доступ: https://demo.trycloudflare.com", summary)
+        self.assertIn("Публичный доступ: Только локальная сеть", summary)
         self.assertIn("Диагностика: uptime 12m | CPU 18% | RAM 41%", summary)
         self.assertIn("Сервер: v1.3.2 | Лаунчер:", summary)
 
@@ -285,9 +325,9 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
                 "language": "ru",
                 "tls_enabled": True,
                 "preferred_port": 8080,
-                "cloudflare_enabled": True,
-                "cloudflare_auto_install": True,
-                "cloudflare_hostname": "https://demo.trycloudflare.com",
+                "cloudflare_enabled": False,
+                "cloudflare_auto_install": False,
+                "cloudflare_hostname": "",
                 "qr_mode": "app",
                 "devices_panel_visible": True,
             },
@@ -299,25 +339,26 @@ class LauncherSettingsBehaviorTests(unittest.TestCase):
             server_version="v1.3.2",
             status_text="online",
             log_file="C:/tmp/cyberdeck.log",
-            cloudflare_status="online",
-            cloudflare_public_url="https://demo.trycloudflare.com",
+            cloudflare_status="disabled",
+            cloudflare_public_url="",
             cloudflare_last_error="",
-            cloudflare_target_url="https://127.0.0.1:8080",
-            cloudflare_binary_resolved="C:/tools/cloudflared.exe",
+            cloudflare_target_url="",
+            cloudflare_binary_resolved="",
             server_diag={
                 "pairing": {"qr_token": "secret-qr"},
                 "devices": [{"token": "device-secret", "name": "Phone"}],
             },
             _server_log_ring=["line 1\n", "line 2\n"],
             _local_access_origin=lambda: "https://192.168.0.201:8080",
-            _public_access_origin=lambda: "https://demo.trycloudflare.com",
         )
         fake._scrub_sensitive_payload = lambda value: AppNavigationMixin._scrub_sensitive_payload(fake, value)
 
         payload = AppNavigationMixin._build_help_diag_payload(fake)
 
         self.assertEqual(payload["launcher"]["local_access"], "https://192.168.0.201:8080")
-        self.assertEqual(payload["launcher"]["public_access"], "https://demo.trycloudflare.com")
+        self.assertEqual(payload["launcher"]["public_access"], "")
+        self.assertEqual(payload["launcher"]["cloudflare"]["status"], "disabled")
+        self.assertEqual(payload["launcher"]["settings"]["cloudflare_hostname"], "")
         self.assertEqual(payload["server_diag"]["pairing"]["qr_token"], "<redacted>")
         self.assertEqual(payload["server_diag"]["devices"][0]["token"], "<redacted>")
         self.assertIn("line 1", payload["recent_logs_tail"])

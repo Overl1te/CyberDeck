@@ -109,8 +109,8 @@ class AppRuntimeMixin:
         return f"{scheme}://{host}:{port}"
 
     def _public_access_origin(self) -> str:
-        """Return current public origin when Cloudflare Tunnel is online."""
-        return str(getattr(self, "cloudflare_public_url", "") or "").strip().rstrip("/")
+        """Return public origin shown in launcher UI."""
+        return ""
 
     def _set_readonly_textbox_value(self, widget: Any, text: str, *, text_color: str | None = None) -> None:
         """Update a CTkTextbox used as a read-only access field."""
@@ -153,35 +153,38 @@ class AppRuntimeMixin:
         """Build compact header metadata line for page headers."""
         parts: list[str] = []
         parts.append("TLS" if bool(getattr(self, "tls_enabled", False)) else "HTTP")
-        if str(getattr(self, "cloudflare_status", "") or "") == "online":
-            parts.append("Public Relay")
-        else:
-            parts.append("LAN")
+        parts.append("LAN")
         parts.append(self.tr("updated_at", time=time.strftime("%H:%M:%S")) if bool(getattr(self, "server_online", False)) else self.tr("updated_offline"))
         return " | ".join(parts)
 
     def _apply_cloudflare_snapshot(self, snap: Any) -> None:
         """Copy Cloudflare Tunnel runtime snapshot into launcher state."""
         public_url = str(getattr(snap, "public_url", "") or "").rstrip("/")
-        self.cloudflare_status = str(getattr(snap, "status", "disabled") or "disabled")
+        status = str(getattr(snap, "status", "disabled") or "disabled")
+        last_error = str(getattr(snap, "last_error", "") or "")
+        self.cloudflare_status = status
         self.cloudflare_public_url = public_url
-        self.cloudflare_last_error = str(getattr(snap, "last_error", "") or "")
+        self.cloudflare_last_error = last_error
+        if last_error:
+            self.cloudflare_last_error_sticky = last_error
+        elif status in {"online", "disabled"}:
+            self.cloudflare_last_error_sticky = ""
         self.cloudflare_binary_resolved = str(getattr(snap, "binary_path", "") or "")
         self.cloudflare_target_url = str(getattr(snap, "target_url", "") or "")
 
     def _apply_cloudflare_runtime(self) -> Any:
-        """Start, stop, or reconfigure Cloudflare Tunnel according to launcher settings."""
+        """Keep Cloudflare runtime disabled while launcher operates in LAN-only mode."""
         manager = getattr(self, "cloudflare_manager", None)
         if manager is None:
             return
         manager.configure(
-            enabled=bool(self.settings.get("cloudflare_enabled", False)),
-            binary_path=str(self.settings.get("cloudflare_binary_path") or "").strip(),
-            tunnel_token=str(self.settings.get("cloudflare_tunnel_token") or "").strip(),
-            configured_hostname=str(self.settings.get("cloudflare_hostname") or "").strip(),
+            enabled=False,
+            binary_path="",
+            tunnel_token="",
+            configured_hostname="",
             target_url=self._cloudflare_target_origin(),
-            auto_install=bool(self.settings.get("cloudflare_auto_install", True)),
-            download_url=str(os.environ.get("CYBERDECK_CLOUDFLARE_DOWNLOAD_URL") or "").strip(),
+            auto_install=False,
+            download_url="",
         )
         self._apply_cloudflare_snapshot(manager.snapshot())
 
@@ -350,6 +353,20 @@ class AppRuntimeMixin:
         if not text:
             return ""
         norm = text.lower()
+        if (
+            "nameresolutionerror" in norm
+            or "getaddrinfo failed" in norm
+            or "could not resolve host" in norm
+            or "remote name could not be resolved" in norm
+        ):
+            return self.tr("remote_access_cloudflare_dns")
+        if (
+            "did not become reachable" in norm
+            or "became unreachable" in norm
+            or "origin has been unregistered" in norm
+            or "cloudflare tunnel error" in norm
+        ):
+            return self.tr("remote_access_cloudflare_unreachable")
         if "trycloudflare" in norm:
             return self.tr("remote_access_cloudflare_quick")
         if ("token" in norm and "configured" in norm) or ("run --token" in norm):
@@ -1681,10 +1698,10 @@ class AppRuntimeMixin:
         if hasattr(self, "lbl_server_ram"):
             self.lbl_server_ram.configure(text=ram_text)
         if hasattr(self, "lbl_server_mode"):
-            mode = "PUBLIC" if str(getattr(self, "cloudflare_status", "") or "") == "online" else "LAN"
+            mode = "LAN"
             if not bool(getattr(self, "server_online", False)):
                 mode = "OFFLINE"
-            self.lbl_server_mode.configure(text=mode, text_color=(COLOR_ACCENT if mode in {"PUBLIC", "LAN"} and self.server_online else COLOR_FAIL))
+            self.lbl_server_mode.configure(text=mode, text_color=(COLOR_ACCENT if mode == "LAN" and self.server_online else COLOR_FAIL))
         if hasattr(self, "lbl_server_port"):
             self.lbl_server_port.configure(text=str(getattr(self, "server_port", getattr(self, "port", DEFAULT_PORT))))
 
@@ -1695,28 +1712,14 @@ class AppRuntimeMixin:
         if hasattr(self, "btn_copy_local_access"):
             self.btn_copy_local_access.configure(state=("normal" if local_origin else "disabled"))
 
-        status = str(getattr(self, "cloudflare_status", "disabled") or "disabled")
-        public_origin = self._public_access_origin()
-        if status == "online" and public_origin:
-            public_text = public_origin
-            public_color = COLOR_ACCENT
-        elif status == "installing":
-            public_text = self.tr("remote_access_installing")
-            public_color = COLOR_WARN
-        elif bool(self.settings.get("cloudflare_enabled", False)):
-            detail = self._friendly_remote_access_detail(
-                str(getattr(self, "cloudflare_last_error", "") or "").strip()
-            )
-            public_text = self.tr("remote_access_error", detail=detail) if detail else self.tr("remote_access_starting")
-            public_color = COLOR_FAIL if status in {"error", "missing_binary"} else COLOR_WARN
-        else:
-            public_text = self.tr("remote_access_disabled")
-            public_color = COLOR_TEXT_DIM
+        public_origin = ""
+        public_text = self.tr("remote_access_lan_only")
+        public_color = COLOR_TEXT_DIM
 
         if hasattr(self, "txt_public_access"):
             self._set_readonly_textbox_value(self.txt_public_access, public_text, text_color=public_color)
         if hasattr(self, "btn_copy_public_access"):
-            self.btn_copy_public_access.configure(state=("normal" if public_origin else "disabled"))
+            self.btn_copy_public_access.configure(state="disabled")
         if hasattr(self, "lbl_version"):
             self.lbl_version.configure(text=self.tr("server_version_line", server=self.server_version, launcher=LAUNCHER_VERSION))
         if hasattr(self, "lbl_updates"):
@@ -1730,10 +1733,11 @@ class AppRuntimeMixin:
                 color = COLOR_WARN if bool(getattr(self, "_update_status_has_updates", False)) else COLOR_TEXT_DIM
             self.lbl_updates.configure(text=text, text_color=color)
 
-        if self.server_online:
-            self.lbl_header_status.configure(text=self.tr("server_online_state"), text_color=COLOR_ACCENT)
-        else:
-            self.lbl_header_status.configure(text=self.tr("server_offline_state"), text_color=COLOR_FAIL)
+        if hasattr(self, "lbl_header_status"):
+            if self.server_online:
+                self.lbl_header_status.configure(text=self.tr("server_online_state"), text_color=COLOR_ACCENT)
+            else:
+                self.lbl_header_status.configure(text=self.tr("server_offline_state"), text_color=COLOR_FAIL)
 
         total = len(self.devices_data)
         online_count = sum(1 for d in self.devices_data if d.get("online"))

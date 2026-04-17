@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Compatibility entrypoint.
 
 Launcher/PyInstaller expect `main.app` to exist.

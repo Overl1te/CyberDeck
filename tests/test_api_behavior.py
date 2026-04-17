@@ -396,6 +396,42 @@ class ApiBehaviorTests(unittest.TestCase):
         parsed = parse_qs(urlparse(str(h264.get("url") or "")).query)
         self.assertNotIn("audio", parsed)
 
+    def test_stream_offer_skips_audio_probe_when_audio_is_disabled(self):
+        """Validate scenario: touchpad startup should not probe audio backends when client requests audio=0."""
+        token = self._token()
+        with patch.object(video, "_capture_input_available", return_value=True), patch.object(
+            video, "_ffmpeg_wayland_capture_reliable", return_value=True
+        ), patch.object(
+            video,
+            "_codec_encoder_available",
+            side_effect=lambda codec: str(codec).lower() in ("h264", "h265"),
+        ), patch.object(
+            video,
+            "_mjpeg_backend_status",
+            return_value={"native": True, "ffmpeg": False, "gstreamer": False, "screenshot": False},
+        ), patch.object(
+            video, "_mjpeg_backend_order", return_value=["native"]
+        ), patch.object(
+            video._WIDTH_STABILIZER, "decide", side_effect=lambda _token, requested: int(requested)
+        ), patch.object(
+            video,
+            "_ffmpeg_audio_relay_capabilities",
+            side_effect=AssertionError("audio capabilities probe must stay disabled"),
+        ):
+            r = self.client.get(
+                "/api/stream_offer",
+                params={"monitor": 1, "fps": 30, "max_w": 1600, "quality": 55, "audio": 0},
+                headers=self._auth_headers(token),
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        audio = body.get("audio") or {}
+        self.assertFalse(bool(audio.get("requested")))
+        self.assertFalse(bool(audio.get("muxed")))
+        self.assertFalse(bool(audio.get("separate")))
+        ids = [str(item.get("id") or "") for item in (body.get("candidates") or [])]
+        self.assertNotIn("audio_ts", ids)
+
     def test_video_h264_disables_muxed_audio_when_audio_backend_does_not_support_muxing(self):
         """Validate scenario: direct H.264 endpoint should not force muxed audio when backend cannot mux."""
         token = self._token()

@@ -21,6 +21,17 @@ _WINDOWS_AMD64_DOWNLOAD_URL = (
 )
 _TRYCLOUDFLARE_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.IGNORECASE)
 _HTTPS_URL_RE = re.compile(r"https://[a-z0-9][a-z0-9.-]*", re.IGNORECASE)
+_NAMED_TUNNEL_READY_RE = re.compile(
+    r"(registered tunnel connection|connection [^\n]* registered|connection registered)",
+    re.IGNORECASE,
+)
+_QUICK_TUNNEL_PROBE_INTERVAL_S = 5.0
+_QUICK_TUNNEL_BOOT_TIMEOUT_S = 30.0
+_QUICK_TUNNEL_UNHEALTHY_MARKERS = (
+    "cloudflare tunnel error",
+    "origin has been unregistered from argo tunnel",
+    "unable to resolve it",
+)
 
 
 @dataclass
@@ -73,6 +84,13 @@ class CloudflareManager:
         self._next_restart_ts = 0.0
         self._restart_backoff_s = 0.0
         self._process_started_ts = 0.0
+        self._named_tunnel_ready = False
+        self._candidate_public_url = ""
+        self._candidate_public_url_ts = 0.0
+        self._last_public_url_probe_url = ""
+        self._last_public_url_probe_ts = 0.0
+        self._last_public_url_probe_ok = False
+        self._public_url_confirmed = False
 
     def configure(
         self,
@@ -106,6 +124,8 @@ class CloudflareManager:
             self._auto_install = bool(auto_install)
             self._download_url_override = next_sig[6]
             if changed:
+                self._named_tunnel_ready = False
+                self._reset_public_url_tracking()
                 self.stop()
                 if self._enabled:
                     self._set_snapshot(
@@ -244,6 +264,8 @@ class CloudflareManager:
             self._last_lines.clear()
             self._process = proc
             self._process_started_ts = time.time()
+            self._named_tunnel_ready = False
+            self._reset_public_url_tracking()
             self._start_stdout_reader(proc)
             self._set_snapshot(
                 status="starting",
@@ -292,6 +314,8 @@ class CloudflareManager:
             proc = self._process
             self._process = None
             self._process_started_ts = 0.0
+            self._named_tunnel_ready = False
+            self._reset_public_url_tracking()
             if proc is None:
                 return
             try:
@@ -318,6 +342,8 @@ class CloudflareManager:
         if self._tunnel_token:
             cmd.extend(["run", "--token", self._tunnel_token])
             return cmd
+        if os.name == "nt":
+            cmd.extend(["--protocol", "http2", "--edge-ip-version", "4"])
         cmd.extend(["--url", target])
         if self._origin_requires_tls_skip_verify(target):
             cmd.append("--no-tls-verify")
@@ -357,28 +383,78 @@ class CloudflareManager:
         public_url = str(self._snapshot.public_url or "").strip()
         if public_url:
             return "online"
-        if self._tunnel_token and self._configured_hostname and self._process_started_ts > 0.0:
-            if (time.time() - self._process_started_ts) >= 1.0:
-                return "online"
+        if self._tunnel_token and self._named_tunnel_ready:
+            return "online"
         return "starting"
+
+    def _normalized_configured_hostname(self) -> str:
+        """Return configured Cloudflare hostname as normalized absolute URL."""
+        host = str(self._configured_hostname or "").strip()
+        if not host:
+            return ""
+        if "://" not in host:
+            host = f"https://{host}"
+        return host.rstrip("/")
+
+    def _ingest_log_line(self, line: str) -> None:
+        """Parse cloudflared stdout and update readiness/public URL snapshot."""
+        text = str(line or "").strip()
+        if not text:
+            return
+        self._last_lines.append(text)
+
+        match = _TRYCLOUDFLARE_RE.search(text)
+        if match:
+            self._remember_candidate_public_url(str(match.group(0)).rstrip("/"))
+            self._set_snapshot(last_error="")
+            return
+
+        if self._tunnel_token and _NAMED_TUNNEL_READY_RE.search(text):
+            self._named_tunnel_ready = True
+            public_url = self._normalized_configured_hostname()
+            if public_url:
+                self._set_snapshot(public_url=public_url, last_error="")
+            else:
+                self._set_snapshot(last_error="")
 
     def _refresh_public_url_from_logs(self) -> None:
         """Promote snapshot to online once a public URL is known."""
         public_url = self._discover_public_url()
-        if public_url:
+        if not public_url:
+            return
+        if self._tunnel_token:
             self._set_snapshot(public_url=public_url, last_error="")
+            return
+        probe = self._probe_quick_tunnel_public_url(public_url)
+        if probe is None:
+            return
+        ok, detail = probe
+        if ok:
+            self._public_url_confirmed = True
+            self._set_snapshot(public_url=public_url, last_error="")
+            return
+        self._set_snapshot(public_url="", last_error=str(detail or ""))
+        if not ok:
+            now = time.time()
+            if self._public_url_confirmed:
+                self._restart_unhealthy_quick_tunnel("quick tunnel public URL became unreachable")
+                return
+            if self._candidate_public_url_ts > 0.0 and (now - self._candidate_public_url_ts) >= _QUICK_TUNNEL_BOOT_TIMEOUT_S:
+                self._restart_unhealthy_quick_tunnel("quick tunnel public URL did not become reachable")
+                return
 
     def _discover_public_url(self) -> str:
         """Return best-known public URL for the current tunnel."""
         existing = str(self._snapshot.public_url or "").strip()
         if existing:
             return existing
-        if self._tunnel_token:
-            host = str(self._configured_hostname or "").strip()
+        candidate = str(self._candidate_public_url or "").strip()
+        if candidate:
+            return candidate
+        if self._tunnel_token and self._named_tunnel_ready:
+            host = self._normalized_configured_hostname()
             if host:
-                if "://" not in host:
-                    host = f"https://{host}"
-                return host.rstrip("/")
+                return host
         try:
             lines = list(self._last_lines)
         except Exception:
@@ -386,8 +462,114 @@ class CloudflareManager:
         for raw in reversed(lines):
             match = _TRYCLOUDFLARE_RE.search(str(raw or ""))
             if match:
-                return str(match.group(0)).rstrip("/")
+                public_url = str(match.group(0)).rstrip("/")
+                self._remember_candidate_public_url(public_url)
+                return public_url
         return ""
+
+    def _reset_public_url_tracking(self) -> None:
+        """Clear cached Quick Tunnel URL and its health probe state."""
+        self._candidate_public_url = ""
+        self._candidate_public_url_ts = 0.0
+        self._last_public_url_probe_url = ""
+        self._last_public_url_probe_ts = 0.0
+        self._last_public_url_probe_ok = False
+        self._public_url_confirmed = False
+
+    def _remember_candidate_public_url(self, public_url: str) -> None:
+        """Store the current Quick Tunnel URL until a live probe confirms it."""
+        text = str(public_url or "").strip().rstrip("/")
+        if not text:
+            return
+        if text != self._candidate_public_url:
+            self._candidate_public_url_ts = time.time()
+            self._last_public_url_probe_url = ""
+            self._last_public_url_probe_ts = 0.0
+            self._last_public_url_probe_ok = False
+            self._public_url_confirmed = False
+        self._candidate_public_url = text
+
+    def _probe_quick_tunnel_public_url(self, public_url: str) -> Optional[tuple[bool, str]]:
+        """Rate-limit public URL probes so the launcher can detect dead links without spamming requests."""
+        url = str(public_url or "").strip()
+        if not url:
+            return False, ""
+        now = time.time()
+        if (
+            url == self._last_public_url_probe_url
+            and self._last_public_url_probe_ts > 0.0
+            and (now - self._last_public_url_probe_ts) < _QUICK_TUNNEL_PROBE_INTERVAL_S
+        ):
+            return None
+        ok, detail = self._probe_public_url_live(url)
+        self._last_public_url_probe_url = url
+        self._last_public_url_probe_ts = now
+        self._last_public_url_probe_ok = ok
+        return ok, detail
+
+    @staticmethod
+    def _probe_public_url_live(public_url: str) -> tuple[bool, str]:
+        """Return True only when the published origin serves a real HTTP response instead of a tunnel error page."""
+        url = str(public_url or "").strip()
+        if not url:
+            return False, ""
+        try:
+            resp = requests.get(
+                url,
+                timeout=(2.5, 4.0),
+                allow_redirects=True,
+                headers={"User-Agent": "CyberDeck-Launcher/1"},
+            )
+        except requests.RequestException as exc:
+            return False, str(exc or "").strip()
+        code = int(getattr(resp, "status_code", 0) or 0)
+        if 200 <= code < 400:
+            return True, ""
+        if code == 530:
+            return False, str(getattr(resp, "text", "") or "").strip() or "The origin has been unregistered from Argo Tunnel"
+        text = str(getattr(resp, "text", "") or "").strip().lower()
+        if any(marker in text for marker in _QUICK_TUNNEL_UNHEALTHY_MARKERS):
+            return False, str(getattr(resp, "text", "") or "").strip()
+        return False, f"public URL probe failed with HTTP {code}"
+
+    def _restart_unhealthy_quick_tunnel(self, detail: str) -> None:
+        """Restart Quick Tunnel when Cloudflare publishes a dead or stale public URL."""
+        if self._tunnel_token:
+            return
+        proc = self._process
+        if proc is None:
+            return
+        self._process = None
+        self._process_started_ts = 0.0
+        self._named_tunnel_ready = False
+        self._reset_public_url_tracking()
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.5)
+                except Exception:
+                    proc.kill()
+        except Exception:
+            pass
+        if self._restart_backoff_s <= 0.0:
+            self._restart_backoff_s = 5.0
+        else:
+            self._restart_backoff_s = min(30.0, self._restart_backoff_s * 2.0)
+        self._next_restart_ts = time.time() + self._restart_backoff_s
+        self._set_snapshot(
+            status="error",
+            enabled=bool(self._enabled),
+            running=False,
+            public_url="",
+            last_error=f"{detail}; retrying",
+            configured_hostname=self._configured_hostname,
+            target_url=self._target_url,
+            mode=("named" if self._tunnel_token else "quick"),
+            pid=0,
+        )
+        self._log(f"[cloudflare] {detail}\n")
+        self._log(f"[cloudflare] retry in {int(max(1.0, self._restart_backoff_s))}s\n")
 
     def _resolve_binary(self, raw_path: str) -> str:
         """Return absolute executable path or empty string when unavailable."""
@@ -671,10 +853,7 @@ class CloudflareManager:
                     if not line:
                         continue
                     with self._lock:
-                        self._last_lines.append(line)
-                        match = _TRYCLOUDFLARE_RE.search(line)
-                        if match:
-                            self._set_snapshot(public_url=str(match.group(0)).rstrip("/"), last_error="")
+                        self._ingest_log_line(line)
             except Exception:
                 pass
 
@@ -736,6 +915,8 @@ class CloudflareManager:
         else:
             self._next_restart_ts = 0.0
             self._restart_backoff_s = 0.0
+        self._named_tunnel_ready = False
+        self._reset_public_url_tracking()
         self._set_snapshot(
             status="error",
             enabled=bool(self._enabled),

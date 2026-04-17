@@ -16,6 +16,31 @@ class _AliveThread:
         return True
 
 
+class _ProbeProc:
+    def __init__(self, pid: int = 1234):
+        self.pid = pid
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+class _Resp:
+    def __init__(self, status_code: int, text: str = ""):
+        self.status_code = status_code
+        self.text = text
+
+
 class CloudflareManagerBehaviorTests(unittest.TestCase):
     def test_resolve_binary_prefers_bundled_vendor_binary(self):
         """Validate scenario: bundled cloudflared from release assets should be preferred over runtime download."""
@@ -148,6 +173,10 @@ class CloudflareManagerBehaviorTests(unittest.TestCase):
         ) as popen, patch.object(manager, "_start_stdout_reader", return_value=None):
             snap = manager.ensure_running()
         cmd = popen.call_args.args[0]
+        self.assertIn("--protocol", cmd)
+        self.assertIn("http2", cmd)
+        self.assertIn("--edge-ip-version", cmd)
+        self.assertIn("4", cmd)
         self.assertIn("--url", cmd)
         self.assertIn("https://127.0.0.1:9443", cmd)
         self.assertIn("--no-tls-verify", cmd)
@@ -235,8 +264,8 @@ class CloudflareManagerBehaviorTests(unittest.TestCase):
         if os.name == "nt":
             self.assertEqual(env.get("USERPROFILE"), env.get("HOME"))
 
-    def test_discover_public_url_prefers_named_hostname(self):
-        """Validate scenario: Named Tunnel should expose configured hostname as public URL."""
+    def test_discover_public_url_requires_named_tunnel_ready_signal(self):
+        """Validate scenario: configured hostname should not be treated as online before tunnel registration."""
         manager = CloudflareManager()
         manager.configure(
             enabled=True,
@@ -245,7 +274,125 @@ class CloudflareManagerBehaviorTests(unittest.TestCase):
             configured_hostname="https://remote.example.com",
             target_url="http://127.0.0.1:8080",
         )
+        self.assertEqual(manager._discover_public_url(), "")
+        manager._named_tunnel_ready = True
         self.assertEqual(manager._discover_public_url(), "https://remote.example.com")
+
+    def test_ingest_log_line_marks_named_tunnel_ready(self):
+        """Validate scenario: named tunnel should become ready only after registration log appears."""
+        manager = CloudflareManager()
+        manager.configure(
+            enabled=True,
+            binary_path="",
+            tunnel_token="token-123",
+            configured_hostname="https://remote.example.com",
+            target_url="http://127.0.0.1:8080",
+        )
+
+        manager._ingest_log_line("INF Registered tunnel connection connIndex=0")
+
+        self.assertTrue(manager._named_tunnel_ready)
+        self.assertEqual(manager.snapshot().public_url, "https://remote.example.com")
+
+    def test_quick_tunnel_probe_success_promotes_public_url(self):
+        """Validate scenario: trycloudflare URL should only go online after a successful HTTP probe."""
+        manager = CloudflareManager()
+        manager.configure(
+            enabled=True,
+            binary_path="",
+            tunnel_token="",
+            configured_hostname="",
+            target_url="http://127.0.0.1:8080",
+        )
+        url = "https://demo.trycloudflare.com"
+        manager._process = _ProbeProc()
+        manager._process_started_ts = time.time() - 10.0
+        manager._remember_candidate_public_url(url)
+
+        with patch("cyberdeck.launcher.cloudflare_manager.requests.get", return_value=_Resp(200, "ok")):
+            manager._refresh_public_url_from_logs()
+
+        self.assertEqual(manager.snapshot().public_url, url)
+
+    def test_quick_tunnel_withholds_dead_public_url_before_boot_timeout(self):
+        """Validate scenario: dead trycloudflare URL should stay in starting state during warm-up."""
+        manager = CloudflareManager()
+        manager.configure(
+            enabled=True,
+            binary_path="",
+            tunnel_token="",
+            configured_hostname="",
+            target_url="http://127.0.0.1:8080",
+        )
+        proc = _ProbeProc()
+        manager._process = proc
+        manager._process_started_ts = time.time() - 10.0
+        manager._remember_candidate_public_url("https://dead.trycloudflare.com")
+
+        with patch(
+            "cyberdeck.launcher.cloudflare_manager.requests.get",
+            return_value=_Resp(530, "The origin has been unregistered from Argo Tunnel"),
+        ):
+            manager._refresh_public_url_from_logs()
+
+        self.assertEqual(manager.snapshot().public_url, "")
+        self.assertFalse(proc.terminated)
+        self.assertIn("origin has been unregistered", manager.snapshot().last_error.lower())
+
+    def test_quick_tunnel_dns_failure_surfaces_error_before_restart_timeout(self):
+        """Validate scenario: DNS probe failures should be exposed immediately instead of hiding behind endless starting UI."""
+        manager = CloudflareManager()
+        manager.configure(
+            enabled=True,
+            binary_path="",
+            tunnel_token="",
+            configured_hostname="",
+            target_url="http://127.0.0.1:8080",
+        )
+        proc = _ProbeProc()
+        manager._process = proc
+        manager._process_started_ts = time.time() - 10.0
+        manager._remember_candidate_public_url("https://dead.trycloudflare.com")
+
+        with patch(
+            "cyberdeck.launcher.cloudflare_manager.requests.get",
+            side_effect=requests.ConnectionError("NameResolutionError: getaddrinfo failed"),
+        ):
+            manager._refresh_public_url_from_logs()
+
+        self.assertEqual(manager.snapshot().public_url, "")
+        self.assertFalse(proc.terminated)
+        self.assertIn("getaddrinfo failed", manager.snapshot().last_error.lower())
+
+    def test_quick_tunnel_restarts_when_confirmed_public_url_dies(self):
+        """Validate scenario: launcher should restart Quick Tunnel after a once-live URL degrades into 530."""
+        manager = CloudflareManager()
+        manager.configure(
+            enabled=True,
+            binary_path="",
+            tunnel_token="",
+            configured_hostname="",
+            target_url="http://127.0.0.1:8080",
+        )
+        url = "https://live.trycloudflare.com"
+        proc = _ProbeProc()
+        manager._process = proc
+        manager._process_started_ts = time.time() - 60.0
+        manager._remember_candidate_public_url(url)
+        manager._public_url_confirmed = True
+        manager._set_snapshot(status="online", enabled=True, running=True, public_url=url)
+
+        with patch(
+            "cyberdeck.launcher.cloudflare_manager.requests.get",
+            return_value=_Resp(530, "The origin has been unregistered from Argo Tunnel"),
+        ):
+            manager._refresh_public_url_from_logs()
+
+        self.assertTrue(proc.terminated)
+        self.assertEqual(manager.snapshot().public_url, "")
+        self.assertEqual(manager.snapshot().status, "error")
+        self.assertIn("retrying", manager.snapshot().last_error)
+        self.assertGreater(manager._next_restart_ts, 0.0)
 
     def test_extract_process_exit_detail_prefers_human_error(self):
         """Validate scenario: cloudflared exit reason should keep the actual failure instead of a noisy line."""

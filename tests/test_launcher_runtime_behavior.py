@@ -294,6 +294,66 @@ class LauncherRuntimeBehaviorTests(unittest.TestCase):
             "Нужен токен Named Tunnel Cloudflare",
         )
 
+    def test_friendly_remote_access_detail_maps_quick_tunnel_dns_failure(self):
+        """Validate scenario: DNS resolution failures should show short Quick Tunnel guidance instead of raw traceback text."""
+        fake = types.SimpleNamespace(
+            tr=lambda key, **_kwargs: {
+                "remote_access_cloudflare_dns": "Адрес trycloudflare не резолвится через текущий DNS/IPv6",
+            }.get(key, key)
+        )
+        self.assertEqual(
+            AppRuntimeMixin._friendly_remote_access_detail(
+                fake,
+                "NameResolutionError: getaddrinfo failed for reported-opposed-periodic-holly.trycloudflare.com",
+            ),
+            "Адрес trycloudflare не резолвится через текущий DNS/IPv6",
+        )
+
+    def test_apply_cloudflare_snapshot_keeps_last_error_visible_until_online(self):
+        """Validate scenario: Home card should preserve the last tunnel failure across automatic restarts until relay is healthy."""
+        fake = types.SimpleNamespace(cloudflare_last_error_sticky="")
+        AppRuntimeMixin._apply_cloudflare_snapshot(
+            fake,
+            types.SimpleNamespace(
+                status="error",
+                public_url="",
+                last_error="quick tunnel public URL did not become reachable; retrying",
+                binary_path="C:\\tools\\cloudflared.exe",
+                target_url="http://127.0.0.1:8080",
+            ),
+        )
+        self.assertEqual(
+            fake.cloudflare_last_error_sticky,
+            "quick tunnel public URL did not become reachable; retrying",
+        )
+
+        AppRuntimeMixin._apply_cloudflare_snapshot(
+            fake,
+            types.SimpleNamespace(
+                status="starting",
+                public_url="",
+                last_error="",
+                binary_path="C:\\tools\\cloudflared.exe",
+                target_url="http://127.0.0.1:8080",
+            ),
+        )
+        self.assertEqual(
+            fake.cloudflare_last_error_sticky,
+            "quick tunnel public URL did not become reachable; retrying",
+        )
+
+        AppRuntimeMixin._apply_cloudflare_snapshot(
+            fake,
+            types.SimpleNamespace(
+                status="online",
+                public_url="https://demo.trycloudflare.com",
+                last_error="",
+                binary_path="C:\\tools\\cloudflared.exe",
+                target_url="http://127.0.0.1:8080",
+            ),
+        )
+        self.assertEqual(fake.cloudflare_last_error_sticky, "")
+
     def test_should_attempt_auto_update_requires_windows_packaged_launcher_update(self):
         """Validate scenario: unattended install should start only for packaged Windows launcher updates with setup asset."""
         fake = types.SimpleNamespace(

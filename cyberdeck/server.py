@@ -1,4 +1,10 @@
-﻿import asyncio
+"""FastAPI application assembly, middleware, and server lifecycle.
+
+Composes all routers, sets up CORS, error handling, and
+initialises background services (UDP discovery, mDNS).
+"""
+
+import asyncio
 import os
 import socket
 import time
@@ -14,35 +20,24 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config
-from .discovery import start_udp_discovery
-from .errors import build_error_response
-from .stdio import ensure_null_stdio
-from .platform.wayland_setup import ensure_wayland_ready, format_wayland_issues, is_linux_wayland_session
-from .logging_config import log
-
 from .api.core import router as core_router
 from .api.errors import router as errors_router
 from .api.local import router as local_router
 from .api.system import router as system_router
+from .discovery import start_udp_discovery
+from .errors import build_error_response
+from .logging_config import log
+from .mdns import start_mdns
+from .platform.wayland_setup import (
+    ensure_wayland_ready,
+    format_wayland_issues,
+    is_linux_wayland_session,
+)
+from .stdio import ensure_null_stdio
 from .video import router as video_router
 from .ws.mouse import router as ws_router
-from .mdns import start_mdns
-
 
 ensure_null_stdio()
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    """Read bool env var supporting common truthy/falsy forms."""
-    raw = os.environ.get(name, None)
-    if raw is None:
-        return bool(default)
-    value = str(raw).strip().lower()
-    if value in {"1", "true", "yes", "on", "y", "t"}:
-        return True
-    if value in {"0", "false", "no", "off", "n", "f"}:
-        return False
-    return bool(default)
 
 
 @asynccontextmanager
@@ -121,7 +116,9 @@ async def fastapi_http_exception_handler(request: Request, exc: HTTPException):
 
 
 @app.exception_handler(StarletteHTTPException)
-async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+async def starlette_http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+):
     """Normalize Starlette HTTPException payload to include catalog error metadata."""
     body = build_error_response(
         detail=getattr(exc, "detail", "internal_error"),
@@ -180,9 +177,9 @@ def _port_available(port: int) -> bool:
 
 
 def run() -> None:
-    """Start FastAPI server with optional Wayland bootstrap, mdns, and TLS settings."""
+    """Start FastAPI server with optional Wayland bootstrap, mDNS, and TLS."""
     if is_linux_wayland_session():
-        auto_setup = _env_bool("CYBERDECK_WAYLAND_AUTO_SETUP", True)
+        auto_setup = config._env_bool("CYBERDECK_WAYLAND_AUTO_SETUP", True)
         ok, issues, attempted, reason = ensure_wayland_ready(
             config.BASE_DIR,
             auto_install=auto_setup,
@@ -218,7 +215,10 @@ def run() -> None:
             port = int(find_free_port())
             config.PORT = port
         except Exception:
-            log.exception("PORT_AUTO failed to allocate free port, keeping configured port=%s", config.PORT)
+            log.exception(
+                "PORT_AUTO failed to allocate free port, keeping configured port=%s",
+                config.PORT,
+            )
 
     if config.MDNS_ENABLED:
         try:
@@ -240,5 +240,3 @@ def run() -> None:
         forwarded_allow_ips="127.0.0.1",
         **ssl_kwargs,
     )
-
-

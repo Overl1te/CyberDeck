@@ -4,7 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 if "pystray" not in sys.modules:
     pystray_stub = types.ModuleType("pystray")
@@ -146,6 +146,66 @@ class LauncherSharedBehaviorTests(unittest.TestCase):
                         h.close()
                 except Exception:
                     pass
+            sys.stdout = old_out
+            sys.stderr = old_err
+
+    def test_ensure_console_attaches_to_parent_console_before_allocating(self):
+        """Validate scenario: -c in GUI builds should reuse the parent console."""
+        old_out = sys.stdout
+        old_err = sys.stderr
+        fake_out = MagicMock()
+        fake_err = MagicMock()
+        fake_kernel32 = types.SimpleNamespace(
+            GetConsoleWindow=MagicMock(return_value=0),
+            AttachConsole=MagicMock(return_value=1),
+            AllocConsole=MagicMock(return_value=1),
+            SetConsoleOutputCP=MagicMock(return_value=1),
+            SetConsoleCP=MagicMock(return_value=1),
+        )
+        fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(kernel32=fake_kernel32))
+        try:
+            sys.stdout = None
+            sys.stderr = None
+            with patch("cyberdeck.launcher.shared.is_windows", return_value=True), patch(
+                "cyberdeck.launcher.shared.ctypes", fake_ctypes
+            ), patch("builtins.open", mock_open()) as open_mock:
+                open_mock.side_effect = [fake_out, fake_err]
+                ls.ensure_console()
+            fake_kernel32.AttachConsole.assert_called_once_with(-1)
+            fake_kernel32.AllocConsole.assert_not_called()
+            self.assertIs(sys.stdout, fake_out)
+            self.assertIs(sys.stderr, fake_err)
+        finally:
+            sys.stdout = old_out
+            sys.stderr = old_err
+
+    def test_ensure_console_allocates_console_when_parent_attach_fails(self):
+        """Validate scenario: explorer -c fallback can still create a console."""
+        old_out = sys.stdout
+        old_err = sys.stderr
+        fake_out = MagicMock()
+        fake_err = MagicMock()
+        fake_kernel32 = types.SimpleNamespace(
+            GetConsoleWindow=MagicMock(return_value=0),
+            AttachConsole=MagicMock(return_value=0),
+            AllocConsole=MagicMock(return_value=1),
+            SetConsoleOutputCP=MagicMock(return_value=1),
+            SetConsoleCP=MagicMock(return_value=1),
+        )
+        fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(kernel32=fake_kernel32))
+        try:
+            sys.stdout = None
+            sys.stderr = None
+            with patch("cyberdeck.launcher.shared.is_windows", return_value=True), patch(
+                "cyberdeck.launcher.shared.ctypes", fake_ctypes
+            ), patch("builtins.open", mock_open()) as open_mock:
+                open_mock.side_effect = [fake_out, fake_err]
+                ls.ensure_console()
+            fake_kernel32.AttachConsole.assert_called_once_with(-1)
+            fake_kernel32.AllocConsole.assert_called_once_with()
+            self.assertIs(sys.stdout, fake_out)
+            self.assertIs(sys.stderr, fake_err)
+        finally:
             sys.stdout = old_out
             sys.stderr = old_err
 

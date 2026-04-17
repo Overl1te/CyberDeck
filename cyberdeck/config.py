@@ -1,12 +1,17 @@
+"""Runtime configuration loaded from environment variables.
+
+All ``CYBERDECK_*`` env vars are parsed at import time and can be
+reloaded via :func:`reload_from_env`.
+"""
+
 import os
 import socket
 import sys
 import time
 import uuid
-from typing import List
 
 
-VERSION = "v1.3.2"
+VERSION = "v1.4.0"
 
 
 def _is_packaged_runtime() -> bool:
@@ -32,9 +37,9 @@ def _is_packaged_runtime() -> bool:
     return False
 
 
-def _csv_list(raw: str) -> List[str]:
+def _csv_list(raw: str) -> list[str]:
     """Parse a comma-separated string into normalized non-empty values."""
-    out: List[str] = []
+    out: list[str] = []
     for x in str(raw or "").split(","):
         s = str(x or "").strip()
         if s and s not in out:

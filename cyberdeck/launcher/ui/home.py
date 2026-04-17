@@ -14,7 +14,6 @@ def setup_home_ui(app, ui: dict):
     COLOR_ACCENT_HOVER = ui["COLOR_ACCENT_HOVER"]
     COLOR_WARN = ui["COLOR_WARN"]
     COLOR_FAIL = ui["COLOR_FAIL"]
-    FONT_HEADER = ui["FONT_HEADER"]
     FONT_UI_BOLD = ui["FONT_UI_BOLD"]
     FONT_SMALL = ui["FONT_SMALL"]
     ACCESS_FONT = ("Consolas", 15, "bold")
@@ -54,80 +53,6 @@ def setup_home_ui(app, ui: dict):
     root.grid_columnconfigure(1, weight=2, minsize=320)
     root.grid_columnconfigure(2, weight=2, minsize=300)
 
-    header = ctk.CTkFrame(
-        root,
-        fg_color=COLOR_PANEL,
-        corner_radius=6,
-        border_width=1,
-        border_color=COLOR_BORDER,
-        height=108,
-    )
-    header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-    header.grid_columnconfigure(0, weight=1)
-    header.grid_columnconfigure(1, weight=0)
-    header.grid_rowconfigure(2, weight=0)
-    ctk.CTkLabel(
-        header,
-        text=app.tr("home_title"),
-        font=FONT_HEADER,
-        text_color=COLOR_TEXT,
-    ).grid(row=0, column=0, sticky="sw", padx=18, pady=(12, 0))
-    ctk.CTkLabel(
-        header,
-        text=app.tr("home_subtitle"),
-        font=FONT_SMALL,
-        text_color=COLOR_TEXT_DIM,
-    ).grid(row=1, column=0, sticky="nw", padx=18, pady=(2, 12))
-    app.lbl_header_meta = ctk.CTkLabel(
-        header,
-        text="TLS | LAN | --:--:--",
-        font=FONT_SMALL,
-        text_color=COLOR_TEXT_DIM,
-    )
-    app.lbl_header_meta.grid(row=2, column=0, sticky="sw", padx=18, pady=(0, 12))
-    app.lbl_header_status = ctk.CTkLabel(
-        header,
-        text=app.tr("server_placeholder"),
-        font=FONT_UI_BOLD,
-        text_color=COLOR_TEXT_DIM,
-        fg_color=COLOR_PANEL_ALT,
-        corner_radius=8,
-    )
-    app.lbl_header_status.grid(row=0, column=1, rowspan=2, sticky="e", padx=14, pady=14)
-
-    metrics_row = ctk.CTkFrame(header, fg_color="transparent")
-    metrics_row.grid(row=2, column=1, sticky="e", padx=14, pady=(0, 12))
-
-    def _metric_pill(label_key: str, value_attr: str):
-        shell = ctk.CTkFrame(
-            metrics_row,
-            fg_color=COLOR_PANEL_ALT,
-            corner_radius=10,
-            border_width=1,
-            border_color=COLOR_BORDER,
-        )
-        shell.pack(side="left", padx=(8, 0))
-        ctk.CTkLabel(
-            shell,
-            text=app.tr(label_key),
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_DIM,
-        ).pack(anchor="w", padx=8, pady=(5, 0))
-        label = ctk.CTkLabel(
-            shell,
-            text="--",
-            font=FONT_UI_BOLD,
-            text_color=COLOR_TEXT,
-        )
-        label.pack(anchor="w", padx=8, pady=(0, 5))
-        setattr(app, value_attr, label)
-
-    _metric_pill("server_mode_label", "lbl_server_mode")
-    _metric_pill("uptime_label", "lbl_server_uptime")
-    _metric_pill("cpu_label", "lbl_server_cpu")
-    _metric_pill("ram_label", "lbl_server_ram")
-    _metric_pill("port_short_label", "lbl_server_port")
-
     code_card = ctk.CTkFrame(
         root,
         fg_color=COLOR_PANEL,
@@ -135,7 +60,7 @@ def setup_home_ui(app, ui: dict):
         border_width=1,
         border_color=COLOR_BORDER,
     )
-    code_card.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+    code_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
     ctk.CTkLabel(code_card, text=app.tr("access_code"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM).pack(
         anchor="w", padx=14, pady=(12, 4)
@@ -182,7 +107,7 @@ def setup_home_ui(app, ui: dict):
         border_width=1,
         border_color=COLOR_BORDER,
     )
-    qr_card.grid(row=1, column=1, sticky="nsew", padx=6)
+    qr_card.grid(row=0, column=1, sticky="nsew", padx=6)
     ctk.CTkLabel(qr_card, text=app.tr("login_qr"), font=FONT_SMALL, text_color=COLOR_TEXT_DIM).pack(
         anchor="w", padx=14, pady=(12, 8)
     )
@@ -212,7 +137,7 @@ def setup_home_ui(app, ui: dict):
         border_width=1,
         border_color=COLOR_BORDER,
     )
-    info_card.grid(row=1, column=2, sticky="nsew", padx=(6, 0))
+    info_card.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
 
     def _build_access_panel(title_key: str, copy_command, *, height: int = 70):
         """Create a titled access block with a large read-only value field and copy action."""
@@ -247,11 +172,6 @@ def setup_home_ui(app, ui: dict):
         app.copy_local_access,
         height=58,
     )
-    app.txt_public_access, app.btn_copy_public_access = _build_access_panel(
-        "public_access_label",
-        app.copy_public_access,
-        height=72,
-    )
 
     CyberBtn(
         info_card,
@@ -271,7 +191,7 @@ def setup_home_ui(app, ui: dict):
         border_width=1,
         border_color=COLOR_BORDER,
     )
-    summary.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+    summary.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
     summary.grid_columnconfigure(0, weight=1)
     summary.grid_columnconfigure(1, weight=1)
 

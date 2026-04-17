@@ -1,4 +1,4 @@
-﻿# Вклад в CyberDeck
+# Вклад в CyberDeck
 
 <p align="left">
   <a href="CONTRIBUTING_EN.md">English version</a> •
@@ -114,7 +114,7 @@ python main.py
 - `POST /api/handshake` — сопряжение по PIN.
 - `GET /api/stats` — статистика сервера.
 - `POST /api/file/upload` — загрузка файла на ПК.
-- `WS /ws/mouse` — канал удаленного ввода.
+- `WS /ws/mouse` — канал удалённого ввода.
 - `GET /video_feed` — MJPEG поток.
 - `GET /video_h264` — H.264 поток.
 - `GET /video_h265` — H.265 поток.
@@ -145,35 +145,22 @@ python -m unittest discover -s tests -p "test_*.py"
 pytest -q tests/test_launcher_shared_behavior.py
 ```
 
-Docker-прогон:
+## Сборка (Windows)
 
-```bash
-docker compose -f docker-compose.tests.yml build
-docker compose -f docker-compose.tests.yml run --rm tests
-```
+Подробный гайд по сборке — в разделе [Сборка для Windows](README.md#сборка-для-windows) в README.
 
-Примечание: Docker-тесты используют `requirements-dev.txt` (без `requirements-desktop-input.txt`).
-
-## Сборка
-
-Windows (Nuitka):
+Nuitka standalone:
 
 ```powershell
 pip install -r requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_nuitka.ps1
 ```
 
-Windows (Nuitka portable onefile):
+Nuitka portable (onefile):
 
 ```powershell
 pip install -r requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_portable_nuitka.ps1
-```
-
-Linux (Arch helper script):
-
-```bash
-bash ./scripts/build_arch_linux.sh
 ```
 
 ## Стандарты кода
@@ -198,8 +185,8 @@ bash ./scripts/build_arch_linux.sh
 Любое изменение, затрагивающее разрешения, должно включать:
 
 1. Проверку на уровне API/WS.
-2. Негативный тест (доступ запрещен).
-3. Позитивный тест (доступ разрешен).
+2. Негативный тест (доступ запрещён).
+3. Позитивный тест (доступ разрешён).
 
 ## Конфигурация
 
@@ -221,7 +208,7 @@ bash ./scripts/build_arch_linux.sh
 - [ ] Проверены edge-case сценарии (offline, invalid input, permission denied).
 - [ ] Нет лишних логов/дебаг-кода.
 
-## Отчеты о проблемах
+## Отчёты о проблемах
 
 Для багов и feature-запросов используйте Issues:
 
