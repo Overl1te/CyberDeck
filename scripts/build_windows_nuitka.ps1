@@ -6,7 +6,6 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RepoRoot
-$IconIco = Join-Path $RepoRoot "icon.ico"
 $RequirementsBuild = Join-Path $RepoRoot "requirements-build.txt"
 $LauncherI18nJson = Join-Path $RepoRoot "cyberdeck\launcher\i18n.json"
 $BundledCloudflaredPath = Join-Path $RepoRoot "vendor\cloudflared\windows-amd64\cloudflared.exe"
@@ -71,9 +70,6 @@ function Remove-PathWithRetries {
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
   throw "python not found in PATH"
 }
-if (-not (Test-Path $IconIco)) {
-  throw "icon.ico not found: $IconIco"
-}
 if (-not (Test-Path $RequirementsBuild)) {
   throw "requirements-build.txt not found: $RequirementsBuild"
 }
@@ -101,6 +97,10 @@ foreach ($pattern in $timelinePatterns) {
     Select-Object -ExpandProperty FullName
 }
 $timelineMedia = @($timelineMedia | Sort-Object -Unique)
+$iconIcoFiles = @(
+  Get-ChildItem -Path $RepoRoot -File -Filter "cyberdeck_controls_*x*.ico" -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName
+) | Sort-Object -Unique
 
 $nuitkaArgs = @(
   "launcher.py"
@@ -108,16 +108,14 @@ $nuitkaArgs = @(
   "--enable-plugin=tk-inter"
   "--include-data-dir=static=static"
   "--include-data-file=icon.png=icon.png"
-  "--include-data-file=icon.ico=icon.ico"
   "--include-data-file=logo.gif=logo.gif"
   "--include-data-file=icon-qr-code.png=icon-qr-code.png"
   "--include-data-file=cyberdeck/launcher/i18n.json=cyberdeck/launcher/i18n.json"
-  "--windows-icon-from-ico=$IconIco"
   "--include-package=customtkinter"
   "--include-package-data=customtkinter"
   "--include-package=pycaw"
   "--include-package=comtypes"
-  "--windows-console-mode=disable"
+  "--windows-console-mode=attach"
   "--windows-uac-admin"
   "--output-dir=dist"
   "--output-filename=CyberDeck.exe"
@@ -125,6 +123,11 @@ $nuitkaArgs = @(
 foreach ($mediaPath in $timelineMedia) {
   $mediaName = [System.IO.Path]::GetFileName($mediaPath)
   $nuitkaArgs += "--include-data-file=$mediaPath=$mediaName"
+}
+foreach ($iconIcoPath in $iconIcoFiles) {
+  $iconIcoName = [System.IO.Path]::GetFileName($iconIcoPath)
+  $nuitkaArgs += "--include-data-file=$iconIcoPath=$iconIcoName"
+  $nuitkaArgs += "--windows-icon-from-ico=$iconIcoPath"
 }
 if (Test-Path $BundledCloudflaredPath) {
   $nuitkaArgs += "--include-data-file=$BundledCloudflaredPath=tools/cloudflared/cloudflared.exe"

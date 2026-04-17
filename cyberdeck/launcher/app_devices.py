@@ -256,6 +256,23 @@ class AppDevicesMixin:
         except Exception:
             return dict(payload or {}), str(url or "").strip()
 
+    @classmethod
+    def _prepare_qr_payload_for_render(
+        cls,
+        data: dict[str, Any],
+        public_origin: str = "",
+    ) -> tuple[dict[str, Any], str]:
+        """Return QR payload/url for LAN pairing."""
+        if not isinstance(data, dict):
+            return {}, ""
+
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return {}, str(data.get("url") or "").strip()
+
+        url = str(data.get("url") or "").strip()
+        return dict(payload), url
+
     @staticmethod
     def _build_android_intent_qr_link(deep_link: str, fallback_url: str = "") -> str:
         """Wrap deep-link into Android `intent://` URI with browser fallback."""
@@ -448,14 +465,10 @@ class AppDevicesMixin:
                 data = self.api_client.json_dict(resp)
                 if not data:
                     raise RuntimeError("invalid qr payload json")
-                payload = data.get("payload") or {}
-                public_origin = str(getattr(self, "cloudflare_public_url", "") or "").strip()
-                if public_origin:
-                    payload, data["url"] = self._rewrite_qr_for_public_origin(
-                        payload,
-                        url=str(data.get("url") or "").strip(),
-                        public_origin=public_origin,
-                    )
+                payload, qr_url = self._prepare_qr_payload_for_render(
+                    data,
+                    public_origin=str(getattr(self, "cloudflare_public_url", "") or "").strip(),
+                )
 
                 mode = str(self.settings.get("qr_mode", DEFAULT_SETTINGS["qr_mode"]) or DEFAULT_SETTINGS["qr_mode"]).strip().lower()
                 if mode not in ("site", "app"):
@@ -465,8 +478,7 @@ class AppDevicesMixin:
                     # For better scanner compatibility, emit a regular http(s) URL
                     # with open=app so the landing page can auto-open cyberdeck://.
                     try:
-                        url = str(data.get("url") or "").strip()
-                        fallback = self._build_app_fallback_url(payload, base_url=url)
+                        fallback = self._build_app_fallback_url(payload, base_url=qr_url)
                         if fallback:
                             qr_text = fallback
                         else:
@@ -474,13 +486,11 @@ class AppDevicesMixin:
                             if deep_link:
                                 qr_text = deep_link
                             else:
-                                qr_text = self._append_open_mode_app(url) if url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                                qr_text = self._append_open_mode_app(qr_url) if qr_url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                     except Exception:
-                        url = str(data.get("url") or "").strip()
-                        qr_text = self._append_open_mode_app(url) if url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                        qr_text = self._append_open_mode_app(qr_url) if qr_url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                 else:
-                    url = str(data.get("url") or "").strip()
-                    qr_text = url if url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    qr_text = qr_url if qr_url else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
                 img = self._build_qr_image(qr_text, size=self._qr_render_size_for_payload(qr_text))
 

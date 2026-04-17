@@ -8,12 +8,12 @@ skip_covered = False
 precision = 1
 fail_under = 80
 include =
-    cyberdeck/api_core.py
-    cyberdeck/api_local.py
+    cyberdeck/api/core.py
+    cyberdeck/api/local.py
     cyberdeck/auth.py
     cyberdeck/net.py
     cyberdeck/pin_limiter.py
     cyberdeck/protocol.py
     cyberdeck/qr_auth.py
-    cyberdeck/stream_adaptation.py
-    cyberdeck/ws_protocol.py
+    cyberdeck/video/stream_adaptation.py
+    cyberdeck/ws/protocol.py

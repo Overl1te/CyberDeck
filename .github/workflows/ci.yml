@@ -6,12 +6,11 @@ on:
 
 jobs:
   lint-compile:
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu-latest", "windows-latest"]
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.11", "3.12"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,41 +34,33 @@ jobs:
           python -m compileall cyberdeck
           python -m py_compile main.py launcher.py
 
-      - name: Build scripts smoke (Linux)
-        if: runner.os == 'Linux' && matrix.python-version == '3.12'
-        run: |
-          bash ./scripts/build_arch_linux.sh --dry-run
-
-      - name: Build scripts smoke (Windows)
-        if: runner.os == 'Windows' && matrix.python-version == '3.12'
+      - name: Build scripts smoke
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_nuitka.ps1 -DryRun
           powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_portable_nuitka.ps1 -DryRun
 
-  tests-in-docker:
-    runs-on: ubuntu-latest
+  tests:
+    runs-on: windows-latest
     needs: lint-compile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Docker tests
-        run: |
-          n=0
-          until [ "$n" -ge 3 ]
-          do
-            docker compose -f docker-compose.tests.yml up --build --abort-on-container-exit --exit-code-from tests && break
-            n=$((n+1))
-            echo "Docker test run failed, retry $n/3..."
-            sleep 10
-          done
-          if [ "$n" -ge 3 ]; then
-            echo "Docker tests failed after retries"
-            exit 1
-          fi
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Cleanup docker
-        if: always()
+      - name: Install deps
         run: |
-          docker compose -f docker-compose.tests.yml down --remove-orphans
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          python -m coverage run -m unittest discover -s tests -p "test_*.py"
+
+      - name: Coverage report
+        run: |
+          python -m coverage report

@@ -23,6 +23,7 @@ class _FakeInputBackend:
         self.text_payloads = []
         self.moves = []
         self.hotkey_calls = []
+        self.key_presses = []
         self.raise_hotkey = False
 
     def position(self):
@@ -62,6 +63,7 @@ class _FakeInputBackend:
 
     def press(self, key: str) -> bool:
         """Send a single key press through the active backend."""
+        self.key_presses.append(str(key))
         return True
 
     def hotkey(self, *keys: str) -> bool:
@@ -115,6 +117,7 @@ class WsBehaviorTests(unittest.TestCase):
         self.fake_backend.text_payloads.clear()
         self.fake_backend.moves.clear()
         self.fake_backend.hotkey_calls.clear()
+        self.fake_backend.key_presses.clear()
         self.fake_backend.raise_hotkey = False
 
     @staticmethod
@@ -198,6 +201,65 @@ class WsBehaviorTests(unittest.TestCase):
             pong = ws.receive_json()
             self.assertEqual(pong.get("type"), "pong")
 
+        self.assertEqual(self.fake_backend.text_payloads, [])
+
+    def test_ws_windows_text_uses_unicode_injection_before_backend_write(self):
+        """Validate scenario: Windows text input should use system Unicode injection first."""
+        token = "tok-win-unicode-text"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", True), patch.object(
+            ws_mouse, "_windows_send_unicode_text", return_value=True
+        ) as unicode_text:
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "text", "text": "\u041f\u0440\u0438\u0432\u0435\u0442", "event_id": "txt1"})
+                ack = ws.receive_json()
+                self.assertEqual(ack.get("type"), "ack")
+                self.assertEqual(ack.get("event_id"), "txt1")
+                ws.send_json({"type": "ping", "id": "probe"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+
+        unicode_text.assert_called_once_with("\u041f\u0440\u0438\u0432\u0435\u0442")
+        self.assertEqual(self.fake_backend.text_payloads, [])
+
+    def test_ws_windows_text_falls_back_to_backend_when_unicode_injection_fails(self):
+        """Validate scenario: failed Windows Unicode injection should not drop text input."""
+        token = "tok-win-text-fallback"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", True), patch.object(
+            ws_mouse, "_windows_send_unicode_text", return_value=False
+        ), patch.object(ws_mouse, "_windows_clipboard_paste_text", return_value=False):
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "text", "text": "fallback", "event_id": "txt2"})
+                ack = ws.receive_json()
+                self.assertEqual(ack.get("type"), "ack")
+                self.assertEqual(ack.get("event_id"), "txt2")
+                ws.send_json({"type": "ping", "id": "probe"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+
+        self.assertIn("fallback", self.fake_backend.text_payloads)
+
+    def test_ws_windows_text_uses_clipboard_before_backend_write(self):
+        """Validate scenario: Windows text input should paste before legacy backend fallback."""
+        token = "tok-win-clipboard-text"
+        self._add_session(token)
+
+        with patch.object(ws_mouse, "_IS_WINDOWS", True), patch.object(
+            ws_mouse, "_windows_send_unicode_text", return_value=False
+        ), patch.object(ws_mouse, "_windows_clipboard_paste_text", return_value=True) as clipboard_text:
+            with self.client.websocket_connect("/ws/mouse", headers=self._headers(token)) as ws:
+                ws.send_json({"type": "text", "text": "clip", "event_id": "txt3"})
+                ack = ws.receive_json()
+                self.assertEqual(ack.get("type"), "ack")
+                self.assertEqual(ack.get("event_id"), "txt3")
+                ws.send_json({"type": "ping", "id": "probe"})
+                pong = ws.receive_json()
+                self.assertEqual(pong.get("type"), "pong")
+
+        clipboard_text.assert_called_once_with("clip")
         self.assertEqual(self.fake_backend.text_payloads, [])
 
     def test_ws_rejects_when_all_input_permissions_denied(self):

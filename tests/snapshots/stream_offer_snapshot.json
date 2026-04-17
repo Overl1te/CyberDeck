@@ -1,13 +1,6 @@
 {
-  "recommended": "h264_ts",
+  "recommended": "mjpeg",
   "candidates": [
-    {
-      "id": "h264_ts",
-      "codec": "h264",
-      "container": "mpegts",
-      "mime": "video/mp2t",
-      "url": "/video_h264?bitrate_k=3200&fps=30&gop=60&low_latency=0&max_w=1280&monitor=1&preset=veryfast&profile=balanced&token=snap-token"
-    },
     {
       "id": "mjpeg",
       "codec": "mjpeg",
@@ -23,6 +16,13 @@
       "mime": "multipart/x-mixed-replace; boundary=frame",
       "url": "/video_feed?backend=ffmpeg&cursor=0&fps=30&low_latency=0&max_w=1280&monitor=1&profile=balanced&quality=55&token=snap-token",
       "backend": "ffmpeg"
+    },
+    {
+      "id": "h264_ts",
+      "codec": "h264",
+      "container": "mpegts",
+      "mime": "video/mp2t",
+      "url": "/video_h264?bitrate_k=3200&fps=30&gop=60&low_latency=0&max_w=1280&monitor=1&preset=veryfast&profile=balanced&token=snap-token"
     },
     {
       "id": "h265_ts",
@@ -80,7 +80,7 @@
   },
   "protocol_version": 2,
   "min_supported_protocol_version": 1,
-  "server_version": "v1.3.2",
+  "server_version": "v1.4.0",
   "features": {
     "stream_offer_v2": true,
     "stream_backend_select": true,

@@ -7,7 +7,6 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RepoRoot
 
-$IconIco = Join-Path $RepoRoot "icon.ico"
 $RequirementsBuild = Join-Path $RepoRoot "requirements-build.txt"
 $LauncherI18nJson = Join-Path $RepoRoot "cyberdeck\launcher\i18n.json"
 $PortableDistDir = Join-Path $RepoRoot "dist-portable"
@@ -17,7 +16,6 @@ $PortableOutExe = Join-Path $PortableOutDir $PortableExeName
 $BundledCloudflaredPath = Join-Path $RepoRoot "vendor\cloudflared\windows-amd64\cloudflared.exe"
 $PortableCoreFiles = @(
   "icon.png",
-  "icon.ico",
   "icon-qr-code.png",
   "logo.gif"
 )
@@ -81,9 +79,6 @@ function Remove-PathWithRetries {
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
   throw "python not found in PATH"
 }
-if (-not (Test-Path $IconIco)) {
-  throw "icon.ico not found: $IconIco"
-}
 if (-not (Test-Path $RequirementsBuild)) {
   throw "requirements-build.txt not found: $RequirementsBuild"
 }
@@ -112,7 +107,12 @@ foreach ($pattern in $timelinePatterns) {
 }
 $timelineMedia = @($timelineMedia | Sort-Object -Unique)
 $timelineNames = @($timelineMedia | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Sort-Object -Unique)
-$portableExternalFiles = @($PortableCoreFiles + $timelineNames | Sort-Object -Unique)
+$iconIcoFiles = @(
+  Get-ChildItem -Path $RepoRoot -File -Filter "cyberdeck_controls_*x*.ico" -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName
+) | Sort-Object -Unique
+$iconIcoNames = @($iconIcoFiles | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Sort-Object -Unique)
+$portableExternalFiles = @($PortableCoreFiles + $timelineNames + $iconIcoNames | Sort-Object -Unique)
 
 $nuitkaArgs = @(
   "launcher.py"
@@ -120,20 +120,17 @@ $nuitkaArgs = @(
   "--enable-plugin=tk-inter"
   "--include-data-dir=static=static"
   "--include-data-file=icon.png=icon.png"
-  "--include-data-file=icon.ico=icon.ico"
   "--include-data-file=logo.gif=logo.gif"
   "--include-data-file=icon-qr-code.png=icon-qr-code.png"
   "--include-data-file=cyberdeck/launcher/i18n.json=cyberdeck/launcher/i18n.json"
   "--include-data-files-external=icon.png"
-  "--include-data-files-external=icon.ico"
   "--include-data-files-external=icon-qr-code.png"
   "--include-data-files-external=logo.gif"
-  "--windows-icon-from-ico=$IconIco"
   "--include-package=customtkinter"
   "--include-package-data=customtkinter"
   "--include-package=pycaw"
   "--include-package=comtypes"
-  "--windows-console-mode=disable"
+  "--windows-console-mode=attach"
   "--windows-uac-admin"
   "--output-dir=$PortableDistDir"
   "--output-filename=$PortableExeName"
@@ -142,6 +139,12 @@ foreach ($mediaPath in $timelineMedia) {
   $mediaName = [System.IO.Path]::GetFileName($mediaPath)
   $nuitkaArgs += "--include-data-file=$mediaPath=$mediaName"
   $nuitkaArgs += "--include-data-files-external=$mediaName"
+}
+foreach ($iconIcoPath in $iconIcoFiles) {
+  $iconIcoName = [System.IO.Path]::GetFileName($iconIcoPath)
+  $nuitkaArgs += "--include-data-file=$iconIcoPath=$iconIcoName"
+  $nuitkaArgs += "--include-data-files-external=$iconIcoName"
+  $nuitkaArgs += "--windows-icon-from-ico=$iconIcoPath"
 }
 
 if ($DryRun) {

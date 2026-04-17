@@ -178,6 +178,136 @@ def _windows_force_button(down: bool, button: str = "left") -> bool:
         return False
 
 
+def _windows_send_unicode_text(text: str) -> bool:
+    """Type arbitrary Unicode text into the focused Windows control."""
+    if not _IS_WINDOWS:
+        return False
+    payload = str(text or "")
+    if not payload:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        input_keyboard = 1
+        keyeventf_keyup = 0x0002
+        keyeventf_unicode = 0x0004
+        ulong_ptr = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+        class _MouseInput(ctypes.Structure):
+            _fields_ = [
+                ("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ulong_ptr),
+            ]
+
+        class _KeyBdInput(ctypes.Structure):
+            _fields_ = [
+                ("wVk", ctypes.c_ushort),
+                ("wScan", ctypes.c_ushort),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ulong_ptr),
+            ]
+
+        class _HardwareInput(ctypes.Structure):
+            _fields_ = [
+                ("uMsg", ctypes.c_ulong),
+                ("wParamL", ctypes.c_ushort),
+                ("wParamH", ctypes.c_ushort),
+            ]
+
+        class _InputUnion(ctypes.Union):
+            _fields_ = [("mi", _MouseInput), ("ki", _KeyBdInput), ("hi", _HardwareInput)]
+
+        class _Input(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong), ("u", _InputUnion)]
+
+        user32.SendInput.argtypes = (ctypes.c_uint, ctypes.POINTER(_Input), ctypes.c_int)
+        user32.SendInput.restype = ctypes.c_uint
+
+        payload_bytes = payload.encode("utf-16-le")
+        utf16_units = [
+            int.from_bytes(payload_bytes[idx:idx + 2], "little")
+            for idx in range(0, len(payload_bytes), 2)
+        ]
+        for unit in utf16_units:
+            events = (_Input * 2)()
+            events[0].type = input_keyboard
+            events[0].u.ki = _KeyBdInput(0, int(unit), keyeventf_unicode, 0, 0)
+            events[1].type = input_keyboard
+            events[1].u.ki = _KeyBdInput(0, int(unit), keyeventf_unicode | keyeventf_keyup, 0, 0)
+            if int(user32.SendInput(2, events, ctypes.sizeof(_Input))) != 2:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _windows_clipboard_paste_text(text: str) -> bool:
+    """Paste Unicode text through the Windows clipboard as a last-resort input path."""
+    if not _IS_WINDOWS:
+        return False
+    payload = str(text or "")
+    if not payload:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        cf_unicode_text = 13
+        gmem_moveable = 0x0002
+        kernel32.GlobalAlloc.argtypes = (ctypes.c_uint, ctypes.c_size_t)
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = (ctypes.c_void_p,)
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = (ctypes.c_void_p,)
+        kernel32.GlobalUnlock.restype = ctypes.c_bool
+        kernel32.GlobalFree.argtypes = (ctypes.c_void_p,)
+        kernel32.GlobalFree.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = (ctypes.c_uint, ctypes.c_void_p)
+        user32.SetClipboardData.restype = ctypes.c_void_p
+
+        if not user32.OpenClipboard(None):
+            return False
+        try:
+            user32.EmptyClipboard()
+            data = (payload + "\0").encode("utf-16-le")
+            handle = kernel32.GlobalAlloc(gmem_moveable, len(data))
+            if not handle:
+                return False
+            locked = kernel32.GlobalLock(handle)
+            if not locked:
+                kernel32.GlobalFree(handle)
+                return False
+            try:
+                ctypes.memmove(locked, data, len(data))
+            finally:
+                kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(cf_unicode_text, handle):
+                kernel32.GlobalFree(handle)
+                return False
+        finally:
+            user32.CloseClipboard()
+
+        try:
+            pasted = bool(INPUT_BACKEND.hotkey("ctrl", "v"))
+        except Exception:
+            pasted = False
+        if pasted:
+            return True
+        try:
+            user32.keybd_event(0x11, 0, 0, 0)
+            user32.keybd_event(0x56, 0, 0, 0)
+            user32.keybd_event(0x56, 0, 2, 0)
+            user32.keybd_event(0x11, 0, 2, 0)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
 def _warn_windows_input_block_once(token: str) -> bool:
     """Emit one warning per session when Windows input path looks blocked."""
     if not _IS_WINDOWS:
@@ -1277,14 +1407,9 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                         continue
                     delivered = False
                     if _IS_WINDOWS:
-                        try:
-                            hwnd = ctypes.windll.user32.GetForegroundWindow()
-                            if hwnd:
-                                for char in text:
-                                    ctypes.windll.user32.SendMessageW(hwnd, 0x0102, ord(char), 0)
-                                delivered = True
-                        except Exception:
-                            pass
+                        delivered = _windows_send_unicode_text(text)
+                        if not delivered:
+                            delivered = _windows_clipboard_paste_text(text)
                     if not delivered:
                         try:
                             delivered = bool(INPUT_BACKEND.write_text(text))
@@ -1308,15 +1433,46 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                 ):
                     await _notify_power_action_blocked(websocket, token)
                     continue
+                pressed = False
                 if _IS_WINDOWS:
-                    key_map = {"enter": 0x0D, "backspace": 0x08, "space": 0x20, "win": 0x5B}
+                    key_map = {
+                        "enter": 0x0D,
+                        "return": 0x0D,
+                        "backspace": 0x08,
+                        "space": 0x20,
+                        "esc": 0x1B,
+                        "escape": 0x1B,
+                        "tab": 0x09,
+                        "delete": 0x2E,
+                        "del": 0x2E,
+                        "win": 0x5B,
+                    }
                     vk = key_map.get(val)
                     if vk:
                         try:
                             ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
                             ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+                            pressed = True
                         except Exception:
                             pass
+                    if not pressed:
+                        py_key = {
+                            "enter": "enter",
+                            "return": "enter",
+                            "backspace": "backspace",
+                            "space": "space",
+                            "esc": "esc",
+                            "escape": "esc",
+                            "tab": "tab",
+                            "delete": "delete",
+                            "del": "delete",
+                            "win": "winleft",
+                        }.get(val)
+                        if py_key:
+                            try:
+                                pressed = bool(INPUT_BACKEND.press(py_key))
+                            except Exception:
+                                pressed = False
                 else:
                     if val == "win":
                         if sys.platform == "darwin":
@@ -1324,13 +1480,25 @@ async def websocket_mouse(websocket: WebSocket, token: Optional[str] = Query(Non
                         else:
                             py_key = "winleft"
                     else:
-                        py_key = {"enter": "enter", "backspace": "backspace", "space": "space"}.get(val)
+                        py_key = {
+                            "enter": "enter",
+                            "return": "enter",
+                            "backspace": "backspace",
+                            "space": "space",
+                            "esc": "esc",
+                            "escape": "esc",
+                            "tab": "tab",
+                            "delete": "delete",
+                            "del": "delete",
+                        }.get(val)
                     if py_key:
                         try:
-                            INPUT_BACKEND.press(py_key)
+                            pressed = bool(INPUT_BACKEND.press(py_key))
                         except Exception:
                             if config.DEBUG:
                                 log.exception("Keyboard press failed")
+                if (not pressed) and _ws_log_enabled():
+                    log.warning("WS key press failed: token=%s key=%s", token, val)
 
             elif t == "hotkey":
                 if not get_perm(token, "perm_keyboard"):

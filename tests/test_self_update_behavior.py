@@ -6,6 +6,11 @@ from unittest.mock import patch
 import cyberdeck.self_update as self_update
 
 
+def _write_download_fixture(_url, dest, **_kwargs):
+    with open(dest, "wb") as fh:
+        return fh.write(b"hello world")
+
+
 class SelfUpdateBehaviorTests(unittest.TestCase):
     def test_prepare_launcher_update_install_rejects_unsupported_runtime(self):
         """Validate scenario: unattended install should be disabled outside supported packaged Windows installs."""
@@ -44,7 +49,7 @@ class SelfUpdateBehaviorTests(unittest.TestCase):
             tmpdir,
         ), patch(
             "cyberdeck.self_update._download_file",
-            side_effect=lambda _url, dest, **_kwargs: open(dest, "wb").write(b"hello world"),
+            side_effect=_write_download_fixture,
         ) as mocked_download, patch(
             "cyberdeck.self_update._spawn_detached_script",
             return_value=None,

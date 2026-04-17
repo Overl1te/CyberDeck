@@ -1,8 +1,8 @@
-﻿<p align="center">
+<p align="center">
   <img src="icon-qr-code.png" width="400" height="400" />
 </p>
 
-<h1 align="center">CyberDeck Control вЂ” Remote PC Management</h1>
+<h1 align="center">CyberDeck Control — Remote PC Management</h1>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> вЂў
-  <a href="#usage-flow">Usage flow</a> вЂў
-  <a href="#basic-gestures">Gestures</a> вЂў
+  <a href="#features">Features</a> •
+  <a href="#usage-flow">Usage flow</a> •
+  <a href="#basic-gestures">Gestures</a> •
+  <a href="#building-for-windows">Build</a> •
   <a href="#faq">FAQ</a>
 </p>
-
 
 <p align="center">
   <img src="https://repo-inspector.vercel.app/api?owner=Overl1te&repo=CyberDeck&kind=quality&format=svg&theme=midnight&locale=en&card_width=760&animate=true&animation=all&duration=1400" alt="CyberDeck quality card" />
@@ -88,8 +88,55 @@ The launcher polls this endpoint and shows update status in Home screen.
 
 ## Platforms
 
-- Windows / Linux / macOS.
+- **Windows** — primary platform (Nuitka build, Inno Setup installer).
+- Linux / macOS — run from source.
 - Available codecs and video backends depend on OS/runtime capabilities.
+
+---
+
+## Building for Windows
+
+### Prerequisites
+
+- Python 3.11+
+- C compiler (Visual Studio Build Tools or MinGW)
+- Nuitka (`pip install nuitka`)
+
+### Standalone (folder with exe + dependencies)
+
+```powershell
+pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_nuitka.ps1
+```
+
+Output: `dist\launcher.dist\CyberDeck.exe`
+
+### Portable (single exe file)
+
+```powershell
+pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_portable_nuitka.ps1
+```
+
+Output: `Output\CyberDeck.exe`
+
+### Installer (Inno Setup)
+
+After a standalone build, compile `setup.iss` using [Inno Setup](https://jrsoftware.org/isinfo.php):
+
+```
+iscc setup.iss
+```
+
+Output: `Output\CyberDeck_Setup_v1.3.2.exe`
+
+### Optional: prepare Cloudflare Tunnel binary
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prepare_cloudflared_vendor.ps1
+```
+
+> **Note:** build scripts automatically create a virtual environment, install dependencies, and run Nuitka. Re-running will overwrite the previous build.
 
 ---
 
@@ -107,27 +154,20 @@ All technical details are in `CONTRIBUTING_EN.md`:
 - testing;
 - build and packaging.
 
-Additional practical guides:
-
-- Docker runtime: `docs/DOCKER.md`
-- Stream/audio/pairing troubleshooting: `docs/STREAMING_TROUBLESHOOTING.md`
-
 ---
 
 ## FAQ
 
-**Q: Device cannot connect.**  
+**Q: Device cannot connect.**
 A: Verify PC and phone are on the same network, and check IP/port/PIN values.
 
-**Q: Can I limit what a specific device can do?**  
+**Q: Can I limit what a specific device can do?**
 A: Yes, each device has independent `perm_*` permissions.
 
-**Q: Why does stream quality/type differ across OSes?**  
+**Q: Why does stream quality/type differ across OSes?**
 A: Streaming path depends on system backends and codec availability.
 
 ---
 
-**License:** GNU GPLv3 (`LICENSE`)  
+**License:** GNU GPLv3 (`LICENSE`)
 **Author:** Overl1te - <https://github.com/Overl1te>
-
-

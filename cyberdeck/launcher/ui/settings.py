@@ -461,6 +461,29 @@ def setup_settings_ui(app, ui: dict):
             "Security policies, discoverability, transfer limits, and stream tuning.",
         ),
     )
+    try:
+        remote_box.pack_forget()
+    except Exception:
+        pass
+
+    lan_box = _section(
+        app.tr("lan_only_title"),
+        app.tr("lan_only_note"),
+    )
+    ctk.CTkLabel(
+        lan_box,
+        text=app.tr("lan_only_note"),
+        text_color=COLOR_TEXT_DIM,
+        font=FONT_SMALL,
+        justify="left",
+        wraplength=840,
+    ).pack(anchor="w", padx=18, pady=(4, 10))
+    try:
+        lan_box.pack_forget()
+        lan_box.pack(before=app_cfg_box, fill="x", padx=20, pady=(0, 12))
+    except Exception:
+        pass
+
     cfg = dict(getattr(app, "app_config", {}) or {})
 
     ctk.CTkLabel(

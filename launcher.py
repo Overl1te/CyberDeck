@@ -1,6 +1,12 @@
+#!/usr/bin/env python3
+"""CyberDeck launcher entry point (GUI + server orchestration).
+
+Catches unhandled exceptions and writes a crash log before re-raising.
+"""
 from __future__ import annotations
 
 import os
+import sys
 import traceback
 from datetime import datetime
 
@@ -55,6 +61,28 @@ def _write_crash_log(header: str) -> None:
 
 
 if __name__ == "__main__":
+    # On Windows, python.exe always opens a console window.  When the user
+    # doesn't need it (no -c / --console flag), silently re-launch via
+    # pythonw.exe so only the GUI is visible.
+    if (
+        os.name == "nt"
+        and "-c" not in sys.argv
+        and "--console" not in sys.argv
+    ):
+        exe = sys.executable
+        exe_name = os.path.basename(exe).lower()
+        if exe_name in ("python.exe", "python3.exe"):
+            pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+            if os.path.isfile(pythonw):
+                import subprocess
+
+                subprocess.Popen(
+                    [pythonw] + sys.argv,
+                    creationflags=subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NO_WINDOW,
+                )
+                raise SystemExit(0)
+
     try:
         app = App()
         app.mainloop()

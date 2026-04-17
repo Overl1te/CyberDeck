@@ -302,17 +302,11 @@ class AppNavigationMixin:
         self.settings["tls_cert_path"] = str(self.ent_tls_cert.get()).strip()
         self.settings["tls_key_path"] = str(self.ent_tls_key.get()).strip()
         self.settings["tls_ca_path"] = str(self.ent_tls_ca.get()).strip()
-        if hasattr(self, "sw_cloudflare_enabled"):
-            self.settings["cloudflare_enabled"] = bool(self.sw_cloudflare_enabled.get())
-        if hasattr(self, "ent_cloudflare_binary_path"):
-            self.settings["cloudflare_binary_path"] = str(self.ent_cloudflare_binary_path.get()).strip()
-        if hasattr(self, "ent_cloudflare_tunnel_token"):
-            self.settings["cloudflare_tunnel_token"] = str(self.ent_cloudflare_tunnel_token.get()).strip()
-        if hasattr(self, "ent_cloudflare_hostname"):
-            cloudflare_hostname = str(self.ent_cloudflare_hostname.get()).strip()
-            if cloudflare_hostname and ("://" not in cloudflare_hostname):
-                cloudflare_hostname = f"https://{cloudflare_hostname}"
-            self.settings["cloudflare_hostname"] = cloudflare_hostname
+        self.settings["cloudflare_enabled"] = False
+        self.settings["cloudflare_auto_install"] = False
+        self.settings["cloudflare_binary_path"] = ""
+        self.settings["cloudflare_tunnel_token"] = ""
+        self.settings["cloudflare_hostname"] = ""
         self.settings["qr_mode"] = str(self.qr_mode_var.get() or DEFAULT_SETTINGS["qr_mode"]).strip().lower()
         if self.settings["qr_mode"] not in ("site", "app"):
             self.settings["qr_mode"] = DEFAULT_SETTINGS["qr_mode"]
@@ -543,9 +537,12 @@ class AppNavigationMixin:
                 pass
 
     def toggle_remote_access_action(self) -> Any:
-        """Toggle remote access without forcing a full server restart."""
-        enabled = not bool(self.settings.get("cloudflare_enabled", False))
-        self.settings["cloudflare_enabled"] = enabled
+        """Keep launcher in LAN-only mode and persist disabled remote settings."""
+        self.settings["cloudflare_enabled"] = False
+        self.settings["cloudflare_auto_install"] = False
+        self.settings["cloudflare_binary_path"] = ""
+        self.settings["cloudflare_tunnel_token"] = ""
+        self.settings["cloudflare_hostname"] = ""
         try:
             save_json(self.settings_path, self.settings)
         except Exception as exc:
@@ -561,10 +558,7 @@ class AppNavigationMixin:
 
         try:
             if hasattr(self, "sw_cloudflare_enabled"):
-                if enabled:
-                    self.sw_cloudflare_enabled.select()
-                else:
-                    self.sw_cloudflare_enabled.deselect()
+                self.sw_cloudflare_enabled.deselect()
         except Exception:
             pass
 
@@ -585,11 +579,8 @@ class AppNavigationMixin:
             pass
         try:
             self._set_settings_status(
-                self._inline_text(
-                    "Удалённый доступ включён" if enabled else "Удалённый доступ выключен",
-                    "Remote access enabled" if enabled else "Remote access disabled",
-                ),
-                COLOR_ACCENT if enabled else COLOR_TEXT_DIM,
+                self.tr("remote_access_lan_only"),
+                COLOR_TEXT_DIM,
             )
         except Exception:
             pass
@@ -937,9 +928,8 @@ class AppNavigationMixin:
     def _help_runtime_summary(self) -> str:
         """Build compact launcher/server snapshot shown in the help window."""
         local_origin = str(self._local_access_origin() or "").strip() or "-"
-        public_origin = str(self._public_access_origin() or "").strip() or self._inline_text("не активен", "not active")
-        remote_status = str(getattr(self, "cloudflare_status", "disabled") or "disabled")
-        mode = "PUBLIC" if remote_status == "online" else "LAN"
+        public_origin = str(self.tr("remote_access_lan_only") or "").strip()
+        mode = "LAN"
         if not bool(getattr(self, "server_online", False)):
             mode = "OFFLINE"
 
@@ -962,9 +952,6 @@ class AppNavigationMixin:
             f"{self._inline_text('Лог-файл', 'Log file')}: {str(getattr(self, 'log_file', '') or '-')}",
             f"{self._inline_text('Последний sync', 'Last sync')}: {last_sync}",
         ]
-        last_error = str(getattr(self, "cloudflare_last_error", "") or "").strip()
-        if last_error:
-            lines.append(f"{self._inline_text('Проблема публичного доступа', 'Public access issue')}: {last_error}")
         return "\n".join(lines)
 
     def _scrub_sensitive_payload(self, value: Any) -> Any:
@@ -1004,21 +991,21 @@ class AppNavigationMixin:
                 "server_version": str(getattr(self, "server_version", "") or ""),
                 "status_text": str(getattr(self, "status_text", "") or ""),
                 "local_access": str(self._local_access_origin() or ""),
-                "public_access": str(self._public_access_origin() or ""),
+                "public_access": "",
                 "log_file": str(getattr(self, "log_file", "") or ""),
                 "cloudflare": {
-                    "status": str(getattr(self, "cloudflare_status", "") or ""),
-                    "public_url": str(getattr(self, "cloudflare_public_url", "") or ""),
-                    "last_error": str(getattr(self, "cloudflare_last_error", "") or ""),
-                    "target_url": str(getattr(self, "cloudflare_target_url", "") or ""),
-                    "binary_path": str(getattr(self, "cloudflare_binary_resolved", "") or ""),
+                    "status": "disabled",
+                    "public_url": "",
+                    "last_error": "",
+                    "target_url": "",
+                    "binary_path": "",
                 },
                 "settings": {
                     "tls_enabled": bool(self.settings.get("tls_enabled", False)),
                     "preferred_port": int(self.settings.get("preferred_port", DEFAULT_PORT) or DEFAULT_PORT),
-                    "cloudflare_enabled": bool(self.settings.get("cloudflare_enabled", False)),
-                    "cloudflare_auto_install": bool(self.settings.get("cloudflare_auto_install", True)),
-                    "cloudflare_hostname": str(self.settings.get("cloudflare_hostname", "") or ""),
+                    "cloudflare_enabled": False,
+                    "cloudflare_auto_install": False,
+                    "cloudflare_hostname": "",
                     "qr_mode": str(self.settings.get("qr_mode", "app") or "app"),
                     "devices_panel_visible": bool(self.settings.get("devices_panel_visible", True)),
                 },
